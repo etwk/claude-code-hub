@@ -6172,10 +6172,7 @@ function parseRerankUsage(parsed: unknown): {
       // output does not make an otherwise total-only report ambiguous.
       usageMetrics = { input_tokens: totalTokens, output_tokens: outputTokens ?? 0 };
     } else {
-      if (
-        inputTokens === undefined &&
-        (outputTokens === undefined || (outputTokens === 0 && totalTokens !== undefined))
-      ) {
+      if (inputTokens === undefined && (outputTokens ?? 0) === 0) {
         return;
       }
       usageMetrics = {};

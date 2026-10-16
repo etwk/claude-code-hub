@@ -1,4 +1,5 @@
 import { logger } from "@/lib/logger";
+import { normalizeEndpointPath, V1_ENDPOINT_PATHS } from "./proxy/endpoint-paths";
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -111,7 +112,10 @@ export function buildProxyUrl(baseUrl: string, requestUrl: URL): string {
     // 解析baseUrl
     const baseUrlObj = new URL(baseUrl);
     const basePath = baseUrlObj.pathname.replace(/\/$/, ""); // 移除末尾斜杠
-    const requestPath = requestUrl.pathname; // 原始请求路径（如 /v1/messages）
+    const requestPath =
+      normalizeEndpointPath(requestUrl.pathname) === V1_ENDPOINT_PATHS.RERANK
+        ? V1_ENDPOINT_PATHS.RERANK
+        : requestUrl.pathname;
 
     // Case 1: baseUrl 已是 requestPath 的前缀（例如 base=/v1/messages, req=/v1/messages/count_tokens）
     // 直接使用 requestPath，避免丢失子路径。

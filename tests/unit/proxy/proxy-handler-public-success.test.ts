@@ -168,7 +168,82 @@ describe("handleProxyRequest public success behavior", () => {
     expect(body).toContain("event: message_stop");
     expect(boundary.send).toHaveBeenCalledOnce();
     expect(boundary.fakeStreamingCalls).toBe(1);
+    expect(observedSession?.request.message.stream).toBe(false);
   });
+
+  it.each([true, false])("keeps Chat fake streaming for stream=%s", async (stream) => {
+    boundary.loadSettings.mockResolvedValue({
+      ...defaultSettings,
+      fakeStreamingWhitelist: [{ model: "chat-model", groupTags: [] }],
+    });
+    const completion = {
+      id: "chatcmpl_fake",
+      object: "chat.completion",
+      model: "chat-model",
+      choices: [
+        { index: 0, message: { role: "assistant", content: "generated" }, finish_reason: "stop" },
+      ],
+    };
+    boundary.send.mockResolvedValue(
+      new Response(JSON.stringify(completion), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+
+    const response = await handleProxyRequest(
+      createContext("/v1/chat/completions", { model: "chat-model", messages: [], stream })
+    );
+
+    expect(response.status).toBe(200);
+    expect(observedSession?.request.message.stream).toBe(false);
+    expect(boundary.send).toHaveBeenCalledOnce();
+    expect(boundary.fakeStreamingCalls).toBe(1);
+    if (stream) {
+      expect(response.headers.get("content-type")).toContain("text/event-stream");
+      const body = await response.text();
+      expect(body).toContain('"object":"chat.completion.chunk"');
+      expect(body).toContain('"content":"generated"');
+      expect(body).toContain("data: [DONE]");
+    } else {
+      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(await response.json()).toEqual(completion);
+    }
+  });
+
+  it.each(["/v1/rerank", "/v1/rerank/", "/v1/ReRaNk", "/V1/ReRaNk/"])(
+    "bypasses fake streaming for a whitelisted reranker on %s",
+    async (pathname) => {
+      boundary.loadSettings.mockResolvedValue({
+        ...defaultSettings,
+        fakeStreamingWhitelist: [{ model: "reranker", groupTags: [] }],
+      });
+      const request = { model: "reranker", query: "hello", documents: ["hello world"] };
+      const result = {
+        id: "rerank_1",
+        model: "reranker",
+        results: [{ index: 0, relevance_score: 0.98 }],
+      };
+      boundary.send.mockResolvedValue(
+        new Response(JSON.stringify(result), {
+          status: 200,
+          headers: { "content-type": "application/json", "x-upstream-rerank": "preserved" },
+        })
+      );
+
+      const response = await handleProxyRequest(createContext(pathname, request));
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(response.headers.get("x-upstream-rerank")).toBe("preserved");
+      expect(await response.json()).toEqual(result);
+      expect(observedSession?.originalFormat).toBe("openai");
+      expect(observedSession?.request.message).toEqual(request);
+      expect(observedSession?.request.message).not.toHaveProperty("stream");
+      expect(boundary.send).toHaveBeenCalledOnce();
+      expect(boundary.fakeStreamingCalls).toBe(1);
+    }
+  );
 
   it("normalizes Responses input and output at the public boundary", async () => {
     boundary.send.mockImplementation(

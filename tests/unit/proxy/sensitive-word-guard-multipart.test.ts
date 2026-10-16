@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/drizzle/db", () => ({
   db: {
@@ -45,6 +45,7 @@ vi.mock("@/lib/sensitive-word-detector", () => ({
 
 import { ProxySensitiveWordGuard } from "@/app/v1/_lib/proxy/sensitive-word-guard";
 import { ProxySession } from "@/app/v1/_lib/proxy/session";
+import { sensitiveWordDetector } from "@/lib/sensitive-word-detector";
 
 function createContext(request: Request) {
   return {
@@ -61,6 +62,19 @@ function createContext(request: Request) {
     },
   } as any;
 }
+
+async function createJsonSession(message: Record<string, unknown>, pathname = "/v1/rerank") {
+  const request = new Request(`https://proxy.example.com${pathname}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(message),
+  });
+  return ProxySession.fromContext(createContext(request));
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 describe("ProxySensitiveWordGuard - multipart image logical body", () => {
   it("inspects multipart image prompt text via the logical body view", async () => {
@@ -117,5 +131,133 @@ describe("ProxySensitiveWordGuard - multipart image logical body", () => {
     const response = await ProxySensitiveWordGuard.ensure(session);
 
     expect(response?.status).toBe(400);
+  });
+});
+
+describe("ProxySensitiveWordGuard - rerank text", () => {
+  it.each(["/v1/rerank", "/V1/RERANK/?trace=1"])(
+    "blocks sensitive query text on %s",
+    async (pathname) => {
+      const session = await createJsonSession(
+        { model: "rerank-model", query: "blocked query", documents: ["safe document"] },
+        pathname
+      );
+
+      const response = await ProxySensitiveWordGuard.ensure(session);
+
+      expect(response?.status).toBe(400);
+      expect(await response?.json()).toMatchObject({
+        error: { message: expect.stringContaining('敏感词："blocked"') },
+      });
+    }
+  );
+
+  it.each([
+    "blocked document",
+    { text: "blocked document" },
+    { content: "blocked document" },
+    { text: "safe text", content: "blocked document" },
+  ])("blocks sensitive document text in %j", async (document) => {
+    const session = await createJsonSession({
+      model: "rerank-model",
+      query: "safe query",
+      documents: ["safe document", document],
+    });
+
+    const response = await ProxySensitiveWordGuard.ensure(session);
+
+    expect(response?.status).toBe(400);
+    expect(await response?.json()).toMatchObject({
+      error: { message: expect.stringContaining('敏感词："blocked"') },
+    });
+  });
+
+  it("ignores opaque fields and leaves rerank document objects unchanged", async () => {
+    const message = {
+      model: "rerank-model",
+      query: "safe query",
+      documents: [
+        "safe document",
+        {
+          text: "safe text",
+          content: "safe content",
+          id: "blocked-id",
+          _text: "blocked private text",
+          metadata: { text: "blocked metadata" },
+          payload: { content: "blocked nested content" },
+        },
+        { id: "blocked opaque document", text: { value: "blocked nested text" } },
+        ["blocked non-text document"],
+        null,
+        123,
+      ],
+      metadata: { query: "blocked metadata query" },
+      _query: "blocked private query",
+    };
+    const session = await createJsonSession(message);
+    const documentObjects = session.request.message.documents;
+
+    const response = await ProxySensitiveWordGuard.ensure(session);
+
+    expect(response).toBeNull();
+    expect(vi.mocked(sensitiveWordDetector.detect).mock.calls.map(([text]) => text)).toEqual([
+      "safe query",
+      "safe document",
+      "safe text",
+      "safe content",
+    ]);
+    expect(session.request.message).toEqual(message);
+    expect(session.request.message.documents).toBe(documentObjects);
+  });
+
+  it.each(["/v1/messages", "/v1/chat/completions", "/v1/responses"])(
+    "does not interpret query or documents as text on %s",
+    async (pathname) => {
+      const session = await createJsonSession(
+        {
+          model: "chat-model",
+          query: "blocked query metadata",
+          documents: ["blocked document metadata", { text: "blocked text metadata" }],
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: "safe message" },
+                { type: "image_url", image_url: { url: "https://example.com/blocked.png" } },
+              ],
+            },
+          ],
+        },
+        pathname
+      );
+
+      expect(await ProxySensitiveWordGuard.ensure(session)).toBeNull();
+      expect(vi.mocked(sensitiveWordDetector.detect).mock.calls.map(([text]) => text)).toEqual([
+        "safe message",
+      ]);
+    }
+  );
+
+  it.each([
+    {
+      pathname: "/v1/messages",
+      message: {
+        messages: [{ role: "user", content: [{ type: "text", text: "blocked message" }] }],
+      },
+    },
+    {
+      pathname: "/v1/chat/completions",
+      message: { messages: [{ role: "user", content: "blocked message" }] },
+    },
+    {
+      pathname: "/v1/responses",
+      message: {
+        input: [{ role: "user", content: [{ type: "input_text", text: "blocked message" }] }],
+      },
+    },
+  ])("preserves existing text blocking on $pathname", async ({ pathname, message }) => {
+    const session = await createJsonSession({ model: "chat-model", ...message }, pathname);
+
+    expect((await ProxySensitiveWordGuard.ensure(session))?.status).toBe(400);
   });
 });
