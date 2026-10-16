@@ -344,18 +344,45 @@ describe("server response write backpressure", () => {
     expect(bridge.ws.close.mock.calls).toEqual([[1011, `outbound_send_${failure}`]]);
   });
 
-  it("destroys upstream and closes once when outbound pending bytes overflow", async () => {
-    const bridge = await startSseBridge(vi.fn());
-    const destroyResponse = vi.spyOn(bridge.response, "destroy");
-    const delta = "x".repeat(600 * 1024);
+  it("paces coalesced large events instead of overflowing a slow client's queue", async () => {
+    const callbacks: Array<(error?: Error) => void> = [];
+    const sent: string[] = [];
+    const bridge = await startSseBridge((payload, callback) => {
+      sent.push(payload);
+      if (callback) callbacks.push(callback);
+    });
+    const delta = "x".repeat(6 * 1024 * 1024);
     const event = `data: ${JSON.stringify({ type: "response.output_text.delta", delta })}\n\n`;
+    bridge.response.emit(
+      "data",
+      event + event + 'data: {"type":"response.completed","response":{"id":"large"}}\n\n'
+    );
+    bridge.response.emit("end");
 
-    // 每个事件都低于单事件上限，但未确认发送的累计字节超过连接预算。
-    bridge.response.emit("data", event + event);
+    expect(sent).toHaveLength(1);
+    expect(bridge.response.destroyed).toBe(false);
+    expect(bridge.ws.close).not.toHaveBeenCalled();
+    callbacks.shift()?.();
+    expect(sent).toHaveLength(2);
+    expect(JSON.parse(sent[1]).delta).toBe(delta);
+    callbacks.shift()?.();
+    expect(sent).toHaveLength(3);
+    expect(JSON.parse(sent[2])).toMatchObject({ type: "response.completed" });
+    callbacks.shift()?.();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(bridge.ws.close).not.toHaveBeenCalled();
+    bridge.response.destroy();
+    bridge.ws.emit("close");
+  });
 
+  it("bounds retained coalesced SSE input while a client send is stalled", async () => {
+    const bridge = await startSseBridge(vi.fn());
+    bridge.response.emit("data", 'data: {"type":"response.created"}\n\n');
+    bridge.response.emit("data", "x".repeat(16 * 1024 * 1024 + 1));
+
+    expect(bridge.response.destroyed).toBe(true);
+    bridge.ws.emit("close");
     expect(bridge.events).toContain("destroy");
-    expect(destroyResponse).toHaveBeenCalledOnce();
-    expect(bridge.ws.close.mock.calls).toEqual([[1011, "outbound_backpressure"]]);
   });
 
   it("sends a fatal terminal frame before initiating close", async () => {

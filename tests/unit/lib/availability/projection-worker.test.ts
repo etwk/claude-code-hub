@@ -2,6 +2,8 @@ import type { SQL } from "drizzle-orm";
 import { CasingCache } from "drizzle-orm/casing";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// Dynamic imports intentionally reload the worker after installing each test's module-boundary mocks.
+
 function sqlToString(sqlObject: unknown): string {
   return (sqlObject as SQL)
     .toQuery({
@@ -209,5 +211,85 @@ describe("availability projection-worker", () => {
 
     expect(executeMock).toHaveBeenCalledTimes(1);
     expect(withAdvisoryLock).not.toHaveBeenCalled();
+  });
+
+  it("bootstrapBackfill does not enqueue while another instance holds the lock", async () => {
+    const executeMock = vi.fn(async () => []);
+    const withAdvisoryLock = vi.fn(async () => ({ ran: false }));
+
+    vi.doMock("@/drizzle/db", () => ({
+      db: { execute: executeMock, transaction: vi.fn() },
+    }));
+    vi.doMock("@/lib/migrate", () => ({ withAdvisoryLock }));
+    vi.doMock("@/lib/logger", () => ({
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    }));
+
+    const { __test__ } = await import("@/lib/availability/projection-worker");
+    await __test__.bootstrapBackfill();
+
+    expect(executeMock).toHaveBeenCalledTimes(1);
+    expect(withAdvisoryLock).toHaveBeenCalledWith(
+      "claude-code-hub:availability-projection-backfill",
+      expect.any(Function),
+      { skipIfLocked: true }
+    );
+  });
+
+  it("bootstrapBackfill rechecks completion after acquiring leadership", async () => {
+    const executeMock = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ key: "backfill_done" }]);
+    const withAdvisoryLock = vi.fn(async (_name: string, fn: () => Promise<unknown>) => ({
+      ran: true,
+      result: await fn(),
+    }));
+
+    vi.doMock("@/drizzle/db", () => ({
+      db: { execute: executeMock, transaction: vi.fn() },
+    }));
+    vi.doMock("@/lib/migrate", () => ({ withAdvisoryLock }));
+    vi.doMock("@/lib/logger", () => ({
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    }));
+
+    const { __test__ } = await import("@/lib/availability/projection-worker");
+    await __test__.bootstrapBackfill();
+
+    expect(executeMock).toHaveBeenCalledTimes(2);
+    expect(withAdvisoryLock).toHaveBeenCalledTimes(1);
+  });
+
+  it("bootstrapBackfill leaves completion unset when stopped between committed chunks", async () => {
+    const executeMock = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockImplementationOnce(async () => {
+        Reflect.set(globalThis, "__CCH_AVAIL_PROJ_WORKER__", { stopRequested: true });
+        return [{ n: 2 }];
+      });
+    const withAdvisoryLock = vi.fn(async (_name: string, fn: () => Promise<unknown>) => ({
+      ran: true,
+      result: await fn(),
+    }));
+
+    vi.doMock("@/drizzle/db", () => ({
+      db: { execute: executeMock, transaction: vi.fn() },
+    }));
+    vi.doMock("@/lib/migrate", () => ({ withAdvisoryLock }));
+    vi.doMock("@/lib/logger", () => ({
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    }));
+
+    const { __test__ } = await import("@/lib/availability/projection-worker");
+    await __test__.bootstrapBackfill();
+
+    expect(executeMock).toHaveBeenCalledTimes(3);
+    expect(withAdvisoryLock).toHaveResolvedWith({
+      ran: true,
+      result: { skipped: false, inserted: 2 },
+    });
   });
 });

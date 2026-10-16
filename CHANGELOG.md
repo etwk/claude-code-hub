@@ -25,6 +25,17 @@
 
 ### 修复
 
+- 修复 Codex review 指出的 rerank 用量优先级、规范路径转发、fake-streaming 误拦截、
+  query/文档敏感词绕过与模型错误未本地化问题
+- 修复 availability 历史回填完成标记的 PostgreSQL 参数类型推导失败；重启恢复时同时识别
+  尚未发布的 outbox 事件，避免重复入队，保留实时终态触发器
+- 修复 Next 自动 upgrade listener 与公开 Responses WebSocket listener 争抢连接；
+  无显式会话标识时使用可信 WebSocket 会话标记，保持跨轮上游连接身份稳定
+- Responses WebSocket 出站及单事件上限与原生上游的 8 MiB 上限一致，发送确认前暂停 SSE 解析，
+  保留有界队列、UTF-8 字节检查与超时，超限显式报错而非截断或伪造成功
+- 修复原生传输的 AbortError / ResponseAborted 被最终错误处理器误记为 500 的问题，
+  客户端取消按 499 / CLIENT_ABORTED 记录，保持真实上游 499 的分类不变
+- 补充数据库与 Redis 一致备份、新库恢复和升级后新增账本记录保留的回滚流程
 - 修复上游响应流发生 error 后 Node/Undici body 未完成销毁的问题：Node-to-Web adapter 和 demand-driven pump
   现在在源流错误终态显式取消、销毁底层流，并为异步 destroy error 保留有界保护；同时将 raw body 的兜底错误监听改为一次性监听，
   避免 HTTP/2 reset、客户端断开和竞速取消路径长期保留 socket 与 ArrayBuffer backing store (#1430)
