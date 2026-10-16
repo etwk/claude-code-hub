@@ -31,10 +31,11 @@ jobs:
   release-pipeline:
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    # 跳过由GitHub Actions创建的提交,避免死循环 (仅对push事件生效)
+    # Fork main images are published by main-image.yml without mutating branches or tags.
     if: |
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.pusher.name != 'github-actions[bot]' && !contains(github.event.head_commit.message, '[skip ci]'))
+      github.repository == 'ding113/claude-code-hub' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.pusher.name != 'github-actions[bot]' && !contains(github.event.head_commit.message, '[skip ci]')))
     steps:
       - name: Checkout code
         uses: actions/checkout@v6

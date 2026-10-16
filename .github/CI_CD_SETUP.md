@@ -2,7 +2,39 @@
 
 ## 📋 工作流概览
 
-本项目包含两个独立的 GitHub Actions 工作流：
+## Fork: publish the latest main image
+
+In forks, `main-image.yml` publishes `ghcr.io/<owner>/<repository>:latest` on
+every push to `main`. `workflow_dispatch` also checks out the latest `main`,
+regardless of the workflow branch selected in the UI. The build uses
+`deploy/Dockerfile` for `linux/amd64` and `linux/arm64`.
+
+Each publication also writes `sha-<full-commit-sha>` and the OCI revision label
+from the actual checked-out commit. Runs are serialized so an older build
+cannot finish after a newer publication and move `latest` backwards. The
+application version is `main-<short-sha>`; no source version file, branch, tag,
+or GitHub Release is modified. Failed builds do not publish an image.
+
+The workflow needs only the repository's `GITHUB_TOKEN` with `contents: read`
+and `packages: write`; DockerHub credentials are not required. When the workflow
+itself changes in a PR targeting `main`, CI builds that PR's head for amd64 with
+`push: false` and does not log in to the registry. Publishing starts only after
+the workflow is merged into `main`.
+
+For this fork:
+
+```bash
+docker pull ghcr.io/etwk/claude-code-hub:latest
+```
+
+The inherited `dev.yml` and `release.yml` mutating release jobs run only in
+`ding113/claude-code-hub`; they cannot compete with fork main publication or
+auto-format/push a reviewed fork branch. The installed Codex connector's latest
+commit review must finish with no unresolved findings before merging a PR.
+
+## Upstream release workflows
+
+The following version-release configuration applies to `ding113/claude-code-hub`.
 
 ### 1. PR 构建检查 (`pr-check.yml`)
 
