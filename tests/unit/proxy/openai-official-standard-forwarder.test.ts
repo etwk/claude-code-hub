@@ -101,6 +101,58 @@ describe("ProxyForwarder - official OpenAI endpoints stay on provider URL", () =
     vi.clearAllMocks();
   });
 
+  it("preserves opaque rerank documents while filtering private top-level parameters", async () => {
+    const provider = createProvider("openai-compatible");
+    const session = createSession("/v1/rerank?trace=one%2Ftwo", "openai-compatible");
+    const documents = [
+      "Berlin is in Germany.",
+      { text: "Paris is in France.", _id: "doc-1", metadata: { _source: "catalog" } },
+    ];
+    const body = {
+      model: "rerank-example",
+      query: "Which city is in France?",
+      documents,
+      top_n: 1,
+      return_documents: true,
+      _private: "do not forward",
+    };
+    session.method = "POST";
+    session.request.message = body;
+    session.request.model = body.model;
+
+    let capturedUrl: string | null = null;
+    let capturedBody: BodyInit | null | undefined;
+    vi.spyOn(ProxyForwarder as never, "fetchWithoutAutoDecode").mockImplementationOnce(
+      async (url: string, init: RequestInit) => {
+        capturedUrl = url;
+        capturedBody = init.body;
+        return new Response(JSON.stringify({ results: [] }), {
+          headers: { "content-type": "application/json" },
+        });
+      }
+    );
+    const { doForward } = ProxyForwarder as unknown as {
+      doForward: (session: ProxySession, provider: Provider, baseUrl: string) => Promise<Response>;
+    };
+
+    await doForward(session, provider, provider.url);
+
+    expect(capturedUrl).toBe("https://openai.example.com/openai/v1/rerank?trace=one%2Ftwo");
+    expect(JSON.parse(capturedBody as string)).toEqual({
+      model: body.model,
+      query: body.query,
+      documents,
+      top_n: 1,
+      return_documents: true,
+    });
+    expect(body._private).toBe("do not forward");
+    expect(documents[1]).toEqual({
+      text: "Paris is in France.",
+      _id: "doc-1",
+      metadata: { _source: "catalog" },
+    });
+  });
+
   it("does not route /v1/files through MCP passthrough URL", async () => {
     const provider = createProvider("openai-compatible");
     const session = createSession("/v1/files/file_123/content", "openai-compatible");

@@ -101,6 +101,7 @@ import { type DiscoveryAction, DiscoveryCoordinator } from "./discovery-coordina
 import { startDiscoveryLeaseHeartbeat } from "./discovery-lease-heartbeat";
 import { type DiscoveryProtocol, DiscoveryValidityParser } from "./discovery-validity";
 import { isStandardProxyEndpointPath } from "./endpoint-family-catalog";
+import { normalizeEndpointPath, V1_ENDPOINT_PATHS } from "./endpoint-paths";
 import { resolveEndpointPolicy, shouldEnforceStrictEndpointPoolPolicy } from "./endpoint-policy";
 import {
   ALL_PROVIDERS_UNAVAILABLE_MESSAGE,
@@ -957,9 +958,10 @@ function buildEndpointAttemptKey(endpointId: number | null, endpointUrl: string)
  * 目的：防止私有参数（下划线前缀）泄露到上游供应商导致 "Unsupported parameter" 错误
  *
  * @param obj - 原始请求对象
+ * @param recursive - 是否递归过滤嵌套的应用数据
  * @returns 过滤后的请求对象
  */
-function filterPrivateParameters(obj: unknown): unknown {
+function filterPrivateParameters(obj: unknown, recursive = true): unknown {
   // 非对象类型直接返回
   if (typeof obj !== "object" || obj === null) {
     return obj;
@@ -967,7 +969,7 @@ function filterPrivateParameters(obj: unknown): unknown {
 
   // 数组类型递归处理
   if (Array.isArray(obj)) {
-    return obj.map((item) => filterPrivateParameters(item));
+    return recursive ? obj.map((item) => filterPrivateParameters(item)) : obj;
   }
 
   // 对象类型：过滤下划线前缀的键
@@ -979,8 +981,7 @@ function filterPrivateParameters(obj: unknown): unknown {
       // 私有参数：跳过
       removedKeys.push(key);
     } else {
-      // 公开参数：递归过滤值
-      filtered[key] = filterPrivateParameters(value);
+      filtered[key] = recursive ? filterPrivateParameters(value) : value;
     }
   }
 
@@ -3816,10 +3817,11 @@ export class ProxyForwarder {
             });
           }
         } else {
-          const filteredMessage = filterPrivateParameters(session.request.message) as Record<
-            string,
-            unknown
-          >;
+          // Rerank documents are opaque application data; filter only private top-level parameters.
+          const filteredMessage = filterPrivateParameters(
+            session.request.message,
+            normalizeEndpointPath(requestPath) !== V1_ENDPOINT_PATHS.RERANK
+          ) as Record<string, unknown>;
 
           // 将 metadata.user_id 注入放在私有参数过滤之后，避免受过滤逻辑影响。
           let messageToSend: Record<string, unknown> = filteredMessage;

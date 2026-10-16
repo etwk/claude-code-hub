@@ -71,6 +71,13 @@ const FAMILY_SAMPLES = [
     modelRequired: true,
   },
   {
+    id: "openai-rerank",
+    path: "/v1/rerank",
+    format: "openai",
+    accountingTier: "optional_usage",
+    modelRequired: true,
+  },
+  {
     id: "openai-moderations",
     path: "/v1/moderations",
     format: "openai",
