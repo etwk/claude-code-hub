@@ -109,6 +109,35 @@ AIGoCode 为 CCH 的用户提供了特别福利，通过此链接注册的用户
 - 🔁 **Session 管理**：5 分钟上下文缓存，记录决策链，避免频繁切换供应商并保留全链路审计。
 - 🔄 **OpenAI 兼容端点**：支持 `/v1/chat/completions`（OpenAI 兼容格式），工具调用与 reasoning 字段透传，严格同格式路由，无跨格式转换。
 
+### Rerank API
+
+使用 CCH API Key 向 `POST /v1/rerank` 发送非流式 JSON。配置上游支持重排的
+**OpenAI Compatible** 供应商，并将重排模型加入其模型白名单；此端点不使用
+Responses 或 Messages 供应商。供应商 URL 可以是根地址、带版本的基础地址或完整
+rerank 端点，CCH 会避免重复拼接版本与端点后缀。
+
+```json
+{
+  "model": "your-reranker",
+  "query": "What is the capital of France?",
+  "documents": ["Berlin is the capital of Germany.", "Paris is the capital of France."],
+  "top_n": 1,
+  "return_documents": true
+}
+```
+
+`model` 必须是非空白字符串。认证、用户及供应商模型白名单、供应商分组、速率限制
+和消费额度沿用正常 CCH 流程；query 与 documents 的具体校验由上游负责。文档对象
+保持原样，包括下划线开头的文档字段；CCH 仍会过滤顶层私有参数，并应用已配置的
+请求过滤规则。成功 JSON 响应保留上游的结果、分数、文档与元数据。
+
+Token 用量可选。计费只选择一个来源，不叠加不同报告：依次优先标准 `usage` 的
+输入/输出字段、`meta.billed_units` 的输入/输出字段、标准总量、billed 总量、
+`meta.tokens` 的输入/输出字段。计数必须是非负安全整数，显式零值会保留。仅有
+总量时按输入消耗计费，输出为零，不视为生成文本；正数输出不会用于反推输入拆分。
+`search_units` 不转换为 token。缺少 token 用量时，成功响应仍可使用现有按次计费，
+不会虚构 token 数量。
+
 ## ⚡️ 快速开始 Quick Start
 
 ### 环境要求

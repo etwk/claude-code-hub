@@ -1,8 +1,11 @@
 import { describe, expect, test } from "vitest";
+import { resolveEndpointFamilyByPath } from "@/app/v1/_lib/proxy/endpoint-family-catalog";
 import { isRawPassthroughEndpointPath } from "@/app/v1/_lib/proxy/endpoint-policy";
 import {
   isCountTokensEndpointPath,
   isResponseCompactEndpointPath,
+  isStandardEndpointPath,
+  isStrictStandardEndpointPath,
 } from "@/app/v1/_lib/proxy/endpoint-paths";
 import { ProxySession } from "@/app/v1/_lib/proxy/session";
 
@@ -27,6 +30,29 @@ function isCountTokensRequestWithEndpoint(pathname: string | null): boolean {
 }
 
 describe("endpoint path normalization", () => {
+  test.each(["/v1/rerank/", "/V1/RERANK", "/V1/RERANK/?trace=1"])(
+    "rerank uses standard guarded routing for normalized variant %s",
+    (pathname) => {
+      expect(resolveEndpointFamilyByPath(pathname)?.id).toBe("openai-rerank");
+      expect(isStandardEndpointPath(pathname)).toBe(true);
+      expect(isStrictStandardEndpointPath(pathname)).toBe(true);
+      expect(isRawPassthroughEndpointPath(pathname)).toBe(false);
+    }
+  );
+
+  test.each([
+    "/v1/rerank/jobs",
+    "/v1/reranks",
+    "/v1/rerank-extra",
+    "/v1/rerank//",
+    "/rerank",
+    "/v2/rerank",
+  ])("rerank does not claim unsupported path %s", (pathname) => {
+    expect(resolveEndpointFamilyByPath(pathname)).toBeNull();
+    expect(isStandardEndpointPath(pathname)).toBe(false);
+    expect(isStrictStandardEndpointPath(pathname)).toBe(false);
+  });
+
   test.each(countTokensVariants)("count_tokens stays classified for variant %s", (pathname) => {
     expect(isCountTokensEndpointPath(pathname)).toBe(true);
     expect(isRawPassthroughEndpointPath(pathname)).toBe(true);

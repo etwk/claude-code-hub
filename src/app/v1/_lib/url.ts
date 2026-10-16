@@ -9,6 +9,7 @@ const targetEndpoints = [
   "/messages", // Claude Messages API
   "/chat/completions", // OpenAI Compatible
   "/embeddings", // OpenAI Compatible Embeddings
+  "/rerank", // OpenAI Compatible Rerank
   "/images", // OpenAI Compatible Images API
   "/audio/transcriptions", // OpenAI Compatible Audio API
   "/audio/translations", // OpenAI Compatible Audio API

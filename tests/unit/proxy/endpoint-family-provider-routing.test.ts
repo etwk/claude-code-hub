@@ -1,6 +1,9 @@
+import { Context } from "hono";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { listKnownEndpointFamilies } from "@/app/v1/_lib/proxy/endpoint-family-catalog";
 import { detectFormatByEndpoint } from "@/app/v1/_lib/proxy/format-mapper";
+import { ProxySession } from "@/app/v1/_lib/proxy/session";
+import type { ProviderChainItem } from "@/types/message";
 import type { Provider } from "@/types/provider";
 
 const circuitBreakerMocks = vi.hoisted(() => ({
@@ -63,6 +66,12 @@ const ENDPOINT_PROVIDER_CASES = [
     id: "openai-embeddings",
     path: "/v1/embeddings",
     requestedModel: "text-embedding-3-large",
+    expectedProviderType: "openai-compatible",
+  },
+  {
+    id: "openai-rerank",
+    path: "/v1/rerank",
+    requestedModel: "rerank-v3.5",
     expectedProviderType: "openai-compatible",
   },
   {
@@ -408,6 +417,69 @@ describe("endpoint family -> provider routing matrix", () => {
 
       expect(provider?.providerType).toBe(expectedProviderType);
       expect(context.requestedModel).toBe(requestedModel);
+    }
+  );
+
+  test.each([true, false])(
+    "rerank body respects provider types and model allowlists (eligible provider: %s)",
+    async (hasEligibleProvider) => {
+      const ProxyProviderResolver = await setupResolverMocks();
+      const body = {
+        model: "rerank-v3.5",
+        query: "Which city is in France?",
+        documents: ["Paris is in France.", { text: "Berlin is in Germany.", title: "Germany" }],
+        top_n: 1,
+        return_documents: true,
+      };
+      const request = new Request("https://hub.example.com/v1/rerank", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const session = await ProxySession.fromContext(new Context(request));
+      const format = detectFormatByEndpoint(session.requestUrl.pathname);
+      if (!format) {
+        throw new Error("Expected rerank endpoint format");
+      }
+      expect(format).toBe("openai");
+      session.setOriginalFormat(format);
+
+      const eligibleProvider = createTestProvider(3, "openai-compatible", {
+        allowedModels: [body.model],
+        mcpPassthroughType: "custom",
+        mcpPassthroughUrl: "https://mcp.example.com/tools",
+      });
+      const providers = [
+        createTestProvider(1, "codex", { allowedModels: [body.model] }),
+        createTestProvider(2, "openai-compatible", {
+          allowedModels: ["another-reranker"],
+          modelRedirects: { [body.model]: "another-reranker" },
+        }),
+        ...(hasEligibleProvider ? [eligibleProvider] : []),
+      ];
+      vi.spyOn(session, "getProvidersSnapshot").mockResolvedValue(providers);
+
+      // This suite intentionally exercises the private selection boundary with a real session.
+      const resolver = ProxyProviderResolver as unknown as {
+        pickRandomProvider(
+          session: ProxySession,
+          excludeIds: number[]
+        ): Promise<{
+          provider: Provider | null;
+          context: NonNullable<ProviderChainItem["decisionContext"]>;
+        }>;
+      };
+      const { provider, context } = await resolver.pickRandomProvider(session, []);
+
+      expect(provider?.id ?? null).toBe(hasEligibleProvider ? eligibleProvider.id : null);
+      expect(context.requestedModel).toBe(body.model);
+      expect(context.filteredProviders).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: 1, reason: "format_type_mismatch" }),
+          expect.objectContaining({ id: 2, reason: "model_not_allowed" }),
+        ])
+      );
+      expect(session.request.message).toEqual(body);
     }
   );
 

@@ -8,6 +8,10 @@
 
 ### 新增
 
+- 原生支持 `POST /v1/rerank`：通过 OpenAI Compatible 供应商转发，保留文档字段与重排结果，
+  沿用认证、模型白名单、分组及额度检查；支持标准与 Cohere 风格 token 用量，total-only
+  用量按输入计费，缺少 token 用量时保留现有按次计费行为
+
 - Langfuse 流式请求还原完整最终输出（Claude / OpenAI Chat Completions / Responses / Gemini），避免把原始 SSE 文本当作 generation output
 - Langfuse 将客户端原始请求头写入 generation `client_metadata`（凭据中间打码）
 - 支持 `LANGFUSE_TRACING_ENVIRONMENT` / `LANGFUSE_RELEASE` 传入 LangfuseSpanProcessor

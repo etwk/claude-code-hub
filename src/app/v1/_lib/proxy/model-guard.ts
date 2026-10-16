@@ -1,20 +1,11 @@
+import { normalizeEndpointPath, V1_ENDPOINT_PATHS } from "./endpoint-paths";
 import { ProxyResponses } from "./responses";
 import type { ProxySession } from "./session";
 
 /**
- * Model restriction guard
- *
- * Validates that the requested model is allowed based on user configuration.
- * This check is ONLY performed when the user has configured model restrictions (allowedModels).
- *
- * Logic:
- * - If allowedModels is empty or undefined: skip all checks, allow request
- * - If allowedModels is non-empty:
- *   - Missing or null model → 400 error
- *   - Model doesn't match any allowed pattern (exact, case-insensitive) → 400 error
- *   - Model matches at least one pattern → allow request
- *
- * Matching: case-insensitive exact match
+ * Require a model for rerank scheduling, then enforce user model restrictions.
+ * Other endpoints retain their existing optional-model behavior when unrestricted.
+ * User allowlists use case-insensitive exact matching.
  */
 export class ProxyModelGuard {
   static async ensure(session: ProxySession): Promise<Response | null> {
@@ -22,6 +13,17 @@ export class ProxyModelGuard {
     if (!user) {
       // No user context - skip check (authentication should have failed already)
       return null;
+    }
+
+    if (normalizeEndpointPath(session.requestUrl.pathname) === V1_ENDPOINT_PATHS.RERANK) {
+      const model = session.request.message.model;
+      if (typeof model !== "string" || model.trim() === "") {
+        return ProxyResponses.buildError(
+          400,
+          "Missing required field 'model' for rerank requests.",
+          "invalid_request_error"
+        );
+      }
     }
 
     // Check if model restrictions are configured

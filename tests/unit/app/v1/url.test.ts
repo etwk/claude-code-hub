@@ -40,6 +40,37 @@ describe("buildProxyUrl", () => {
     );
   });
 
+  test.each([
+    ["https://api.example.com", "https://api.example.com/v1/rerank"],
+    ["https://api.example.com/v1/", "https://api.example.com/v1/rerank"],
+    ["https://api.example.com/api/v1", "https://api.example.com/api/v1/rerank"],
+    ["https://api.example.com/api/v1/rerank/", "https://api.example.com/api/v1/rerank"],
+    ["https://api.example.com/rerank", "https://api.example.com/rerank"],
+    ["https://api.example.com/api/rerank?from=base", "https://api.example.com/api/rerank"],
+  ])("rerank joins base %s without duplicating versions or endpoints", (baseUrl, endpointUrl) => {
+    expectBuiltUrl(
+      baseUrl,
+      "/v1/rerank?trace=one%2Ftwo&limit=2",
+      `${endpointUrl}?trace=one%2Ftwo&limit=2`
+    );
+  });
+
+  test("rerank replaces a full endpoint's base query even when the request has none", () => {
+    expectBuiltUrl(
+      "https://api.example.com/api/v1/rerank?from=base",
+      "/v1/rerank",
+      "https://api.example.com/api/v1/rerank"
+    );
+  });
+
+  test("rerank does not collapse a similarly named endpoint in the base URL", () => {
+    expectBuiltUrl(
+      "https://api.example.com/api/rerank-archive",
+      "/v1/rerank",
+      "https://api.example.com/api/rerank-archive/v1/rerank"
+    );
+  });
+
   test("子路径不丢失：baseUrl=/v1/messages + request=/v1/messages/count_tokens", () => {
     expectBuiltUrl(
       "https://api.example.com/v1/messages",

@@ -109,6 +109,40 @@ Register now via <a href="https://pateway.ai/?ch=1ycdoum&aff=T8FV5H42">this link
 - 🔁 **Session management**: Five-minute context cache preserves decision trails, reduces vendor switches, and maintains full auditability.
 - 🔄 **OpenAI-compatible endpoint**: Supports `/v1/chat/completions` (OpenAI-compatible format), passes through tool calls and reasoning fields, enforces strict same-format routing with no cross-format conversion.
 
+### Rerank API
+
+Send non-streaming JSON to `POST /v1/rerank` using a CCH API key. Configure an
+**OpenAI Compatible** provider whose upstream supports reranking, and include the
+reranker in its model allowlist. Responses and Messages providers are not used
+for this endpoint. Provider URLs may be a root, a versioned base, or a complete
+rerank endpoint; CCH avoids duplicating the version or endpoint suffix.
+
+```json
+{
+  "model": "your-reranker",
+  "query": "What is the capital of France?",
+  "documents": ["Berlin is the capital of Germany.", "Paris is the capital of France."],
+  "top_n": 1,
+  "return_documents": true
+}
+```
+
+A nonblank string `model` is required. Authentication, user/provider model
+allowlists, provider groups, rate limits, and spending limits use the normal CCH
+pipeline. Query/document validation belongs to the upstream. Document objects
+remain opaque, including underscore-prefixed document fields; CCH still removes
+private top-level parameters and applies configured request filters. Successful
+JSON responses preserve the upstream results, scores, documents, and metadata.
+
+Token usage is optional. Accounting selects one report without adding competing
+sources: standard `usage` directions, then `meta.billed_units` directions, then
+standard total-only usage, then billed total-only usage, then `meta.tokens`
+directions. Counts must be nonnegative safe integers; explicit zero is retained.
+Total-only usage is consumed input with zero output, not generated text. A
+positive output count does not imply an input split. `search_units` are not
+tokens. Without token usage, existing per-request pricing can still bill a
+successful response; token counts are never fabricated.
+
 ## ⚡️ Quick Start
 
 ### Requirements
