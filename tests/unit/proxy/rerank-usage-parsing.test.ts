@@ -157,18 +157,25 @@ describe("rerank usage parsing", () => {
     expect(result.usageMetrics).toEqual({ input_tokens: 0, output_tokens: 0 });
   });
 
-  it.each([null, [], 7, "invalid", {}, { input_tokens: -1, output_tokens: "2" }])(
-    "does not let empty or invalid standard usage suppress billed tokens: %j",
-    (usage) => {
-      const result = parseUsageFromResponseText(
-        JSON.stringify({ usage, meta: { billed_units: { input_tokens: 13, output_tokens: 0 } } }),
-        "openai-compatible",
-        RERANK_PATH
-      );
+  it.each([
+    null,
+    [],
+    7,
+    "invalid",
+    {},
+    { input_tokens: -1, output_tokens: "2" },
+    { output_tokens: 0 },
+    { completion_tokens: 0 },
+    { input_tokens: -1, output_tokens: 0 },
+  ])("does not let incomplete or invalid standard usage suppress billed tokens: %j", (usage) => {
+    const result = parseUsageFromResponseText(
+      JSON.stringify({ usage, meta: { billed_units: { input_tokens: 13, output_tokens: 0 } } }),
+      "openai-compatible",
+      RERANK_PATH
+    );
 
-      expect(result.usageMetrics).toEqual({ input_tokens: 13, output_tokens: 0 });
-    }
-  );
+    expect(result.usageMetrics).toEqual({ input_tokens: 13, output_tokens: 0 });
+  });
 
   it.each([
     null,
@@ -177,6 +184,7 @@ describe("rerank usage parsing", () => {
     "invalid",
     {},
     { search_units: 1 },
+    { output_tokens: 0 },
     { input_tokens: -1, total_tokens: "2" },
   ])("falls back to raw meta.tokens when billed token usage is unavailable: %j", (billedUnits) => {
     const result = parseUsageFromResponseText(
@@ -189,6 +197,19 @@ describe("rerank usage parsing", () => {
 
     expect(result.usageMetrics).toEqual({ input_tokens: 19, output_tokens: 1 });
     expect(result.usageRecord).toEqual({ input_tokens: 19, output_tokens: 1 });
+  });
+
+  it.each([
+    { usage: { output_tokens: 0 } },
+    { usage: { completion_tokens: 0 } },
+    { meta: { billed_units: { output_tokens: 0 } } },
+  ])("does not treat zero output alone as consumed usage: %j", (response) => {
+    expect(
+      parseUsageFromResponseText(JSON.stringify(response), "openai-compatible", RERANK_PATH)
+    ).toEqual({
+      usageRecord: null,
+      usageMetrics: null,
+    });
   });
 
   it("ignores invalid primary directional fields without suppressing valid standard aliases", () => {

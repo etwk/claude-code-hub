@@ -3,6 +3,7 @@ import "server-only";
 import crypto from "node:crypto";
 import { logger } from "@/lib/logger";
 import { getRedisClient } from "@/lib/redis";
+import { getResponsesWsSessionId, isWebsocketClientRequest } from "../responses-ws/eligibility";
 import { normalizeCodexSessionId } from "./session-extractor";
 
 export type CodexSessionCompletionAction =
@@ -15,6 +16,7 @@ export type CodexSessionCompletionSource =
   | "header_session_id"
   | "header_x_session_id"
   | "body_prompt_cache_key"
+  | "responses_ws_session"
   | "fingerprint_cache"
   | "generated_uuid_v7";
 
@@ -211,7 +213,9 @@ async function getOrCreateSessionIdFromFingerprint(
  *
  * Completion rules:
  * - If either side provides a valid identifier, copy to the missing side
- * - If both are missing/invalid, generate a UUID v7 and keep stable via fingerprint cache
+ * - Otherwise reuse a trusted Responses WS connection marker before generating
+ *   an HTTP request fingerprint. Different turns may carry different input.
+ * - For ordinary HTTP requests, generate a UUID v7 and keep stable via fingerprint cache
  */
 export async function completeCodexSessionIdentifiers(
   args: CompleteArgs
@@ -219,6 +223,13 @@ export async function completeCodexSessionIdentifiers(
   const headerSessionId = normalizeCodexSessionId(args.headers.get("session_id"));
   const headerXSessionId = normalizeCodexSessionId(args.headers.get("x-session-id"));
   const bodyPromptCacheKey = normalizeCodexSessionId(args.requestBody.prompt_cache_key);
+  const responsesWsSessionId =
+    !headerSessionId &&
+    !headerXSessionId &&
+    !bodyPromptCacheKey &&
+    isWebsocketClientRequest(args.headers)
+      ? normalizeCodexSessionId(getResponsesWsSessionId(args.headers))
+      : null;
 
   const missingHeader = !headerSessionId && !headerXSessionId;
   const missingBody = !bodyPromptCacheKey;
@@ -230,7 +241,9 @@ export async function completeCodexSessionIdentifiers(
         ? { sessionId: headerXSessionId, source: "header_x_session_id" }
         : bodyPromptCacheKey
           ? { sessionId: bodyPromptCacheKey, source: "body_prompt_cache_key" }
-          : null;
+          : responsesWsSessionId
+            ? { sessionId: responsesWsSessionId, source: "responses_ws_session" }
+            : null;
 
   // Both required fields present: keep as-is (idempotent)
   // Note: x-session-id is treated as a compatibility header and does not satisfy the requirement

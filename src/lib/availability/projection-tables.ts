@@ -37,6 +37,9 @@ export const outboxEvents = pgTable(
   (t) => [
     unique("outbox_events_event_id_key").on(t.eventId),
     index("idx_outbox_events_unpublished").on(t.id.asc()).where(sql`${t.publishedAt} IS NULL`),
+    index("idx_outbox_events_request_finalized")
+      .on(t.aggregateId)
+      .where(sql`${t.eventType} = 'request_finalized' AND ${t.aggregateType} = 'message_request'`),
   ]
 );
 

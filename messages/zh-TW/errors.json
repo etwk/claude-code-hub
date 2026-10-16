@@ -54,6 +54,7 @@
   "DELETE_FAILED": "刪除失敗，請稍後重試",
 
   "CONNECTION_FAILED": "連接失敗",
+  "CLIENT_ABORTED": "用戶端已中止請求",
   "TIMEOUT": "請求逾時",
   "NETWORK_ERROR": "網路錯誤",
 

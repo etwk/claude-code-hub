@@ -1,3 +1,4 @@
+import { ERROR_CODES, getErrorMessageServer } from "@/lib/utils/error-messages";
 import { normalizeEndpointPath, V1_ENDPOINT_PATHS } from "./endpoint-paths";
 import { ProxyResponses } from "./responses";
 import type { ProxySession } from "./session";
@@ -18,11 +19,11 @@ export class ProxyModelGuard {
     if (normalizeEndpointPath(session.requestUrl.pathname) === V1_ENDPOINT_PATHS.RERANK) {
       const model = session.request.message.model;
       if (typeof model !== "string" || model.trim() === "") {
-        return ProxyResponses.buildError(
-          400,
-          "Missing required field 'model' for rerank requests.",
-          "invalid_request_error"
-        );
+        const { getLocale } = await import("next-intl/server");
+        const message = await getErrorMessageServer(await getLocale(), ERROR_CODES.REQUIRED_FIELD, {
+          field: "model",
+        });
+        return ProxyResponses.buildError(400, message, "invalid_request_error");
       }
     }
 

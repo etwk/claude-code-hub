@@ -1,5 +1,6 @@
 import { logger } from "@/lib/logger";
 import type { SystemSettings } from "@/types/system-config";
+import { resolveEndpointFamilyByPath } from "../endpoint-family-catalog";
 import type { ClientFormat } from "../format-mapper";
 import { ProxyForwarder } from "../forwarder";
 import type { ProxySession } from "../session";
@@ -54,6 +55,11 @@ export async function tryFakeStreamingPath(
     systemSettings.fakeStreamingWhitelist
   );
   if (!eligible) return null;
+
+  // Rerank shares the OpenAI surface, not the Chat streaming response contract.
+  if (resolveEndpointFamilyByPath(session.requestUrl.pathname)?.id === "openai-rerank") {
+    return null;
+  }
 
   const family = familyFromFormat(session.originalFormat);
   if (!family) return null;

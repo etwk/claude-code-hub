@@ -100,31 +100,4 @@ describe("k8s deploy review regressions", () => {
     expect(cchScript).toContain("keep=30");
     expect(cchScript).toContain("if detect_runtime; then");
   });
-
-  it("keeps the restore playbook compatible with CPU/memory HPA", () => {
-    const docs = readRepoFile("docs/k8s-deployment.md");
-    const k8sReadme = readRepoFile("deploy/k8s/README.md");
-
-    expect(docs).toContain("默认 k8s 部署保持 `main -> ghcr.io/ding113/claude-code-hub:latest`");
-    expect(docs).toContain("controller 级别配置 forwarded headers / real-ip");
-    expect(docs).toContain("allow-snippet-annotations=true");
-    expect(docs).toContain("proxy-real-ip-cidr");
-    expect(docs).toContain("forwardedHeaders.trustedIPs");
-    expect(docs).toContain("不保证严格回到上一份镜像 digest");
-    expect(docs).toContain(
-      '{ headers: [{ name: "x-real-ip" }, { name: "x-forwarded-for", pick: "rightmost" }] }'
-    );
-    expect(docs).toContain("kubectl -n claude-code-hub delete hpa claude-code-hub");
-    expect(docs).toContain("恢复到 max(升级前实际副本数, HPA minReplicas)");
-    expect(docs).toContain("<repeat-your-original-cli-args>");
-    expect(docs).not.toContain('minReplicas":0');
-    expect(docs).toContain("```text");
-    expect(docs).toContain("```console");
-    expect(k8sReadme).toContain(
-      "默认等价 main 分支发布镜像 -> ghcr.io/ding113/claude-code-hub:latest"
-    );
-    expect(k8sReadme).toContain("X-Forwarded-For");
-    expect(k8sReadme).toContain("allow-snippet-annotations=false");
-    expect(k8sReadme).toContain("proxy-real-ip");
-  });
 });

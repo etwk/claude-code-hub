@@ -1,6 +1,7 @@
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket, WebSocketServer } from "ws";
+import { completeCodexSessionIdentifiers } from "@/app/v1/_lib/codex/session-completer";
 import { parseSseBody } from "@/app/v1/_lib/proxy/stream-gate/sse-frames";
 import type { Provider } from "@/types/provider";
 import {
@@ -159,6 +160,7 @@ describe("tryResponsesWebsocketUpstream", () => {
 
   afterEach(async () => {
     clearResponsesWsSessionsForTests();
+    vi.unstubAllEnvs();
     if (server) {
       await server.close();
       server = null;
@@ -196,6 +198,90 @@ describe("tryResponsesWebsocketUpstream", () => {
     expect(body).toContain('"type":"response.created"');
     expect(body).toContain('"type":"response.output_text.delta"');
     expect(body).toContain('"type":"response.completed"');
+  });
+
+  it("preserves 2 MiB native output, usage and continuation on the same upstream socket", async () => {
+    vi.stubEnv("CCH_RESPONSES_WS_INTERNAL_SECRET", "native-continuation-local-secret");
+    const output = "x".repeat(2 * 1024 * 1024);
+    const frames: Array<Record<string, unknown>> = [];
+    let connections = 0;
+    server = await startMockServer((socket) => {
+      connections += 1;
+      const connectionResponses = new Set<string>();
+      socket.on("message", (raw) => {
+        const frame = JSON.parse(raw.toString("utf8"));
+        frames.push(frame);
+        if (frame.previous_response_id && !connectionResponses.has(frame.previous_response_id)) {
+          socket.send(
+            JSON.stringify({ type: "error", error: { code: "previous_response_not_found" } })
+          );
+          return;
+        }
+        const id = `resp_large_${frames.length}`;
+        connectionResponses.add(id);
+        socket.send(JSON.stringify({ type: "response.created", response: { id } }));
+        socket.send(JSON.stringify({ type: "response.output_text.delta", delta: output }));
+        socket.send(
+          JSON.stringify({
+            type: "response.completed",
+            response: { id, output, usage: { input_tokens: 8, output_tokens: 1024 } },
+          })
+        );
+      });
+    });
+    const options = {
+      provider: codexProvider(),
+      upstreamUrl: `http://127.0.0.1:${server.port}/v1/responses`,
+      upstreamHeaders: new Headers({ authorization: "Bearer sk-mock" }),
+      sessionId: "native-large-continuation",
+    };
+    for (let turn = 1; turn <= 2; turn += 1) {
+      const headers = new Headers(options.upstreamHeaders);
+      headers.set("x-cch-client-transport", "websocket");
+      headers.set(WS_FORWARD_FLAG_HEADER, "1");
+      headers.set(INTERNAL_SECRET_HEADER, "native-continuation-local-secret");
+      headers.set(RESPONSES_WS_SESSION_HEADER, options.sessionId);
+      const body = {
+        model: "gpt-6.1-sol",
+        input: [{ role: "user", content: `different prompt for turn ${turn}` }],
+        store: false,
+        ...(turn === 2 ? { previous_response_id: "resp_large_1" } : {}),
+      };
+      await completeCodexSessionIdentifiers({
+        keyId: 1,
+        headers,
+        requestBody: body,
+        userAgent: null,
+      });
+      const result = await tryResponsesWebsocketUpstream({
+        ...options,
+        upstreamHeaders: headers,
+        body,
+      });
+      expect("response" in result).toBe(true);
+      if (!("response" in result)) throw new Error("native large turn failed");
+      expect(result.reused).toBe(turn === 2);
+      const events = parseSseBody(
+        await withTimeout(collectSseBody(result.response), 3000, "native large turn did not finish")
+      ).map((frame) => JSON.parse(frame.data));
+      expect(events.map((event) => event.type)).toEqual([
+        "response.created",
+        "response.output_text.delta",
+        "response.completed",
+      ]);
+      expect(events[1].delta).toBe(output);
+      expect(events[2]).toMatchObject({
+        response: {
+          id: `resp_large_${turn}`,
+          output,
+          usage: { input_tokens: 8, output_tokens: 1024 },
+        },
+      });
+    }
+    expect(connections).toBe(1);
+    expect(frames[1]).toMatchObject({ previous_response_id: "resp_large_1", store: false });
+    cleanupResponsesWsSession(options.sessionId);
+    await vi.waitFor(() => expect(server?.wss.clients.size).toBe(0));
   });
 
   it("preserves pretty-printed multiline JSON as complete SSE events", async () => {
@@ -1418,6 +1504,43 @@ describe("tryResponsesWebsocketUpstream", () => {
         clientSocket.terminate();
         await flushProcessEvents();
       }
+      processErrors.stop();
+    }
+  });
+
+  it("cancels buffered large native output without retaining the session or upstream work", async () => {
+    let resolveClosed!: () => void;
+    const closed = new Promise<void>((resolve) => {
+      resolveClosed = resolve;
+    });
+    const processErrors = captureProcessErrors();
+    server = await startMockServer((socket) => {
+      socket.once("close", resolveClosed);
+      socket.on("message", () => {
+        socket.send(JSON.stringify({ type: "response.created", response: { id: "resp_cancel" } }));
+        socket.send(
+          JSON.stringify({ type: "response.output_text.delta", delta: "x".repeat(3 * 1024 * 1024) })
+        );
+        // No terminal event: cancellation must actively stop this upstream.
+      });
+    });
+    try {
+      const result = await tryResponsesWebsocketUpstream({
+        provider: codexProvider(),
+        upstreamUrl: `http://127.0.0.1:${server.port}/v1/responses`,
+        upstreamHeaders: new Headers(),
+        sessionId: "cancel-buffered-large",
+        body: { model: "gpt-6.1-sol", input: "cancel" },
+      });
+      if (!("response" in result)) throw new Error("native turn did not connect");
+      expect(getResponsesWsSessionCountForTests()).toBe(1);
+      await result.response.body!.cancel("client disconnected");
+      await withTimeout(closed, 1000, "cancelled native upstream remained open");
+      await flushProcessEvents();
+      expect(getResponsesWsSessionCountForTests()).toBe(0);
+      expect(processErrors.uncaughtExceptions).toEqual([]);
+      expect(processErrors.unhandledRejections).toEqual([]);
+    } finally {
       processErrors.stop();
     }
   });

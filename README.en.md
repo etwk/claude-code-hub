@@ -134,14 +134,24 @@ remain opaque, including underscore-prefixed document fields; CCH still removes
 private top-level parameters and applies configured request filters. Successful
 JSON responses preserve the upstream results, scores, documents, and metadata.
 
+Accepted case/trailing-slash variants are forwarded with the canonical rerank
+path. Rerank always remains non-streaming, even when its model appears in the
+fake-streaming whitelist. Enabled sensitive-word rules inspect `query`, string
+documents, and direct string document `text`/`content` fields, not opaque metadata.
+Model-validation errors use the existing request-locale translations.
+
 Token usage is optional. Accounting selects one report without adding competing
 sources: standard `usage` directions, then `meta.billed_units` directions, then
 standard total-only usage, then billed total-only usage, then `meta.tokens`
-directions. Counts must be nonnegative safe integers; explicit zero is retained.
+directions. Counts must be nonnegative safe integers; explicit input zero is retained.
+Zero output alone is incomplete and does not suppress a later valid usage report.
 Total-only usage is consumed input with zero output, not generated text. A
 positive output count does not imply an input split. `search_units` are not
 tokens. Without token usage, existing per-request pricing can still bill a
 successful response; token counts are never fabricated.
+
+For schema-changing upgrades, follow the [database rollback procedure](docs/database-upgrade-rollback.md).
+Changing the application image alone does not undo database migrations or triggers.
 
 ## ⚡️ Quick Start
 

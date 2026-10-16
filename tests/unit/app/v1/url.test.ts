@@ -55,6 +55,24 @@ describe("buildProxyUrl", () => {
     );
   });
 
+  test.each(["/V1/ReRank/", "/v1/RERANK", "/v1/rerank/"])(
+    "canonicalizes accepted rerank path %s before joining provider roots",
+    (requestPath) => {
+      for (const [baseUrl, expectedPath] of [
+        ["https://api.example.com", "/v1/rerank"],
+        ["https://api.example.com/v1", "/v1/rerank"],
+        ["https://api.example.com/api/v1", "/api/v1/rerank"],
+        ["https://api.example.com/api/rerank", "/api/rerank"],
+      ]) {
+        expectBuiltUrl(
+          baseUrl,
+          `${requestPath}?trace=one%2Ftwo`,
+          `https://api.example.com${expectedPath}?trace=one%2Ftwo`
+        );
+      }
+    }
+  );
+
   test("rerank replaces a full endpoint's base query even when the request has none", () => {
     expectBuiltUrl(
       "https://api.example.com/api/v1/rerank?from=base",

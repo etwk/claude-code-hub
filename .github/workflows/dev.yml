@@ -14,8 +14,8 @@ jobs:
   dev-build-deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    # 跳过由GitHub Actions创建的提交，避免死循环
-    if: github.event.pusher.name != 'github-actions[bot]' && !contains(github.event.head_commit.message, '[skip ci]')
+    # Fork publication is main-only; keep the upstream branch release behavior unchanged.
+    if: github.repository == 'ding113/claude-code-hub' && github.event.pusher.name != 'github-actions[bot]' && !contains(github.event.head_commit.message, '[skip ci]')
     steps:
       - name: Checkout code
         uses: actions/checkout@v6

@@ -1051,6 +1051,7 @@ describe("CCH Responses WebSocket edge E2E", () => {
   test("turns non-SSE JSON success and error responses into visible WS events", async () => {
     const { harness, close } = await startIsolatedCchEdgeHarness();
     try {
+      const largeOutput = "x".repeat(2 * 1024 * 1024);
       harness.setResponseHandler(({ res, body }) => {
         res.setHeader("content-type", "application/json");
         if (body.input === "json-error") {
@@ -1063,7 +1064,12 @@ describe("CCH Responses WebSocket edge E2E", () => {
           return;
         }
         res.statusCode = 200;
-        res.end(JSON.stringify(responseEnvelope("resp_json_ok", true)));
+        const response = responseEnvelope(
+          body.input === "json-large" ? "resp_json_large" : "resp_json_ok",
+          true
+        );
+        if (body.input === "json-large") response.output[0]!.content[0]!.text = largeOutput;
+        res.end(JSON.stringify(response));
       });
 
       const client = connectRawWsClient(harness.port);
@@ -1074,6 +1080,14 @@ describe("CCH Responses WebSocket edge E2E", () => {
         3000,
         "JSON success was not translated to response.completed"
       );
+
+      sendResponseCreate(client, { model, input: "json-large" });
+      const large = await client.nextMessage(
+        completedResponse("resp_json_large"),
+        3000,
+        "2 MiB JSON terminal event was rejected"
+      );
+      expect(large).toMatchObject({ response: { output: [{ content: [{ text: largeOutput }] }] } });
 
       sendResponseCreate(client, { model, input: "json-error" });
       const error = await client.nextMessage(
@@ -1090,19 +1104,99 @@ describe("CCH Responses WebSocket edge E2E", () => {
     }
   });
 
+  test.each([1024 * 1024 - 256, 1024 * 1024 + 256, 2 * 1024 * 1024, 8 * 1024 * 1024 - 1024])(
+    "delivers a %i-byte output and terminal usage before reusing the connection",
+    async (size) => {
+      const { harness, close } = await startIsolatedCchEdgeHarness();
+      try {
+        const text = "x".repeat(size);
+        harness.setResponseHandler(({ res, body }) => {
+          res.setHeader("content-type", "text/event-stream");
+          const responseId = body.previous_response_id ? "resp_after_large" : "resp_large";
+          const output = body.previous_response_id ? "continued" : text;
+          const response = {
+            ...responseEnvelope(responseId, false),
+            output: [
+              {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: output }],
+              },
+            ],
+            usage: { input_tokens: 8, output_tokens: 1024, total_tokens: 1032 },
+          };
+          res.write(eventChunk({ type: "response.created", response: { id: responseId } }));
+          res.write(eventChunk({ type: "response.output_text.delta", delta: output }));
+          res.end(eventChunk({ type: "response.completed", response }));
+        });
+
+        const client = connectRawWsClient(harness.port);
+        await client.opened;
+        sendResponseCreate(client, {
+          model,
+          input: "large-output",
+          stream: true,
+          max_output_tokens: 1024,
+        });
+        // Exercise the network-facing slow-reader path as well as the
+        // deterministic delayed-send acknowledgements in the unit suite.
+        client.ws.pause();
+        await withTimeout(harness.nextInternalRequest(), 3000, "large turn did not start");
+        await sleep(25);
+        client.ws.resume();
+        const completed = await client.nextMessage(
+          completedResponse("resp_large"),
+          5000,
+          "large output lost its terminal event"
+        );
+        expect(completed).toMatchObject({
+          response: {
+            output: [{ content: [{ text }] }],
+            usage: { input_tokens: 8, output_tokens: 1024, total_tokens: 1032 },
+          },
+        });
+        expect(
+          client.messages.find((message) => wsMessageType(message) === "response.output_text.delta")
+        ).toMatchObject({ delta: text });
+        sendResponseCreate(client, {
+          model,
+          input: "continue",
+          previous_response_id: "resp_large",
+        });
+        await client.nextMessage(
+          completedResponse("resp_after_large"),
+          3000,
+          "continuation failed"
+        );
+        expect(client.ws.readyState).toBe(WebSocket.OPEN);
+        client.ws.close(1000, "test_done");
+        await client.closeEvent;
+      } finally {
+        await close();
+      }
+    }
+  );
+
   test("rejects internal bodies that cannot fit in one outbound WebSocket event", async () => {
     const { harness, close } = await startIsolatedCchEdgeHarness();
     try {
       harness.setResponseHandler(({ res, body }) => {
+        if (body.input === "oversized-envelope") {
+          res.setHeader("content-type", "application/json");
+          // Exactly 8 MiB internally, but the WS terminal envelope adds bytes.
+          res.end(JSON.stringify({ output: "x".repeat(8 * 1024 * 1024 - 13) }));
+          return;
+        }
         if (body.input === "oversized-json") {
           res.statusCode = 200;
           res.setHeader("content-type", "application/json");
-          res.end("x".repeat(1024 * 1024 + 1));
+          res.end("x".repeat(8 * 1024 * 1024 + 1));
           return;
         }
         res.statusCode = 200;
         res.setHeader("content-type", "text/event-stream");
-        res.end(`data: ${"x".repeat(1024 * 1024 + 1)}`);
+        // UTF-8 bytes, not JS character count, define the wire limit.
+        res.end(`data: ${"界".repeat(Math.ceil((8 * 1024 * 1024) / 3))}`);
       });
 
       const jsonClient = connectRawWsClient(harness.port);
@@ -1130,6 +1224,15 @@ describe("CCH Responses WebSocket edge E2E", () => {
         code: 1011,
         reason: "internal_sse_event_too_large",
       });
+
+      const envelopeClient = connectRawWsClient(harness.port);
+      await envelopeClient.opened;
+      sendResponseCreate(envelopeClient, { model, input: "oversized-envelope" });
+      expect(await envelopeClient.closeEvent).toEqual({
+        code: 1011,
+        reason: "outbound_message_too_large",
+      });
+      expect(envelopeClient.messages).toEqual([]);
     } finally {
       await close();
     }
@@ -1620,20 +1723,26 @@ faultRun("Codex CLI through CCH WebSocket fault injection", () => {
   test("aborts the internal response when the real Codex client process disappears", async () => {
     if (!cchFaultHarness) throw new Error("CCH fault harness is not initialized");
     cchFaultHarness.events.length = 0;
-    cchFaultHarness.setResponseHandler(({ res }) => {
+    const generatingRequest = deferred<CchRequestContext>();
+    cchFaultHarness.setResponseHandler((context) => {
+      const { res, body } = context;
       res.statusCode = 200;
       res.setHeader("content-type", "text/event-stream");
+      if (body.generate === false) {
+        res.end(responseEvents("resp_client_drop_warmup", false).map(eventChunk).join(""));
+        return;
+      }
       res.write(":\n\n");
+      generatingRequest.resolve(context);
     });
 
-    const internalRequestPromise = cchFaultHarness.nextInternalRequest();
     const running = spawnCodex(cchFaultHarness.port, invocation, {
       timeoutMs: 60_000,
       extraConfig: retryDisabledConfig(),
       prompt: `Reply exactly ${responseText} after waiting for the stream.`,
     });
     const internalRequest = await withTimeout(
-      internalRequestPromise,
+      generatingRequest.promise,
       15_000,
       "Codex did not open an internal CCH tunnel request before client-drop simulation"
     );
@@ -1662,8 +1771,8 @@ faultRun("Codex CLI through CCH WebSocket fault injection", () => {
       })
     );
 
-    expect(result.code).not.toBe(0);
-    expect(cchInternalRequests(cchFaultHarness.events).length).toBeGreaterThan(0);
-    expect(cchWsCloses(cchFaultHarness.events).length).toBeGreaterThan(0);
+    // Codex can shut down cleanly on SIGTERM; its exit status is not CCH's contract.
+    expect(internalRequest.res.destroyed).toBe(true);
+    expect(internalRequest.res.writableEnded).toBe(false);
   }, 90_000);
 });

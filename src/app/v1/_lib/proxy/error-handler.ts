@@ -1,3 +1,4 @@
+import { getLocale } from "next-intl/server";
 import { findSafeDatabaseError } from "@/drizzle/admitted-client";
 import { getCachedSystemSettings } from "@/lib/config/system-settings-cache";
 import {
@@ -20,6 +21,7 @@ import { attachSessionIdToErrorResponse } from "./error-session-id";
 import {
   ALL_PROVIDERS_UNAVAILABLE_MESSAGE,
   getErrorOverrideAsync,
+  isClientAbortError,
   isEmptyResponseError,
   isRateLimitError,
   ProxyError,
@@ -267,8 +269,20 @@ export class ProxyErrorHandler {
       return await attachSessionIdToErrorResponse(session.sessionId, response);
     }
 
-    // 识别 ProxyError，提取详细信息（包含上游响应）
-    if (error instanceof ProxyError) {
+    // Native transport aborts have no HTTP status; preserve the local-abort
+    // classification already used by the forwarder instead of recording 500.
+    if (error instanceof Error && isClientAbortError(error)) {
+      try {
+        clientErrorMessage = await getErrorMessageServer(
+          await getLocale(),
+          ERROR_CODES.CLIENT_ABORTED
+        );
+      } catch {
+        clientErrorMessage = "An error occurred";
+      }
+      logErrorMessage = "CLIENT_ABORTED";
+      statusCode = 499;
+    } else if (error instanceof ProxyError) {
       // 客户端消息：不含供应商名称，保护敏感信息
       clientErrorMessage = error.getClientSafeMessage();
       // 日志消息：包含供应商名称，便于问题排查

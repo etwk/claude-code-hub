@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { completeCodexSessionIdentifiers } from "@/app/v1/_lib/codex/session-completer";
 
 let redisClientRef: any = null;
 
@@ -59,6 +60,16 @@ function makeFakeRedis() {
   return { client, store };
 }
 
+function trustedResponsesWsHeaders(sessionId = "ee388dba-142b-4fb9-bd71-91e36278e4d0") {
+  vi.stubEnv("CCH_RESPONSES_WS_INTERNAL_SECRET", "codex-completion-local-secret");
+  return new Headers({
+    "x-cch-client-transport": "websocket",
+    "x-cch-responses-ws-forward": "1",
+    "x-cch-internal-secret": "codex-completion-local-secret",
+    "x-cch-responses-ws-session": sessionId,
+  });
+}
+
 describe("Codex session completer", () => {
   beforeEach(() => {
     redisClientRef = null;
@@ -68,6 +79,8 @@ describe("Codex session completer", () => {
       process.env.SESSION_TTL = ORIGINAL_SESSION_TTL;
     }
   });
+
+  afterEach(() => vi.unstubAllEnvs());
 
   test("completes body.prompt_cache_key from header session_id", async () => {
     const { completeCodexSessionIdentifiers } = await import(
@@ -135,6 +148,73 @@ describe("Codex session completer", () => {
     expect(result.sessionId).toBe(sessionId);
     expect(headers.get("session_id")).toBe(sessionId);
     expect(body.prompt_cache_key).toBe(sessionId);
+  });
+
+  test("keeps changing WS turns on one connection identity without a request fingerprint", async () => {
+    const { client } = makeFakeRedis();
+    redisClientRef = client;
+    const sessionIds: string[] = [];
+    for (const input of ["first prompt", "different continuation prompt"]) {
+      const headers = trustedResponsesWsHeaders();
+      const body = makeCodexRequestBody({ input: [{ role: "user", content: input }] });
+      const completed = await completeCodexSessionIdentifiers({
+        keyId: 1,
+        headers,
+        requestBody: body,
+        userAgent: null,
+      });
+      expect(completed).toMatchObject({
+        source: "responses_ws_session",
+        action: "completed_missing_fields",
+      });
+      expect(headers.get("session_id")).toBe(completed.sessionId);
+      expect(headers.get("x-session-id")).toBe(completed.sessionId);
+      expect(body.prompt_cache_key).toBe(completed.sessionId);
+      sessionIds.push(completed.sessionId);
+    }
+    expect(sessionIds[0]).toBe(sessionIds[1]);
+    expect(client.get).not.toHaveBeenCalled();
+    expect(client.set).not.toHaveBeenCalled();
+  });
+
+  test.each(["session_id", "x-session-id", "prompt_cache_key"] as const)(
+    "preserves explicit %s over the trusted WS fallback",
+    async (field) => {
+      const explicit = "sess_client_123456789012345678901";
+      const headers = trustedResponsesWsHeaders();
+      const body = makeCodexRequestBody();
+      if (field === "prompt_cache_key") body.prompt_cache_key = explicit;
+      else headers.set(field, explicit);
+      const completed = await completeCodexSessionIdentifiers({
+        keyId: 1,
+        headers,
+        requestBody: body,
+        userAgent: null,
+      });
+      expect(completed.sessionId).toBe(explicit);
+      expect(completed.source).not.toBe("responses_ws_session");
+      expect(headers.get("session_id")).toBe(explicit);
+      expect(body.prompt_cache_key).toBe(explicit);
+    }
+  );
+
+  test.each([
+    ["x-cch-internal-secret", "forged"],
+    ["x-cch-responses-ws-forward", null],
+    ["x-cch-client-transport", "http"],
+    ["x-cch-responses-ws-session", "invalid/session_marker_123456789"],
+  ] as const)("rejects an untrusted or invalid WS marker: %s=%s", async (header, value) => {
+    const headers = trustedResponsesWsHeaders();
+    if (value === null) headers.delete(header);
+    else headers.set(header, value);
+    const completed = await completeCodexSessionIdentifiers({
+      keyId: 1,
+      headers,
+      requestBody: makeCodexRequestBody(),
+      userAgent: null,
+    });
+    expect(completed.source).toBe("generated_uuid_v7");
+    expect(completed.sessionId).toMatch(UUID_V7_PATTERN);
   });
 
   test("generates a UUID v7 when both identifiers are missing and Redis is unavailable", async () => {

@@ -11,6 +11,8 @@
 - 原生支持 `POST /v1/rerank`：通过 OpenAI Compatible 供应商转发，保留文档字段与重排结果，
   沿用认证、模型白名单、分组及额度检查；支持标准与 Cohere 风格 token 用量，total-only
   用量按输入计费，缺少 token 用量时保留现有按次计费行为
+- Fork CI 在 main push 时将最新 main 构建为 GHCR latest 与完整 commit SHA 标签，
+  提供不推送镜像的 PR 工作流校验；不再触发继承的版本/格式化提交或分支发布流程
 
 - Langfuse 流式请求还原完整最终输出（Claude / OpenAI Chat Completions / Responses / Gemini），避免把原始 SSE 文本当作 generation output
 - Langfuse 将客户端原始请求头写入 generation `client_metadata`（凭据中间打码）
@@ -25,6 +27,25 @@
 
 ### 修复
 
+- 恢复 docs-site 子模块元数据，避免 CI checkout 凭据清理失败；修复 rerank 回归测试的格式与空响应断言
+- 移除依赖旧部署脚本占位符的回滚文档文本断言，避免将不安全恢复命令重新写回指南
+- 为 availability 重启回填的 outbox 查询增加部分索引；存量库在事务迁移前并发建索引，
+  大表直接迁移缺少索引时显式拒绝阻塞写入
+- 原生客户端取消消息按请求语言本地化，保留 499 / CLIENT_ABORTED 结算及真实上游 499 的区分
+- 恢复开发模式的 Next HMR WebSocket 转发；保留生产环境的 Responses 独立 upgrade 所有权及未知路径拒绝
+- 测试汇总任务仅在自身范围授予 PR 评论权限，并等待评论写入，避免全部检查通过后仍因汇总 403 失败
+
+- 修复 Codex review 指出的 rerank 用量优先级、规范路径转发、fake-streaming 误拦截、
+  query/文档敏感词绕过与模型错误未本地化问题
+- 修复 availability 历史回填完成标记的 PostgreSQL 参数类型推导失败；重启恢复时同时识别
+  尚未发布的 outbox 事件，避免重复入队，保留实时终态触发器
+- 修复 Next 自动 upgrade listener 与公开 Responses WebSocket listener 争抢连接；
+  无显式会话标识时使用可信 WebSocket 会话标记，保持跨轮上游连接身份稳定
+- Responses WebSocket 出站及单事件上限与原生上游的 8 MiB 上限一致，发送确认前暂停 SSE 解析，
+  保留有界队列、UTF-8 字节检查与超时，超限显式报错而非截断或伪造成功
+- 修复原生传输的 AbortError / ResponseAborted 被最终错误处理器误记为 500 的问题，
+  客户端取消按 499 / CLIENT_ABORTED 记录，保持真实上游 499 的分类不变
+- 补充数据库与 Redis 一致备份、新库恢复和升级后新增账本记录保留的回滚流程
 - 修复上游响应流发生 error 后 Node/Undici body 未完成销毁的问题：Node-to-Web adapter 和 demand-driven pump
   现在在源流错误终态显式取消、销毁底层流，并为异步 destroy error 保留有界保护；同时将 raw body 的兜底错误监听改为一次性监听，
   避免 HTTP/2 reset、客户端断开和竞速取消路径长期保留 socket 与 ArrayBuffer backing store (#1430)

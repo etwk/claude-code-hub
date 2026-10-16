@@ -433,6 +433,10 @@ cch rollback                # 回到上一个 revision
 kubectl -n claude-code-hub rollout history deployment/claude-code-hub   # 查看历史
 ```
 
+`rollout undo` 和自动回滚只恢复应用 revision，**不会撤销数据库迁移、触发器或数据更新**。
+涉及 schema 的回滚必须恢复升级前备份到新数据库，切换旧镜像的 DSN，并恢复一致的 Redis 状态；
+不要将旧 SQL 直接覆盖到已升级的数据库。先阅读[数据库回滚流程](database-upgrade-rollback.md)。
+
 ### 备份
 
 ```bash
@@ -451,19 +455,22 @@ cch backup
 ### 恢复
 
 ```bash
+set -euo pipefail
+restore_db="claude_code_hub_restored_$(date -u +%Y%m%dT%H%M%SZ)"
 # 1. 停 app (避免写入):先删掉 HPA,再直接 kubectl 缩到 0 (cch scale 要求 >=1)
 # CPU/内存 HPA 不支持直接把 minReplicas 改成 0
-kubectl -n claude-code-hub delete hpa claude-code-hub 2>/dev/null || true
+kubectl -n claude-code-hub delete hpa claude-code-hub --ignore-not-found=true
 kubectl -n claude-code-hub scale deployment/claude-code-hub --replicas=0
 
-# 2. 在 postgres pod 内执行恢复
+# 2. 创建空的新库并恢复；保留已升级库，禁止覆盖恢复
+kubectl -n claude-code-hub exec sts/postgres -- createdb -U claude_code_hub "$restore_db"
 gunzip -c ~/backups/claude-code-hub/claude_code_hub_20260101_030000.sql.gz | \
   kubectl -n claude-code-hub exec -i sts/postgres -- \
-    psql -U claude_code_hub -d claude_code_hub
+    psql -v ON_ERROR_STOP=1 -U claude_code_hub -d "$restore_db"
 
-# 3. 用与初次部署一致的 CLI 参数重跑一次完整部署,恢复 HPA / PDB / Service 等资源
-#    关键:保留原始的 --replicas / --hpa-min / --hpa-max / --storage-class / --ingress-* 参数
-bash scripts/deploy-k8s.sh -n claude-code-hub <repeat-your-original-cli-args> -y
+# 3. 使用保存的旧镜像、指向新恢复库的 DSN 与一致 Redis 状态启动单副本验证。
+# 保留既有 Secret/配置挂载；验证通过后才恢复原副本数和 HPA。
+# 不要直接运行最新版部署脚本，否则可能再次升级刚恢复的 schema。
 ```
 
 ---

@@ -95,6 +95,14 @@ async function enqueueBackfillChunk(fromIso: string, toIso: string): Promise<num
         AND mr.created_at < ${toIso}::timestamptz
         AND COALESCE(mr.is_replay, false) = false
         AND NOT EXISTS (SELECT 1 FROM proj_applied_requests a WHERE a.request_id = mr.id)
+        -- A committed enqueue already owns this request, even before the projector applies it.
+        -- The backfill lock serializes bootstraps, but projection can still be in flight on restart.
+        AND NOT EXISTS (
+          SELECT 1 FROM outbox_events e
+          WHERE e.event_type = 'request_finalized'
+            AND e.aggregate_type = 'message_request'
+            AND e.aggregate_id = mr.id
+        )
         AND fn_compute_message_request_success_rate_outcome(
               mr.blocked_by, mr.status_code, mr.error_message, mr.provider_chain
             ) IS NOT NULL
@@ -153,8 +161,8 @@ async function bootstrapBackfill(): Promise<void> {
             jsonb_build_object(
               'at', now(),
               'note', 'availability backfill',
-              'rangeDays', ${BACKFILL_RANGE_DAYS},
-              'inserted', ${inserted}
+              'rangeDays', ${BACKFILL_RANGE_DAYS}::integer,
+              'inserted', ${inserted}::bigint
             ),
             now()
           )

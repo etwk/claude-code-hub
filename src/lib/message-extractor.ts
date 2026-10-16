@@ -181,3 +181,38 @@ export function extractTextFromMessages(message: Record<string, unknown>): strin
   // 过滤空字符串
   return texts.filter((t) => t.length > 0);
 }
+
+/**
+ * Extract only rerank query and document text, leaving opaque document fields alone.
+ */
+export function extractTextFromRerankRequest(message: Record<string, unknown>): string[] {
+  const texts: string[] = [];
+
+  if (typeof message.query === "string" && message.query.length > 0) {
+    texts.push(message.query);
+  }
+
+  if (Array.isArray(message.documents)) {
+    for (const document of message.documents) {
+      if (typeof document === "string") {
+        if (document.length > 0) {
+          texts.push(document);
+        }
+      } else if (typeof document === "object" && document !== null && !Array.isArray(document)) {
+        // Match the explicit text/content fields used by message blocks, without recursion.
+        if ("text" in document && typeof document.text === "string" && document.text.length > 0) {
+          texts.push(document.text);
+        }
+        if (
+          "content" in document &&
+          typeof document.content === "string" &&
+          document.content.length > 0
+        ) {
+          texts.push(document.content);
+        }
+      }
+    }
+  }
+
+  return texts;
+}
