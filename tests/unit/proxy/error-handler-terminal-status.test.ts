@@ -151,6 +151,7 @@ describe("ProxyErrorHandler.handle terminal status", () => {
     Object.assign(new Error(""), { name: "ResponseAborted" }),
   ])("returns 499 for a native client abort without an HTTP status: $name", async (error) => {
     const session = await createSession();
+    session.addProviderToChain(PROVIDER, { reason: "retry_failed", statusCode: 503 });
 
     const response = await ProxyErrorHandler.handle(session, error);
 

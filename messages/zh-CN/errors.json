@@ -54,6 +54,7 @@
   "DELETE_FAILED": "删除失败，请稍后重试",
 
   "CONNECTION_FAILED": "连接失败",
+  "CLIENT_ABORTED": "客户端已中止请求",
   "TIMEOUT": "请求超时",
   "NETWORK_ERROR": "网络错误",
 

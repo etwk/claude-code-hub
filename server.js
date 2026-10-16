@@ -15,6 +15,8 @@
 //
 // Compatibility:
 // - Non-WebSocket clients: unaffected. HTTP still flows through Next.js.
+// - Development: browser HMR upgrades are dispatched to Next's private listener;
+//   unsupported production upgrade paths are rejected.
 // - Non-Codex providers: the forwarder never attempts upstream WS; client WS
 //   is still accepted and tunneled through HTTP SSE.
 // - Setting disabled: client WS handshake still succeeds (so clients don't
@@ -26,13 +28,9 @@ const http = require("node:http");
 const { randomUUID } = require("node:crypto");
 const { parse } = require("node:url");
 
-function isNextDevMode(nodeEnv) {
-  return nodeEnv !== "production";
-}
-
 // 保留既有本地语义：只有显式 production 才服务已构建产物；Docker/K8s
 // 镜像会显式设置 NODE_ENV=production 和 PORT=3000。
-const dev = isNextDevMode(process.env.NODE_ENV);
+const dev = process.env.NODE_ENV !== "production";
 const hostname = process.env.HOSTNAME || "0.0.0.0";
 const port = parseInt(process.env.PORT || (dev ? "13500" : "3000"), 10);
 
@@ -1157,6 +1155,42 @@ function createNextAppWithPrivateServer(nextFactory, options) {
   return { app, internalServer };
 }
 
+function createPublicUpgradeHandler({ dev, internalServer, wss, internalHttpTarget }) {
+  return (req, socket, head) => {
+    if (!isResponsesWsUpgrade(req)) {
+      try {
+        // Browser page/asset requests initialize Next's private upgrade listener.
+        // Dispatch only development upgrades to it, preserving Next's own HMR
+        // path/origin handling without ever exposing Responses sockets to Next.
+        if (dev && internalServer.emit("upgrade", req, socket, head)) return;
+      } catch (err) {
+        log("error", "next_upgrade_handler_error", {
+          error: String(err && err.message ? err.message : err),
+        });
+      }
+      socket.destroy();
+      return;
+    }
+    if (!wss) {
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      log("info", "ws_client_connected", { path: sanitizedRequestPath(req.url) });
+      handleWebSocketConnection(ws, req, internalHttpTarget).catch((err) => {
+        log("error", "ws_handler_error", {
+          error: String(err && err.message ? err.message : err),
+        });
+        try {
+          ws.close(1011, "internal_error");
+        } catch {
+          // ignore
+        }
+      });
+    });
+  };
+}
+
 async function main() {
   // Surface the build-time Next config via the env var Next's own standalone
   // template uses. See server-lib/standalone-config.js for the full rationale.
@@ -1242,34 +1276,10 @@ async function main() {
   const internalHttpTarget = await listenOnPrivateLoopback(internalServer);
   const server = http.createServer(requestListener);
 
-  let wss = null;
-  if (WebSocketServer) {
-    wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD_BYTES });
-
-    server.on("upgrade", (req, socket, head) => {
-      if (!isResponsesWsUpgrade(req)) {
-        socket.destroy();
-        return;
-      }
-      wss.handleUpgrade(req, socket, head, (ws) => {
-        log("info", "ws_client_connected", { path: sanitizedRequestPath(req.url) });
-        handleWebSocketConnection(ws, req, internalHttpTarget).catch((err) => {
-          log("error", "ws_handler_error", {
-            error: String(err && err.message ? err.message : err),
-          });
-          try {
-            ws.close(1011, "internal_error");
-          } catch {
-            // ignore
-          }
-        });
-      });
-    });
-  } else {
-    server.on("upgrade", (_req, socket) => {
-      socket.destroy();
-    });
-  }
+  const wss = WebSocketServer
+    ? new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD_BYTES })
+    : null;
+  server.on("upgrade", createPublicUpgradeHandler({ dev, internalServer, wss, internalHttpTarget }));
 
   try {
     await listenServer(server, { port, host: hostname });
@@ -1442,12 +1452,12 @@ function registerOrchestratedShutdown(server, wss, auxiliaryServers = []) {
 module.exports = {
   main,
   sanitizedRequestPath,
-  isNextDevMode,
   handleWebSocketConnection,
   forwardToInternalHttp,
   listenServer,
   listenOnPrivateLoopback,
   createNextAppWithPrivateServer,
+  createPublicUpgradeHandler,
   notifyMulticoreReady,
   registerOrchestratedShutdown,
   WS_MAX_PAYLOAD_BYTES,

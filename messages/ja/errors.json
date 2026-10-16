@@ -54,6 +54,7 @@
   "DELETE_FAILED": "削除に失敗しました。後でもう一度お試しください",
 
   "CONNECTION_FAILED": "接続に失敗しました",
+  "CLIENT_ABORTED": "クライアントがリクエストを中止しました",
   "TIMEOUT": "リクエストがタイムアウトしました",
   "NETWORK_ERROR": "ネットワークエラー",
 

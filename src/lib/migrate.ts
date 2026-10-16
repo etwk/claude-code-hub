@@ -230,6 +230,25 @@ export async function runMigrations() {
       lockTimeoutMs: env.MIGRATION_INDEX_LOCK_TIMEOUT_MS,
       statementTimeoutMs: env.MIGRATION_INDEX_STATEMENT_TIMEOUT_MS,
     };
+    const [outbox] = await migrationClient<{ exists: boolean }[]>`
+      SELECT to_regclass('public.outbox_events') IS NOT NULL AS exists
+    `;
+    if (outbox?.exists) {
+      // Existing outboxes can be large; build before Drizzle's transactional migration.
+      await runSessionReplayIndexPreflight(
+        indexExecutor,
+        [
+          {
+            canonicalName: "idx_outbox_events_request_finalized",
+            temporaryName: "cch_0125_tmp_01",
+            marker: "cch:migration:0125:outbox-request-lookup-index:v1",
+            definition:
+              'ON "public"."outbox_events" USING btree ("aggregate_id") WHERE "event_type" = \'request_finalized\' AND "aggregate_type" = \'message_request\'',
+          },
+        ],
+        { ensureColumns: false, timeouts }
+      );
+    }
     await runSessionReplayMigrationPlan({
       baseTablesReady: await sessionReplayBaseTablesExist(migrationClient),
       latestMigrationCreatedAt: await getLatestDrizzleMigrationCreatedAt(migrationClient),

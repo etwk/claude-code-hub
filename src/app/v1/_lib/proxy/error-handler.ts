@@ -1,3 +1,4 @@
+import { getLocale } from "next-intl/server";
 import { findSafeDatabaseError } from "@/drizzle/admitted-client";
 import { getCachedSystemSettings } from "@/lib/config/system-settings-cache";
 import {
@@ -271,7 +272,14 @@ export class ProxyErrorHandler {
     // Native transport aborts have no HTTP status; preserve the local-abort
     // classification already used by the forwarder instead of recording 500.
     if (error instanceof Error && isClientAbortError(error)) {
-      clientErrorMessage = "Client aborted request";
+      try {
+        clientErrorMessage = await getErrorMessageServer(
+          await getLocale(),
+          ERROR_CODES.CLIENT_ABORTED
+        );
+      } catch {
+        clientErrorMessage = "An error occurred";
+      }
       logErrorMessage = "CLIENT_ABORTED";
       statusCode = 499;
     } else if (error instanceof ProxyError) {

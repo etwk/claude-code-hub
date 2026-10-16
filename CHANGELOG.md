@@ -29,6 +29,10 @@
 
 - 恢复 docs-site 子模块元数据，避免 CI checkout 凭据清理失败；修复 rerank 回归测试的格式与空响应断言
 - 移除依赖旧部署脚本占位符的回滚文档文本断言，避免将不安全恢复命令重新写回指南
+- 为 availability 重启回填的 outbox 查询增加部分索引；存量库在事务迁移前并发建索引，
+  大表直接迁移缺少索引时显式拒绝阻塞写入
+- 原生客户端取消消息按请求语言本地化，保留 499 / CLIENT_ABORTED 结算及真实上游 499 的区分
+- 恢复开发模式的 Next HMR WebSocket 转发；保留生产环境的 Responses 独立 upgrade 所有权及未知路径拒绝
 
 - 修复 Codex review 指出的 rerank 用量优先级、规范路径转发、fake-streaming 误拦截、
   query/文档敏感词绕过与模型错误未本地化问题

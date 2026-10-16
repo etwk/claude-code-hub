@@ -103,6 +103,20 @@ merge them into the old schema. If loss of that interval is unacceptable, keep i
 and reconcile using an explicitly validated export/import plan before reopening; do not
 claim a lossless rollback or blindly replay billing rows/triggers.
 
+## Availability outbox lookup index
+
+Migration `0125_outbox_request_lookup` adds a partial `aggregate_id` index for
+`request_finalized` / `message_request` events, including published events. Restart
+backfills must recognize both published and unpublished enqueues without repeatedly
+scanning the entire persistent outbox.
+
+`AUTO_MIGRATE=true` and `bun run db:migrate` build the index concurrently on an existing
+outbox before transactional migrations, using the existing migration-index lock and
+statement timeouts. Fresh databases create it with their initial schema. Direct SQL
+migration refuses to create a missing index on an outbox larger than 64 MiB and reports
+the concurrent statement to run outside a transaction. Do not delete outbox history or
+reset projection markers to bypass this check.
+
 ## Local rehearsal evidence for this candidate
 
 The rollout assessment uses disposable PostgreSQL 18 and Redis 7 instances and a local

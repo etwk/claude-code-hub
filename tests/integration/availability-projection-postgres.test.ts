@@ -133,6 +133,13 @@ run.sequential("availability projection bootstrap (PostgreSQL)", () => {
         await client.unsafe(statement);
       }
     }
+    const lookupMigration = await readFile(
+      new URL("../../drizzle/0125_outbox_request_lookup.sql", import.meta.url),
+      "utf8"
+    );
+    for (const statement of lookupMigration.split("--> statement-breakpoint")) {
+      if (statement.trim()) await client.unsafe(statement);
+    }
   });
 
   beforeEach(async () => {

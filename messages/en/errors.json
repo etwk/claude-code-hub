@@ -54,6 +54,7 @@
   "DELETE_FAILED": "Failed to delete, please try again",
 
   "CONNECTION_FAILED": "Connection failed",
+  "CLIENT_ABORTED": "Client aborted request",
   "TIMEOUT": "Request timeout",
   "NETWORK_ERROR": "Network error",
 
