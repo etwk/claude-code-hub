@@ -274,6 +274,8 @@ jobs:
   test-summary:
     name: 📊 Test Summary
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
     needs: [quality, unit-tests, integration-tests, api-tests]
     if: always()
 
@@ -307,7 +309,7 @@ jobs:
             **总体结果**: ${{ (needs.quality.result == 'success' && needs.unit-tests.result == 'success' && needs.integration-tests.result == 'success' && needs.api-tests.result == 'success') && '✅ 所有测试通过' || '❌ 部分测试失败' }}
             `;
 
-            github.rest.issues.createComment({
+            await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,

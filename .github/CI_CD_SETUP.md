@@ -40,6 +40,11 @@ The inherited `dev.yml` and `release.yml` mutating release jobs run only in
 auto-format/push a reviewed fork branch. The installed Codex connector's latest
 commit review must finish with no unresolved findings before merging a PR.
 
+The `test.yml` reporting job alone requests `pull-requests: write` to post its
+same-repository PR summary and awaits the comment API result. It does not check
+out or execute PR code; the test/build jobs receive no additional permissions.
+External-fork PRs skip the comment step.
+
 ## Upstream release workflows
 
 The following version-release configuration applies to `ding113/claude-code-hub`.
