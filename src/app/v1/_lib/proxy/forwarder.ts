@@ -969,7 +969,7 @@ function filterPrivateParameters(obj: unknown, recursive = true): unknown {
 
   // 数组类型递归处理
   if (Array.isArray(obj)) {
-    return recursive ? obj.map((item) => filterPrivateParameters(item)) : obj;
+    return recursive ? obj.map((item) => filterPrivateParameters(item)) : structuredClone(obj);
   }
 
   // 对象类型：过滤下划线前缀的键
@@ -981,7 +981,11 @@ function filterPrivateParameters(obj: unknown, recursive = true): unknown {
       // 私有参数：跳过
       removedKeys.push(key);
     } else {
-      filtered[key] = recursive ? filterPrivateParameters(value) : value;
+      // Final filters must not mutate the original opaque document data across retries.
+      filtered[key] =
+        recursive || typeof value !== "object" || value === null
+          ? filterPrivateParameters(value)
+          : structuredClone(value);
     }
   }
 

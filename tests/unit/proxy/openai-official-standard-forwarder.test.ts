@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveEndpointPolicy } from "@/app/v1/_lib/proxy/endpoint-policy";
 import { ProxyForwarder } from "@/app/v1/_lib/proxy/forwarder";
 import { ProxySession } from "@/app/v1/_lib/proxy/session";
+import { requestFilterEngine } from "@/lib/request-filter-engine";
 import type { Provider } from "@/types/provider";
 
 vi.mock("@/lib/logger", () => ({
@@ -119,6 +120,15 @@ describe("ProxyForwarder - official OpenAI endpoints stay on provider URL", () =
     session.method = "POST";
     session.request.message = body;
     session.request.model = body.model;
+    vi.mocked(requestFilterEngine.applyFinal).mockImplementationOnce(
+      async (_session, outgoingBody) => {
+        const outgoingDocuments = outgoingBody.documents;
+        if (!Array.isArray(outgoingDocuments)) throw new Error("Expected rerank documents");
+        const document = outgoingDocuments[1];
+        if (!document || typeof document !== "object") throw new Error("Expected object document");
+        document.text = "Paris is in France. [filtered]";
+      }
+    );
 
     let capturedUrl: string | null = null;
     let capturedBody: BodyInit | null | undefined;
@@ -141,7 +151,14 @@ describe("ProxyForwarder - official OpenAI endpoints stay on provider URL", () =
     expect(JSON.parse(capturedBody as string)).toEqual({
       model: body.model,
       query: body.query,
-      documents,
+      documents: [
+        "Berlin is in Germany.",
+        {
+          text: "Paris is in France. [filtered]",
+          _id: "doc-1",
+          metadata: { _source: "catalog" },
+        },
+      ],
       top_n: 1,
       return_documents: true,
     });
