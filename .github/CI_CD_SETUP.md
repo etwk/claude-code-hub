@@ -17,9 +17,17 @@ or GitHub Release is modified. Failed builds do not publish an image.
 
 The workflow needs only the repository's `GITHUB_TOKEN` with `contents: read`
 and `packages: write`; DockerHub credentials are not required. When the workflow
-itself changes in a PR targeting `main`, CI builds that PR's head for amd64 with
+itself or `.gitmodules` changes in a PR targeting `main`, CI builds that PR's head for amd64 with
 `push: false` and does not log in to the registry. Publishing starts only after
 the workflow is merged into `main`.
+
+Checkout deliberately uses `persist-credentials: false` and does not initialize
+submodules. Keep the root `.gitmodules` entry for the existing `docs-site`
+gitlink, whose upstream is `https://github.com/ding113/claude-code-hub-docs.git`.
+GitHub checkout's credential cleanup inspects submodule metadata even when
+submodules are not initialized; removing the URL while retaining the gitlink
+breaks clean checkouts. The documentation submodule stays at its recorded
+commit and is excluded from the container build by `.dockerignore`.
 
 For this fork:
 

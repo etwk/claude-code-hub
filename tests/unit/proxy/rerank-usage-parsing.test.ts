@@ -167,18 +167,15 @@ describe("rerank usage parsing", () => {
     { output_tokens: 0 },
     { completion_tokens: 0 },
     { input_tokens: -1, output_tokens: 0 },
-  ])(
-    "does not let incomplete or invalid standard usage suppress billed tokens: %j",
-    (usage) => {
-      const result = parseUsageFromResponseText(
-        JSON.stringify({ usage, meta: { billed_units: { input_tokens: 13, output_tokens: 0 } } }),
-        "openai-compatible",
-        RERANK_PATH
-      );
+  ])("does not let incomplete or invalid standard usage suppress billed tokens: %j", (usage) => {
+    const result = parseUsageFromResponseText(
+      JSON.stringify({ usage, meta: { billed_units: { input_tokens: 13, output_tokens: 0 } } }),
+      "openai-compatible",
+      RERANK_PATH
+    );
 
-      expect(result.usageMetrics).toEqual({ input_tokens: 13, output_tokens: 0 });
-    }
-  );
+    expect(result.usageMetrics).toEqual({ input_tokens: 13, output_tokens: 0 });
+  });
 
   it.each([
     null,
@@ -207,7 +204,9 @@ describe("rerank usage parsing", () => {
     { usage: { completion_tokens: 0 } },
     { meta: { billed_units: { output_tokens: 0 } } },
   ])("does not treat zero output alone as consumed usage: %j", (response) => {
-    expect(parseUsageFromResponseText(JSON.stringify(response), "openai-compatible", RERANK_PATH)).toEqual({
+    expect(
+      parseUsageFromResponseText(JSON.stringify(response), "openai-compatible", RERANK_PATH)
+    ).toEqual({
       usageRecord: null,
       usageMetrics: null,
     });

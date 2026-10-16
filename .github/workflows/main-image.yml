@@ -8,6 +8,7 @@ on:
     branches: [main]
     paths:
       - .github/workflows/main-image.yml
+      - .gitmodules
 
 permissions:
   contents: read

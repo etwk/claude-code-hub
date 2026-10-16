@@ -64,7 +64,11 @@ describe("buildProxyUrl", () => {
         ["https://api.example.com/api/v1", "/api/v1/rerank"],
         ["https://api.example.com/api/rerank", "/api/rerank"],
       ]) {
-        expectBuiltUrl(baseUrl, `${requestPath}?trace=one%2Ftwo`, `https://api.example.com${expectedPath}?trace=one%2Ftwo`);
+        expectBuiltUrl(
+          baseUrl,
+          `${requestPath}?trace=one%2Ftwo`,
+          `https://api.example.com${expectedPath}?trace=one%2Ftwo`
+        );
       }
     }
   );

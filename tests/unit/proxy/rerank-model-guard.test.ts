@@ -59,10 +59,12 @@ describe("rerank model boundary", () => {
 
   it("returns the validation error in the request locale", async () => {
     const english = await ProxyModelGuard.ensure(createSession(null));
-    const englishError = (await english?.json()).error;
+    expect(english).not.toBeNull();
+    const englishError = (await english!.json()).error;
     vi.mocked(getLocale).mockResolvedValue("zh-CN");
     const chinese = await ProxyModelGuard.ensure(createSession(null));
-    const chineseError = (await chinese?.json()).error;
+    expect(chinese).not.toBeNull();
+    const chineseError = (await chinese!.json()).error;
 
     expect(chinese?.status).toBe(400);
     expect(chineseError.type).toBe(englishError.type);

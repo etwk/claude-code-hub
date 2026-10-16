@@ -27,6 +27,8 @@
 
 ### 修复
 
+- 恢复 docs-site 子模块元数据，避免 CI checkout 凭据清理失败；修复 rerank 回归测试的格式与空响应断言
+
 - 修复 Codex review 指出的 rerank 用量优先级、规范路径转发、fake-streaming 误拦截、
   query/文档敏感词绕过与模型错误未本地化问题
 - 修复 availability 历史回填完成标记的 PostgreSQL 参数类型推导失败；重启恢复时同时识别
