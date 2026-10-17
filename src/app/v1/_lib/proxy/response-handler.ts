@@ -2083,13 +2083,13 @@ function finalizeDeferredStreamingFinalizationIfNeeded(
   const confirmAuxiliarySessionBinding = async () =>
     allowAuxiliarySessionBinding && (await primaryDiscoveryBinding);
 
-  // 仅在“上游 HTTP=200 且流自然结束”时做“假 200”检测：
+  // 仅在“上游 HTTP=200、流自然结束且客户端未取消”时做“假 200”检测：
   // - 非 200：HTTP 已经表明失败（无需额外启发式）
   // - 非自然结束：内容可能是部分流/截断，启发式会显著提高误判风险
   //
   // 此处返回 `{isError:false}` 仅表示“跳过检测”，最终仍会在下面按中断/超时视为失败结算。
   const shouldDetectFake200 =
-    parseResponseDiagnostics && streamEndedNormally && upstreamStatusCode === 200;
+    parseResponseDiagnostics && !clientAborted && streamEndedNormally && upstreamStatusCode === 200;
   const bodyDetected = shouldDetectFake200
     ? detectUpstreamErrorFromSseOrJsonText(completionContent)
     : ({ isError: false } as const);
@@ -4966,10 +4966,9 @@ export class ProxyResponseHandler {
         const finalizationDeadlineAtMs = Date.now() + STREAM_FINALIZATION_MAX_MS;
         const awaitFinalization = <T>(promise: Promise<T>): Promise<T> =>
           raceWithDeadline(promise, finalizationDeadlineAtMs, "stream_finalization_timeout");
-        const compactProtocolObservation: StreamProtocolObservation | null = (() => {
-          if (streamProtocolObserver || !clientAbortMeter) return null;
-          return protocolObservationFromMetering(clientAbortMeter.finish());
-        })();
+        const finalProtocolObservation =
+          streamProtocolObserver?.finish() ??
+          (clientAbortMeter ? protocolObservationFromMetering(clientAbortMeter.finish()) : null);
         const finalized = finalizeDeferredStreamingFinalizationIfNeeded(
           session,
           allContent,
@@ -4977,7 +4976,7 @@ export class ProxyResponseHandler {
           streamEndedNormally,
           clientAborted,
           discoveryLeaseLifecycle,
-          streamProtocolObserver?.finish() ?? compactProtocolObservation,
+          finalProtocolObservation,
           clientAbortSnapshot,
           abortReason,
           clientAborted && upstreamFirstByteSeenAtAbort !== null
@@ -5272,12 +5271,22 @@ export class ProxyResponseHandler {
         }
 
         // F2 终态屏障：replay completed 只能出现在计费落库（onCommitted）之后；
-        // 任何失败终态（假 200/中断/非 2xx）立即 abort，绝不被已完成重放命中。
+        // 真实上游失败（假 200/上游中断/非 2xx）立即 abort，绝不被已完成重放命中。
         if (replaySpool) {
           const activeReplaySpool = replaySpool;
           const detachedReplayLease = clientAbortReplayLease;
+          // A cancelled delivery can still produce a complete Replay. Validate
+          // the drained upstream result independently of the caller's 499.
+          const detachedUpstreamCompleted =
+            clientAborted &&
+            statusCode >= 200 &&
+            statusCode < 300 &&
+            finalProtocolObservation?.sawTerminal === true &&
+            !finalProtocolObservation.sawIncomplete &&
+            !finalProtocolObservation.failure &&
+            !detectUpstreamErrorFromSseOrJsonText(allContent).isError;
           const isReplayableSuccess =
-            finalized.isSuccessfulCompletion &&
+            (finalized.isSuccessfulCompletion || detachedUpstreamCompleted) &&
             !finalized.replayIneligibleReason &&
             hasReplayCompletionMarker(allContent, session.originalFormat);
           if (isReplayableSuccess) {

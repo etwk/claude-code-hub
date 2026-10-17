@@ -449,6 +449,16 @@ describe("ProxyResponseHandler.dispatch stream terminal behavior", () => {
       .join("");
     expect(replayedText).toContain('"text":"kept"');
     expect(replayedText).toContain("message_stop");
+    expect(mocks.durable).toHaveBeenCalledWith(
+      MESSAGE.id,
+      expect.objectContaining({
+        statusCode: 499,
+        errorMessage: "CLIENT_ABORTED",
+        inputTokens: 10,
+        outputTokens: 4,
+      }),
+      expect.objectContaining({ onCommitted: expect.any(Function) })
+    );
     expect(getDetachedStreamBudgetSnapshot().activeStreams).toBe(0);
   });
 
@@ -485,6 +495,63 @@ describe("ProxyResponseHandler.dispatch stream terminal behavior", () => {
     expect(replayedText).toContain("data: [DONE]");
     expect(mocks.replayAbort).not.toHaveBeenCalled();
     expect(mocks.replayComplete).toHaveBeenCalledWith(MESSAGE.id);
+    expect(mocks.durable).toHaveBeenCalledWith(
+      MESSAGE.id,
+      expect.objectContaining({
+        statusCode: 499,
+        errorMessage: "CLIENT_ABORTED",
+        inputTokens: 10,
+        outputTokens: 4,
+      }),
+      expect.objectContaining({ onCommitted: expect.any(Function) })
+    );
+  });
+
+  it("does not publish a detached Replay with a later upstream error even when DONE follows", async () => {
+    let sourceController!: ReadableStreamDefaultController<Uint8Array>;
+    const encoder = new TextEncoder();
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        sourceController = controller;
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"content":"started"},"finish_reason":null}]}\n\n'
+          )
+        );
+      },
+    });
+    const { session } = await createSession({});
+    session.setProvider({ ...createProvider(), providerType: "openai" });
+    session.originalFormat = "openai";
+    setReplayOwner(session, "detached-upstream-error");
+    setReplayFinalization(session);
+
+    const returned = await ProxyResponseHandler.dispatch(session, sseResponse(source));
+    const reader = returned.body!.getReader();
+    await reader.read();
+    await reader.cancel(new Error("client disconnected"));
+    sourceController.enqueue(
+      encoder.encode(
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":4}}\n\n' +
+          'data: {"error":{"type":"upstream_error","message":"failed after cancellation"}}\n\n' +
+          "data: [DONE]\n\n"
+      )
+    );
+    await settleTasks();
+
+    expect(mocks.replayComplete).not.toHaveBeenCalled();
+    expect(mocks.replayAbort).toHaveBeenCalledWith("CLIENT_ABORTED");
+    expect(mocks.durable).toHaveBeenCalledWith(
+      MESSAGE.id,
+      expect.objectContaining({
+        statusCode: 499,
+        errorMessage: "CLIENT_ABORTED",
+        inputTokens: 10,
+        outputTokens: 4,
+      }),
+      expect.objectContaining({ onCommitted: expect.any(Function) })
+    );
+    expect(getDetachedStreamBudgetSnapshot().activeStreams).toBe(0);
   });
 
   it("downgrades a detached Replay to metering when Replay headroom is exhausted", async () => {
@@ -519,7 +586,12 @@ describe("ProxyResponseHandler.dispatch stream terminal behavior", () => {
       expect(mocks.replayObserve.mock.calls.length).toBe(observedBeforeDetach);
       expect(mocks.durable).toHaveBeenCalledWith(
         MESSAGE.id,
-        expect.objectContaining({ statusCode: 200, inputTokens: 10, outputTokens: 4 }),
+        expect.objectContaining({
+          statusCode: 499,
+          errorMessage: "CLIENT_ABORTED",
+          inputTokens: 10,
+          outputTokens: 4,
+        }),
         expect.objectContaining({ onCommitted: expect.any(Function) })
       );
     } finally {

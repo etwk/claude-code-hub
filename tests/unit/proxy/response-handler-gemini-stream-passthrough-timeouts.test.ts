@@ -762,13 +762,18 @@ describe("ProxyResponseHandler - Gemini stream passthrough timeouts", () => {
       expect(updateMessageRequestDetailsDurably).toHaveBeenCalledWith(
         4,
         expect.objectContaining({
-          statusCode: 200,
+          statusCode: 499,
+          errorMessage: "CLIENT_ABORTED",
           inputTokens: 3,
           outputTokens: 2,
         }),
         expect.objectContaining({ onCommitted: expect.any(Function) })
       );
-      expect(vi.mocked(SessionManager.clearSessionProvider)).not.toHaveBeenCalled();
+      expect(SessionManager.clearSessionProvider).toHaveBeenCalledWith(
+        "gemini-abort-session",
+        provider.id,
+        null
+      );
     } finally {
       clientAbortController.abort(new Error("test_cleanup"));
       await close();
