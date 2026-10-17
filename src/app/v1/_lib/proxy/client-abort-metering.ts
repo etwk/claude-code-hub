@@ -43,6 +43,8 @@ export interface ClientAbortMeteringObserver {
     terminalSeen: boolean;
   };
   switchToDetachedMode(): void;
+  /** Captures complete frames without flushing a partial frame or stopping observation. */
+  snapshot(): ClientAbortMeteringSnapshot;
   finish(): ClientAbortMeteringSnapshot;
 }
 
@@ -705,6 +707,16 @@ export function createClientAbortMeteringObserver(
       : CLIENT_ABORT_METER_MAX_FRAME_BYTES;
   const framer = new BoundedEventFramer(attachedMaxFrameBytes, recordFrame);
 
+  const snapshot = (): ClientAbortMeteringSnapshot => ({
+    text: [...new Set(evidence.values())].join(""),
+    sawContent,
+    terminalSeen,
+    incompleteSeen,
+    retainedBytes: retainedByteTotal,
+    skippedOversizedFrames: framer.skippedOversizedFrames,
+    protocolFailure: protocolFailure ? { ...protocolFailure } : null,
+  });
+
   return {
     // 分帧器保留 JS 字符串；按 UTF-16 最坏 2 bytes/character 计入进程预算。
     get maxInFlightFrameBytes(): number {
@@ -729,21 +741,13 @@ export function createClientAbortMeteringObserver(
     switchToDetachedMode(): void {
       if (!finished) framer.setMaxFrameCharacters(CLIENT_ABORT_METER_MAX_FRAME_BYTES);
     },
+    snapshot,
     finish(): ClientAbortMeteringSnapshot {
       if (!finished) {
         finished = true;
         framer.finish();
       }
-      const text = [...new Set(evidence.values())].join("");
-      return {
-        text,
-        sawContent,
-        terminalSeen,
-        incompleteSeen,
-        retainedBytes: retainedByteTotal,
-        skippedOversizedFrames: framer.skippedOversizedFrames,
-        protocolFailure: protocolFailure ? { ...protocolFailure } : null,
-      };
+      return snapshot();
     },
   };
 }

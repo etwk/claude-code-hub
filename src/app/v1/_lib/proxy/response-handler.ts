@@ -1795,6 +1795,8 @@ type FinalizeDeferredStreamingResult = {
  * @param streamEndedNormally - 必须是 reader 读到 done=true 的“自然结束”；超时/中断等异常结束由其它逻辑处理。
  * @param clientAborted - 标记是否为客户端主动中断（用于内部状态码映射，避免把中断记为 200 completed）
  * @param abortReason - 非自然结束时的原因码（用于内部记录/熔断归因；不会影响客户端响应）
+ * @param clientAbortSnapshot - Protocol evidence received before cancellation; detached usage
+ * collection must not change the request outcome.
  * @param firstByteSeen - Authoritative body-byte observation. Undefined means the caller cannot
  * report first-byte state and therefore cannot qualify a no-first-byte attribution.
  */
@@ -1806,6 +1808,7 @@ function finalizeDeferredStreamingFinalizationIfNeeded(
   clientAborted: boolean,
   discoveryLeaseLifecycle: DiscoveryLeaseLifecycle,
   protocolObservation: StreamProtocolObservation | null,
+  clientAbortSnapshot: ClientAbortMeteringSnapshot | null,
   abortReason?: string,
   firstByteSeen?: boolean
 ): FinalizeDeferredStreamingResult {
@@ -2019,19 +2022,27 @@ function finalizeDeferredStreamingFinalizationIfNeeded(
   const hasDiscoveryBindingIntent =
     meta?.bindingIntent === "create" || meta?.bindingIntent === "renew";
   const parseResponseDiagnostics = session.getEndpointPolicy().kind !== "raw_passthrough";
+  const completionContent =
+    clientAborted && clientAbortSnapshot ? clientAbortSnapshot.text : allContent;
+  const completionObservation =
+    clientAborted && clientAbortSnapshot
+      ? protocolObservationFromMetering(clientAbortSnapshot)
+      : protocolObservation;
   const textCompletionInspection =
-    parseResponseDiagnostics && (!protocolObservation || protocolObservation.observationIncomplete)
-      ? inspectStreamCompletion(allContent, session.originalFormat)
+    parseResponseDiagnostics &&
+    (!completionObservation || completionObservation.observationIncomplete)
+      ? inspectStreamCompletion(completionContent, session.originalFormat)
       : null;
   const completionInspection = (() => {
-    if (protocolObservation) {
+    if (completionObservation) {
       return {
-        hasMarker: protocolObservation.sawTerminal || textCompletionInspection?.hasMarker === true,
+        hasMarker:
+          completionObservation.sawTerminal || textCompletionInspection?.hasMarker === true,
         hasProtocolError:
-          protocolObservation.failure?.verdict === "error" ||
+          completionObservation.failure?.verdict === "error" ||
           textCompletionInspection?.hasProtocolError === true,
         sawIncomplete:
-          protocolObservation.sawIncomplete || textCompletionInspection?.sawIncomplete === true,
+          completionObservation.sawIncomplete || textCompletionInspection?.sawIncomplete === true,
       };
     }
     return textCompletionInspection
@@ -2080,9 +2091,11 @@ function finalizeDeferredStreamingFinalizationIfNeeded(
   const shouldDetectFake200 =
     parseResponseDiagnostics && streamEndedNormally && upstreamStatusCode === 200;
   const bodyDetected = shouldDetectFake200
-    ? detectUpstreamErrorFromSseOrJsonText(allContent)
+    ? detectUpstreamErrorFromSseOrJsonText(completionContent)
     : ({ isError: false } as const);
-  const protocolFailure = parseResponseDiagnostics ? (protocolObservation?.failure ?? null) : null;
+  const protocolFailure = parseResponseDiagnostics
+    ? (completionObservation?.failure ?? null)
+    : null;
   const replayIneligibleReason =
     protocolFailure?.verdict === "malformed" || protocolFailure?.sawMalformed
       ? ("protocol_malformed" as const)
@@ -2098,7 +2111,7 @@ function finalizeDeferredStreamingFinalizationIfNeeded(
   const successfulPostcommitMalformed =
     postcommitMalformed &&
     hasTerminalStreamUsageEvidence(
-      allContent,
+      completionContent,
       session.originalFormat,
       completionInspection.hasMarker
     );
@@ -2129,18 +2142,13 @@ function finalizeDeferredStreamingFinalizationIfNeeded(
     if (protocolFailure) return false;
     if (completionInspection.sawIncomplete) return false;
 
-    const abortDetected = detectUpstreamErrorFromSseOrJsonText(allContent);
+    const abortDetected = detectUpstreamErrorFromSseOrJsonText(completionContent);
     if (abortDetected.isError) {
       return false;
     }
 
-    // U01: positive usage alone is NOT proof the stream completed — Anthropic
-    // emits usage in the FIRST `message_start` event and Gemini in intermediate
-    // `usageMetadata`, so a stream truncated by the client abort still shows
-    // tokens. Only reclassify as a success when a format-appropriate terminal
-    // completion marker is present, proving the upstream finished before the
-    // client stopped reading. Otherwise keep the pre-PR safe default (499,
-    // unbilled).
+    // Usage drained after cancellation remains billable evidence, not proof that
+    // the request completed before its caller disconnected.
     if (!completionInspection.hasMarker) {
       return false;
     }
@@ -2213,7 +2221,7 @@ function finalizeDeferredStreamingFinalizationIfNeeded(
     upstreamStatusCode < 300;
   if (detected.isError) {
     const inferred = parseResponseDiagnostics
-      ? inferUpstreamErrorStatusCodeFromText(allContent)
+      ? inferUpstreamErrorStatusCodeFromText(completionContent)
       : null;
     if (inferred) {
       effectiveStatusCode = inferred.statusCode;
@@ -2234,7 +2242,7 @@ function finalizeDeferredStreamingFinalizationIfNeeded(
   } else if (streamEndedNormally && upstreamStatusCode >= 400) {
     effectiveStatusCode = upstreamStatusCode;
     if (parseResponseDiagnostics) {
-      const upstreamError = detectUpstreamErrorFromSseOrJsonText(allContent);
+      const upstreamError = detectUpstreamErrorFromSseOrJsonText(completionContent);
       errorMessage = upstreamError.isError ? upstreamError.code : `HTTP ${upstreamStatusCode}`;
     } else {
       errorMessage = `HTTP ${upstreamStatusCode}`;
@@ -2251,7 +2259,7 @@ function finalizeDeferredStreamingFinalizationIfNeeded(
 
     if (upstreamStatusCode >= 400) {
       if (parseResponseDiagnostics) {
-        const detected = detectUpstreamErrorFromSseOrJsonText(allContent);
+        const detected = detectUpstreamErrorFromSseOrJsonText(completionContent);
         errorMessage = detected.isError ? detected.code : `HTTP ${upstreamStatusCode}`;
       } else {
         errorMessage = `HTTP ${upstreamStatusCode}`;
@@ -3904,6 +3912,7 @@ export class ProxyResponseHandler {
             : undefined,
         })
       : null;
+    let clientAbortSnapshot: ClientAbortMeteringSnapshot | null = null;
     let protocolObservedBeforeProcessing = false;
 
     // --- GEMINI STREAM HANDLING ---
@@ -3967,6 +3976,7 @@ export class ProxyResponseHandler {
             passthroughPump.startDrain(reason);
             return;
           }
+          clientAbortSnapshot = clientAbortMeter?.snapshot() ?? null;
           passthroughClientDetached = true;
           const deferredMeta = peekDeferredStreamingFinalization(session);
           if (deferredMeta) {
@@ -4315,6 +4325,7 @@ export class ProxyResponseHandler {
               discoveryLeaseLifecycle,
               streamProtocolObserver?.finish() ??
                 (meteringSnapshot ? protocolObservationFromMetering(meteringSnapshot) : null),
+              clientAbortSnapshot,
               abortReason,
               passthroughFirstByteSeen
             );
@@ -4391,6 +4402,7 @@ export class ProxyResponseHandler {
                 clientAborted,
                 discoveryLeaseLifecycle,
                 meteringSnapshot ? protocolObservationFromMetering(meteringSnapshot) : null,
+                clientAbortSnapshot,
                 abortReason,
                 passthroughFirstByteSeen
               );
@@ -4770,6 +4782,7 @@ export class ProxyResponseHandler {
         responsePump?.startDrain(reason ?? "client_detached");
         return;
       }
+      clientAbortSnapshot = clientAbortMeter?.snapshot() ?? null;
       upstreamFirstByteSeenAtAbort = upstreamFirstByteSeen;
       const deferredMeta = peekDeferredStreamingFinalization(session);
       if (deferredMeta) deferredMeta.healthAbortAtMonotonic = performance.now();
@@ -4965,6 +4978,7 @@ export class ProxyResponseHandler {
           clientAborted,
           discoveryLeaseLifecycle,
           streamProtocolObserver?.finish() ?? compactProtocolObservation,
+          clientAbortSnapshot,
           abortReason,
           clientAborted && upstreamFirstByteSeenAtAbort !== null
             ? upstreamFirstByteSeenAtAbort

@@ -39,6 +39,21 @@ describe("createClientAbortMeteringObserver", () => {
     expect(snapshot.retainedBytes).toBeLessThanOrEqual(CLIENT_ABORT_METER_MAX_RETAINED_BYTES);
   });
 
+  it("snapshots only complete frames without ending the usage drain", () => {
+    const observer = createClientAbortMeteringObserver("response");
+    observer.observe(
+      encoder.encode('event: response.completed\ndata: {"type":"response.completed","response":')
+    );
+    const before = observer.snapshot();
+    expect(before).toMatchObject({ terminalSeen: false, text: "", protocolFailure: null });
+
+    observer.switchToDetachedMode();
+    observer.observe(encoder.encode('{"usage":{"input_tokens":10,"output_tokens":5}}}\n\n'));
+    expect(observer.finish()).toMatchObject({ terminalSeen: true, protocolFailure: null });
+    expect(observer.finish().text).toContain('"output_tokens":5');
+    expect(before).toMatchObject({ terminalSeen: false, text: "", protocolFailure: null });
+  });
+
   it("retains Claude initial and terminal usage until message_stop", () => {
     const observer = createClientAbortMeteringObserver("claude");
     observer.observe(
