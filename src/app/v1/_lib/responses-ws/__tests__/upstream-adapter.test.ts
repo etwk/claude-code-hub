@@ -2,6 +2,7 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket, WebSocketServer } from "ws";
 import { completeCodexSessionIdentifiers } from "@/app/v1/_lib/codex/session-completer";
+import { createDemandDrivenResponsePump } from "@/app/v1/_lib/proxy/demand-driven-response-pump";
 import { parseSseBody } from "@/app/v1/_lib/proxy/stream-gate/sse-frames";
 import type { Provider } from "@/types/provider";
 import {
@@ -1618,12 +1619,21 @@ describe("tryResponsesWebsocketUpstream", () => {
       const result = await tryResponsesWebsocketUpstream(options);
       if (!("response" in result)) throw new Error("active native turn did not connect");
       expect(result.reused).toBe(reuse);
-      const reader = result.response.body!.getReader();
+      const pump = createDemandDrivenResponsePump({
+        source: result.response.body!,
+        onChunk: () => {},
+      });
+      const reader = pump.stream.getReader();
       const first = await reader.read();
       expect(new TextDecoder().decode(first.value)).toContain('"type":"response.created"');
       const rejected = expect(reader.read()).rejects.toMatchObject({ name: "AbortError" });
       cleanupResponsesWsSession(options.sessionId);
       await withTimeout(rejected, 1000, "session cleanup did not abort the native SSE read");
+      await expect(pump.completion).resolves.toMatchObject({
+        clientAborted: true,
+        streamEndedNormally: false,
+        error: expect.objectContaining({ name: "AbortError" }),
+      });
       controller.abort(new DOMException("delayed transport abort", "AbortError"));
       await withTimeout(closed, 1000, "cleaned-up native upstream remained open");
       expect(getResponsesWsSessionCountForTests()).toBe(0);

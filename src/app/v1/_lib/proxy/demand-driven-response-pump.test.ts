@@ -385,7 +385,7 @@ describe("createDemandDrivenResponsePump", () => {
     expect(releaseLock).toHaveBeenCalledTimes(1);
   });
 
-  it("errors an active downstream reader when the source fails during the primed read", async () => {
+  it("preserves an upstream AbortError as a source failure rather than client cancellation", async () => {
     const sourceState: {
       controller: ReadableStreamDefaultController<Uint8Array> | null;
     } = { controller: null };
@@ -400,7 +400,7 @@ describe("createDemandDrivenResponsePump", () => {
     const releaseLock = trackReaderRelease(source);
     const pump = createDemandDrivenResponsePump({ source, onChunk: vi.fn() });
     const reader = pump.stream.getReader();
-    const upstreamError = new Error("upstream failed");
+    const upstreamError = new DOMException("upstream failed", "AbortError");
 
     sourceState.controller?.error(upstreamError);
 

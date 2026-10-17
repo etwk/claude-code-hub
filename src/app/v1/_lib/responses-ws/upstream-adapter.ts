@@ -18,6 +18,7 @@ import { createHash } from "node:crypto";
 import type WebSocketType from "ws";
 import { logger } from "@/lib/logger";
 import type { Provider } from "@/types/provider";
+import { ClientDisconnectedError } from "../proxy/demand-driven-response-pump";
 import { RESERVED_INTERNAL_HEADERS } from "./internal-secret";
 import { getUpstreamPayloadTooLargeMessage } from "./payload-too-large";
 
@@ -835,9 +836,7 @@ export async function tryResponsesWebsocketUpstream(options: {
 
   function onAbort() {
     if (requestFinished) return;
-    requestAbortReason = abortSignal?.aborted
-      ? abortSignal.reason
-      : new DOMException("client disconnected", "AbortError");
+    requestAbortReason = abortSignal?.aborted ? abortSignal.reason : new ClientDisconnectedError();
     socketClosed = true;
     if (!firstEventSeen) {
       finishOpen({
