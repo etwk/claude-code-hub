@@ -1,3 +1,10 @@
+/** A CCH-owned client disconnect, distinct from an upstream or timeout AbortError. */
+export class ClientDisconnectedError extends DOMException {
+  constructor() {
+    super("Client disconnected", "AbortError");
+  }
+}
+
 export type DemandDrivenResponsePumpState = "client-active" | "draining" | "finalizing" | "closed";
 
 export interface DemandDrivenResponsePumpCompletion {
@@ -116,6 +123,10 @@ export function createDemandDrivenResponsePump(
   const finishWithError = (error: unknown) => {
     if (settled) return;
     const normalized = toError(error);
+    if (normalized instanceof ClientDisconnectedError && !clientAborted) {
+      clientAborted = true;
+      options.onClientCancel?.(normalized);
+    }
     if (state === "client-active") {
       try {
         clientController?.error(normalized);

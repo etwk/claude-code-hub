@@ -2,6 +2,7 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket, WebSocketServer } from "ws";
 import { completeCodexSessionIdentifiers } from "@/app/v1/_lib/codex/session-completer";
+import { createDemandDrivenResponsePump } from "@/app/v1/_lib/proxy/demand-driven-response-pump";
 import { parseSseBody } from "@/app/v1/_lib/proxy/stream-gate/sse-frames";
 import type { Provider } from "@/types/provider";
 import {
@@ -1191,9 +1192,7 @@ describe("tryResponsesWebsocketUpstream", () => {
       );
       expect(firstUpstreamCloseCode).toBe(1000);
 
-      const firstBody = await collectSseBody(first.response);
-      expect(firstBody).toContain("resp_busy_active");
-      expect(firstBody).toContain('"type":"error"');
+      await expect(collectSseBody(first.response)).rejects.toMatchObject({ name: "AbortError" });
     } finally {
       if (socketRefs.first?.readyState === 1) socketRefs.first.close(1000);
       if (socketRefs.second?.readyState === 1) socketRefs.second.close(1000);
@@ -1543,6 +1542,135 @@ describe("tryResponsesWebsocketUpstream", () => {
     } finally {
       processErrors.stop();
     }
+  });
+
+  it("rejects a pending SSE read with the abort reason after the first native event", async () => {
+    let resolveClosed!: () => void;
+    const closed = new Promise<void>((resolve) => {
+      resolveClosed = resolve;
+    });
+    server = await startMockServer((socket) => {
+      socket.once("close", resolveClosed);
+      socket.on("message", () => {
+        socket.send(JSON.stringify({ type: "response.created", response: { id: "resp_abort" } }));
+      });
+    });
+    const controller = new AbortController();
+    const result = await tryResponsesWebsocketUpstream({
+      provider: codexProvider(),
+      upstreamUrl: `http://127.0.0.1:${server.port}/v1/responses`,
+      upstreamHeaders: new Headers(),
+      sessionId: "abort-after-first-event",
+      abortSignal: controller.signal,
+      body: { model: "gpt-6.1-sol", input: "cancel after stream starts" },
+    });
+    if (!("response" in result)) throw new Error("native turn did not connect");
+    const reader = result.response.body!.getReader();
+    const first = await reader.read();
+    expect(new TextDecoder().decode(first.value)).toContain('"type":"response.created"');
+    const pending = reader.read();
+    const reason = new DOMException("client disconnected", "AbortError");
+    const rejected = expect(pending).rejects.toBe(reason);
+    controller.abort(reason);
+    await withTimeout(rejected, 1000, "aborted native SSE read did not settle");
+    await withTimeout(closed, 1000, "aborted native upstream remained open");
+    expect(getResponsesWsSessionCountForTests()).toBe(0);
+  });
+
+  it.each([false, true])(
+    "rejects an active retained stream on session cleanup before the transport aborts (reused=%s)",
+    async (reuse) => {
+      let requests = 0;
+      let resolveClosed!: () => void;
+      const closed = new Promise<void>((resolve) => {
+        resolveClosed = resolve;
+      });
+      server = await startMockServer((socket) => {
+        socket.once("close", resolveClosed);
+        socket.on("message", () => {
+          requests += 1;
+          socket.send(
+            JSON.stringify({ type: "response.created", response: { id: "resp_cleanup" } })
+          );
+          if (reuse && requests === 1) {
+            socket.send(
+              JSON.stringify({
+                type: "response.completed",
+                response: { id: "resp_cleanup", status: "completed" },
+              })
+            );
+          }
+        });
+      });
+      const controller = new AbortController();
+      const options = {
+        provider: codexProvider(),
+        upstreamUrl: `http://127.0.0.1:${server.port}/v1/responses`,
+        upstreamHeaders: new Headers(),
+        sessionId: "cleanup-before-transport-abort",
+        abortSignal: controller.signal,
+        body: { model: "gpt-6.1-sol", input: "cancel retained native turn" },
+      };
+      if (reuse) {
+        const first = await tryResponsesWebsocketUpstream(options);
+        if (!("response" in first)) throw new Error("initial native turn did not connect");
+        expect(await collectSseBody(first.response)).toContain('"type":"response.completed"');
+      }
+      const result = await tryResponsesWebsocketUpstream(options);
+      if (!("response" in result)) throw new Error("active native turn did not connect");
+      expect(result.reused).toBe(reuse);
+      const pump = createDemandDrivenResponsePump({
+        source: result.response.body!,
+        onChunk: () => {},
+      });
+      const reader = pump.stream.getReader();
+      const first = await reader.read();
+      expect(new TextDecoder().decode(first.value)).toContain('"type":"response.created"');
+      const rejected = expect(reader.read()).rejects.toMatchObject({ name: "AbortError" });
+      cleanupResponsesWsSession(options.sessionId);
+      await withTimeout(rejected, 1000, "session cleanup did not abort the native SSE read");
+      await expect(pump.completion).resolves.toMatchObject({
+        clientAborted: true,
+        streamEndedNormally: false,
+        error: expect.objectContaining({ name: "AbortError" }),
+      });
+      controller.abort(new DOMException("delayed transport abort", "AbortError"));
+      await withTimeout(closed, 1000, "cleaned-up native upstream remained open");
+      expect(getResponsesWsSessionCountForTests()).toBe(0);
+    }
+  );
+
+  it("preserves an observed upstream truncation when the caller subsequently aborts", async () => {
+    let upstreamSocket!: WebSocket;
+    let resolveClosed!: () => void;
+    const closed = new Promise<void>((resolve) => {
+      resolveClosed = resolve;
+    });
+    server = await startMockServer((socket) => {
+      upstreamSocket = socket;
+      socket.once("close", resolveClosed);
+      socket.on("message", () => {
+        socket.send(
+          JSON.stringify({ type: "response.created", response: { id: "resp_truncated" } })
+        );
+      });
+    });
+    const controller = new AbortController();
+    const result = await tryResponsesWebsocketUpstream({
+      provider: codexProvider(),
+      upstreamUrl: `http://127.0.0.1:${server.port}/v1/responses`,
+      upstreamHeaders: new Headers(),
+      abortSignal: controller.signal,
+      body: { model: "gpt-6.1-sol", input: "upstream fails before client aborts" },
+    });
+    if (!("response" in result)) throw new Error("native turn did not connect");
+    upstreamSocket.close(1000, "genuine-upstream-truncation");
+    await withTimeout(closed, 1000, "upstream close did not complete");
+    await flushProcessEvents();
+    controller.abort(new DOMException("later client disconnect", "AbortError"));
+    const body = await collectSseBody(result.response);
+    expect(body).toContain("upstream_ws_closed_mid_stream");
+    expect(body).toContain("genuine-upstream-truncation");
   });
 
   it("keeps the persistent session map bounded when every retained session is active", async () => {

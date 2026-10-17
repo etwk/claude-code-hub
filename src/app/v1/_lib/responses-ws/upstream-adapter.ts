@@ -18,6 +18,7 @@ import { createHash } from "node:crypto";
 import type WebSocketType from "ws";
 import { logger } from "@/lib/logger";
 import type { Provider } from "@/types/provider";
+import { ClientDisconnectedError } from "../proxy/demand-driven-response-pump";
 import { RESERVED_INTERNAL_HEADERS } from "./internal-secret";
 import { getUpstreamPayloadTooLargeMessage } from "./payload-too-large";
 
@@ -165,6 +166,7 @@ type PersistentWsEntry = {
   fingerprint: string;
   ws: WebSocketType;
   active: boolean;
+  abortActiveRequest?: () => void;
   createdAt: number;
   lastUsedAt: number;
   idleTimer: ReturnType<typeof setTimeout> | null;
@@ -395,7 +397,11 @@ export function cleanupResponsesWsSession(sessionId: string): void {
   const entry = persistentSessions.get(sessionId);
   if (!entry) return;
   logger.info("[ResponsesWsAdapter] cleaning upstream WS session", { sessionId });
-  closePersistentEntry(entry, 1000);
+  if (entry.abortActiveRequest) {
+    entry.abortActiveRequest();
+  } else {
+    closePersistentEntry(entry, 1000);
+  }
 }
 
 export function clearResponsesWsSessionsForTests(): void {
@@ -562,6 +568,7 @@ export async function tryResponsesWebsocketUpstream(options: {
   // The downstream pipeline must see this as an error rather than a clean
   // end-of-stream so it doesn't treat a half-streamed response as success.
   let midStreamError: { code: string; message?: string } | null = null;
+  let requestAbortReason: unknown;
   // Hoisted twin of `sawTerminalEvent` (which is scoped inside the SSE
   // ReadableStream's start()). The `ws.on("close")` handler runs in this
   // outer scope and would otherwise have no way to tell whether a terminal
@@ -804,6 +811,7 @@ export async function tryResponsesWebsocketUpstream(options: {
 
     let closeDetachedEntry = false;
     if (persistentEntry) {
+      persistentEntry.abortActiveRequest = undefined;
       persistentEntry.active = false;
       persistentEntry.lastUsedAt = Date.now();
       const retainedForReuse = sessionId
@@ -827,6 +835,8 @@ export async function tryResponsesWebsocketUpstream(options: {
   };
 
   function onAbort() {
+    if (requestFinished) return;
+    requestAbortReason = abortSignal?.aborted ? abortSignal.reason : new ClientDisconnectedError();
     socketClosed = true;
     if (!firstEventSeen) {
       finishOpen({
@@ -839,6 +849,8 @@ export async function tryResponsesWebsocketUpstream(options: {
     resolveMessageWaiter();
     finishRequest({ closeCode: 1000, forgetSession: true });
   }
+
+  if (persistentEntry) persistentEntry.abortActiveRequest = onAbort;
 
   ws.on("message", onMessage);
   ws.on("error", onError);
@@ -894,6 +906,7 @@ export async function tryResponsesWebsocketUpstream(options: {
 
   if (sessionId && canRetainFreshSession && !persistentEntry && !socketClosed) {
     persistentEntry = registerPersistentSession(sessionId, fingerprint, ws);
+    if (persistentEntry) persistentEntry.abortActiveRequest = onAbort;
   }
 
   // Upstream WS is open and at least one event was received. Each downstream
@@ -1006,6 +1019,15 @@ export async function tryResponsesWebsocketUpstream(options: {
         const processed = processText(next);
         controller.enqueue(processed.bytes);
         if (processed.terminal) completeTerminal(controller);
+        return;
+      }
+
+      // A local abort wakes this pull too. Preserve its reason so downstream
+      // cancellation accounting cannot mistake it for an upstream error frame.
+      // Already queued events and observed upstream failures retain precedence.
+      if (requestAbortReason !== undefined && !midStreamError) {
+        streamFinished = true;
+        controller.error(requestAbortReason);
         return;
       }
 
