@@ -460,7 +460,7 @@ describe("ProxyReplayGuard：completed 全量重放", () => {
       });
       expect(String(dbControl.rows[0].blockedReason)).toContain("redis_completed");
       expect(String(dbControl.rows[0].blockedReason)).toContain(identity.replayId.slice(0, 12));
-      expect(materializeReplayAuditFromSourceMock).toHaveBeenCalledWith(501, 101);
+      expect(materializeReplayAuditFromSourceMock).toHaveBeenCalledWith(501, 101, identity);
     } finally {
       dateNowSpy.mockRestore();
     }
@@ -592,7 +592,7 @@ describe("ProxyReplayGuard：completed 全量重放", () => {
       isReplay: true,
       replaySourceRequestId: 103,
     });
-    expect(materializeReplayAuditFromSourceMock).toHaveBeenCalledWith(501, 103);
+    expect(materializeReplayAuditFromSourceMock).toHaveBeenCalledWith(501, 103, identity);
   });
 
   it("审计行写失败不影响重放响应", async () => {
@@ -648,7 +648,7 @@ describe("ProxyReplayGuard：owning attach-live 跟尾", () => {
       isReplay: true,
     });
     expect(String(dbControl.rows[0].blockedReason)).toContain("attached_live");
-    expect(materializeReplayAuditFromSourceMock).toHaveBeenCalledWith(501, 202);
+    expect(materializeReplayAuditFromSourceMock).toHaveBeenCalledWith(501, 202, identity);
     expect(storeControl.tryClaimOwner).not.toHaveBeenCalled();
   });
 
@@ -737,7 +737,7 @@ describe("ProxyReplayGuard：owning attach-live 跟尾", () => {
 
     await expect(response?.text()).resolves.toBe("data: a\n\ndata: b\n\n");
     expect(storeControl.findCompleted).toHaveBeenCalledWith(identity.replayId);
-    expect(materializeReplayAuditFromSourceMock).toHaveBeenCalledWith(501, 204);
+    expect(materializeReplayAuditFromSourceMock).toHaveBeenCalledWith(501, 204, identity);
     expect(dbControl.rows).toHaveLength(1);
     expect(String(dbControl.rows[0].blockedReason)).toContain("attached_live");
   });

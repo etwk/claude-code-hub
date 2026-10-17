@@ -554,6 +554,66 @@ describe("ProxyResponseHandler.dispatch stream terminal behavior", () => {
     expect(getDetachedStreamBudgetSnapshot().activeStreams).toBe(0);
   });
 
+  it.each([false, true])(
+    "does not publish a detached Replay after an oversized error is skipped, terminalFirst=%s",
+    async (terminalFirst) => {
+      let sourceController!: ReadableStreamDefaultController<Uint8Array>;
+      const encoder = new TextEncoder();
+      const source = new ReadableStream<Uint8Array>({
+        start(controller) {
+          sourceController = controller;
+          controller.enqueue(
+            encoder.encode(
+              'data: {"choices":[{"delta":{"content":"started"},"finish_reason":null}]}\n\n'
+            )
+          );
+        },
+      });
+      const { session } = await createSession({});
+      session.setProvider({ ...createProvider(), providerType: "openai" });
+      session.originalFormat = "openai";
+      setReplayOwner(session, `detached-oversized-error-${terminalFirst}`);
+      setReplayFinalization(session);
+      const terminal =
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":4}}\n\n';
+
+      const returned = await ProxyResponseHandler.dispatch(session, sseResponse(source));
+      const reader = returned.body!.getReader();
+      await reader.read();
+      if (terminalFirst) {
+        sourceController.enqueue(encoder.encode(terminal));
+        await reader.read();
+      }
+      await reader.cancel(new Error("client disconnected"));
+      const oversizedError = `data: ${JSON.stringify({
+        error: { type: "upstream_error", message: "x".repeat(80 * 1024) },
+      })}\n\n`;
+      sourceController.enqueue(
+        encoder.encode(`${oversizedError}${terminalFirst ? "" : terminal}data: [DONE]\n\n`)
+      );
+      await settleTasks();
+
+      const observedText = mocks.replayObserve.mock.calls
+        .map(([chunk]) => new TextDecoder().decode(chunk as Uint8Array))
+        .join("");
+      expect(observedText).toContain('"type":"upstream_error"');
+      expect(observedText).toContain("data: [DONE]");
+      expect(mocks.replayComplete).not.toHaveBeenCalled();
+      expect(mocks.replayAbort).toHaveBeenCalled();
+      expect(mocks.durable).toHaveBeenCalledWith(
+        MESSAGE.id,
+        expect.objectContaining({
+          statusCode: terminalFirst ? 200 : 499,
+          ...(terminalFirst ? {} : { errorMessage: "CLIENT_ABORTED" }),
+          inputTokens: 10,
+          outputTokens: 4,
+        }),
+        expect.objectContaining({ onCommitted: expect.any(Function) })
+      );
+      expect(getDetachedStreamBudgetSnapshot().activeStreams).toBe(0);
+    }
+  );
+
   it("downgrades a detached Replay to metering when Replay headroom is exhausted", async () => {
     const blocker = acquireDetachedStreamLease("replay", 20 * 1024 * 1024);
     if (!blocker.acquired) throw new Error("expected Replay budget blocker");
@@ -1249,57 +1309,6 @@ describe("ProxyResponseHandler.dispatch stream terminal behavior", () => {
       );
     }
   );
-
-  it("allows observation overflow to complete a successful Replay entry", async () => {
-    const { session } = await createSession({});
-    session.setProvider({ ...createProvider(), providerType: "codex" });
-    session.originalFormat = "response";
-    session.replayState = {
-      role: "owner",
-      ownerToken: "owner-token-overflow",
-      identity: {
-        replayId: "replay-overflow",
-        verifier: "verifier",
-        scopeTag: "scope-tag",
-        keyId: KEY.id,
-        userId: USER.id,
-        format: "response",
-        model: "gpt-test",
-        endpoint: "/v1/responses",
-      },
-    };
-    setDeferredStreamingFinalization(session, {
-      providerId: session.provider?.id ?? 0,
-      providerName: session.provider?.name ?? "provider",
-      providerPriority: session.provider?.priority ?? 0,
-      attemptNumber: 1,
-      totalProvidersAttempted: 1,
-      isFirstAttempt: true,
-      isFailoverSuccess: false,
-      endpointId: null,
-      endpointUrl: session.provider?.url ?? "",
-      upstreamStatusCode: 200,
-      bindingIntent: "none",
-    });
-    const oversizedDelta = "x".repeat(10 * 1024 * 1024 + 1);
-    const body = [
-      'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"ok"}\n\n',
-      `event: response.output_text.delta\ndata: ${JSON.stringify({ type: "response.output_text.delta", delta: oversizedDelta })}\n\n`,
-      'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":10,"output_tokens":2}}}\n\n',
-    ].join("");
-
-    const returned = await ProxyResponseHandler.dispatch(session, sseResponse(body));
-    expect((await returned.text()).length).toBe(body.length);
-    await settleTasks();
-
-    expect(mocks.durable).toHaveBeenCalledWith(
-      MESSAGE.id,
-      expect.objectContaining({ inputTokens: 10, outputTokens: 2, statusCode: 200 }),
-      expect.objectContaining({ onCommitted: expect.any(Function) })
-    );
-    expect(mocks.replayAbort).not.toHaveBeenCalled();
-    expect(mocks.replayComplete).toHaveBeenCalledWith(MESSAGE.id);
-  });
 
   it("aborts Replay when a late protocol error is outside the bounded text snapshot", async () => {
     const { session } = await createSession({});

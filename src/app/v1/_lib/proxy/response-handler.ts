@@ -2083,13 +2083,17 @@ function finalizeDeferredStreamingFinalizationIfNeeded(
   const confirmAuxiliarySessionBinding = async () =>
     allowAuxiliarySessionBinding && (await primaryDiscoveryBinding);
 
-  // 仅在“上游 HTTP=200、流自然结束且客户端未取消”时做“假 200”检测：
-  // - 非 200：HTTP 已经表明失败（无需额外启发式）
-  // - 非自然结束：内容可能是部分流/截断，启发式会显著提高误判风险
-  //
-  // 此处返回 `{isError:false}` 仅表示“跳过检测”，最终仍会在下面按中断/超时视为失败结算。
+  // Natural EOF can prove an empty fake-200 response. Cancellation cannot: only
+  // complete, nonempty evidence frozen before the abort may establish a failure.
+  // The metering observer applies the existing message rule before compaction.
   const shouldDetectFake200 =
-    parseResponseDiagnostics && !clientAborted && streamEndedNormally && upstreamStatusCode === 200;
+    parseResponseDiagnostics &&
+    upstreamStatusCode === 200 &&
+    (clientAborted
+      ? clientAbortSnapshot !== null &&
+        completionObservation?.failure?.verdict !== "error" &&
+        completionContent.trim().length > 0
+      : streamEndedNormally);
   const bodyDetected = shouldDetectFake200
     ? detectUpstreamErrorFromSseOrJsonText(completionContent)
     : ({ isError: false } as const);
@@ -2134,6 +2138,7 @@ function finalizeDeferredStreamingFinalizationIfNeeded(
             : "Upstream stream emitted a protocol error event",
         } as const)
       : bodyDetected;
+  const hasAuthoritativeUpstreamFailure = detected.isError || upstreamStatusCode >= 400;
   let clientAbortGateUsage: FinalizeDeferredStreamingResult["clientAbortGateUsage"];
   const clientAbortCompleteSuccess = (() => {
     if (!clientAborted || upstreamStatusCode < 200 || upstreamStatusCode >= 300) {
@@ -2176,6 +2181,7 @@ function finalizeDeferredStreamingFinalizationIfNeeded(
         );
   const clientAbortNoFirstByte =
     !clientAbortCompleteSuccess &&
+    !hasAuthoritativeUpstreamFailure &&
     clientAborted &&
     meta?.healthAttemptId != null &&
     meta.healthFirstByteSeen !== true &&
@@ -2239,9 +2245,9 @@ function finalizeDeferredStreamingFinalizationIfNeeded(
     // 但显式标记为非成功，阻止 Replay、亲和和 Session 绑定副作用。
     effectiveStatusCode = upstreamStatusCode;
     errorMessage = "RESPONSE_INCOMPLETE";
-  } else if (streamEndedNormally && upstreamStatusCode >= 400) {
+  } else if (upstreamStatusCode >= 400) {
     effectiveStatusCode = upstreamStatusCode;
-    if (parseResponseDiagnostics) {
+    if (parseResponseDiagnostics && completionContent.trim().length > 0) {
       const upstreamError = detectUpstreamErrorFromSseOrJsonText(completionContent);
       errorMessage = upstreamError.isError ? upstreamError.code : `HTTP ${upstreamStatusCode}`;
     } else {
@@ -2254,20 +2260,8 @@ function finalizeDeferredStreamingFinalizationIfNeeded(
     effectiveStatusCode = 502;
     errorMessage = abortReason ?? "STREAM_ABORTED";
   } else {
-    // streamEndedNormally=true
     effectiveStatusCode = upstreamStatusCode;
-
-    if (upstreamStatusCode >= 400) {
-      if (parseResponseDiagnostics) {
-        const detected = detectUpstreamErrorFromSseOrJsonText(completionContent);
-        errorMessage = detected.isError ? detected.code : `HTTP ${upstreamStatusCode}`;
-      } else {
-        errorMessage = `HTTP ${upstreamStatusCode}`;
-      }
-    } else {
-      // 2xx 成功状态码
-      errorMessage = null;
-    }
+    errorMessage = null;
   }
   const isSuccessfulCompletion =
     !isIncompleteCompletion &&
@@ -2384,7 +2378,11 @@ function finalizeDeferredStreamingFinalizationIfNeeded(
   // 同时，为了让故障转移/熔断能正确工作：
   // - 客户端主动中断：默认不计入熔断器；仅 legacy serial 的静默首字节阈值命中会归因供应商
   // - 非客户端中断：计入 provider/endpoint 熔断失败（与 timeout 路径保持一致）
-  if ((clientAborted || !streamEndedNormally) && !clientAbortCompleteSuccess) {
+  if (
+    (clientAborted || !streamEndedNormally) &&
+    !clientAbortCompleteSuccess &&
+    !hasAuthoritativeUpstreamFailure
+  ) {
     session.addProviderToChain(providerForChain, {
       endpointId: meta.endpointId,
       endpointUrl: meta.endpointUrl,
@@ -2512,7 +2510,8 @@ function finalizeDeferredStreamingFinalizationIfNeeded(
     };
   }
 
-  // ========== 非200状态码处理（流自然结束但HTTP状态码表示错误）==========
+  // HTTP failures are authoritative as soon as headers arrive, even if the
+  // client cancels before any structured error body is received.
   if (upstreamStatusCode >= 400 && errorMessage !== null) {
     logger.warn("[ResponseHandler] SSE completed but HTTP status indicates error", {
       providerId: meta.providerId,
@@ -5287,6 +5286,7 @@ export class ProxyResponseHandler {
             !detectUpstreamErrorFromSseOrJsonText(allContent).isError;
           const isReplayableSuccess =
             (finalized.isSuccessfulCompletion || detachedUpstreamCompleted) &&
+            !finalProtocolObservation?.observationIncomplete &&
             !finalized.replayIneligibleReason &&
             hasReplayCompletionMarker(allContent, session.originalFormat);
           if (isReplayableSuccess) {

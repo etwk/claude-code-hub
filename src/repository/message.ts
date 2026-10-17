@@ -374,9 +374,11 @@ export async function createMessageRequest(
   return toMessageRequest(result);
 }
 
+/** Project usage without billing; a cancelled delivery needs independent durable completion. */
 export async function materializeReplayAuditFromSource(
   replayRequestId: number,
-  sourceRequestId: number
+  sourceRequestId: number,
+  replayIdentity?: { replayId: string; verifier: string; keyId: number }
 ): Promise<boolean> {
   const rows = await db.execute(sql`
     UPDATE message_request AS replay
@@ -385,7 +387,10 @@ export async function materializeReplayAuditFromSource(
       model = source.model,
       original_model = source.original_model,
       actual_response_model = source.actual_response_model,
-      status_code = source.status_code,
+      status_code = CASE
+        WHEN source.status_code = 499 THEN completed.status_code
+        ELSE source.status_code
+      END,
       input_tokens = source.input_tokens,
       output_tokens = source.output_tokens,
       cache_creation_input_tokens = source.cache_creation_input_tokens,
@@ -405,6 +410,17 @@ export async function materializeReplayAuditFromSource(
       blocked_by = NULL,
       updated_at = NOW()
     FROM message_request AS source
+    LEFT JOIN replay_payloads AS completed
+      ON completed.replay_id = ${replayIdentity?.replayId ?? null}
+      AND completed.verifier = ${replayIdentity?.verifier ?? null}
+      AND completed.key_id = ${replayIdentity?.keyId ?? null}
+      AND completed.source_message_request_id = source.id
+      AND completed.user_id = source.user_id
+      AND completed.status_code >= 200
+      AND completed.status_code < 400
+      AND completed.payload <> ''
+      AND completed.byte_size > 0
+      AND completed.expires_at > NOW()
     WHERE replay.id = ${replayRequestId}
       AND replay.is_replay = TRUE
       AND replay.deleted_at IS NULL
@@ -412,9 +428,20 @@ export async function materializeReplayAuditFromSource(
       AND source.id <> replay.id
       AND source.is_replay = FALSE
       AND source.deleted_at IS NULL
-      AND source.status_code >= 200
-      AND source.status_code < 400
-      AND COALESCE(source.error_message, '') = ''
+      AND source.user_id = replay.user_id
+      AND source.key = replay.key
+      AND (
+        (
+          source.status_code >= 200
+          AND source.status_code < 400
+          AND COALESCE(source.error_message, '') = ''
+        )
+        OR (
+          source.status_code = 499
+          AND source.error_message = 'CLIENT_ABORTED'
+          AND completed.replay_id IS NOT NULL
+        )
+      )
     RETURNING replay.id
   `);
 

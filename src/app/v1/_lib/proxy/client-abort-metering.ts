@@ -1,3 +1,4 @@
+import { detectUpstreamErrorFromSseEvent } from "@/lib/utils/upstream-error-detection";
 import type { ClientFormat } from "./format-mapper";
 import {
   classifyStructuredFrame,
@@ -11,6 +12,7 @@ export const CLIENT_ABORT_METER_MAX_FRAME_BYTES = 64 * 1024;
 
 type EvidenceSlot =
   | "error"
+  | "fake-200-error"
   | "initial-usage"
   | "latest-usage"
   | "metadata"
@@ -612,6 +614,17 @@ export function createClientAbortMeteringObserver(
     if (verdict === "content") sawContent = true;
     if (verdict === "error" || verdict === "malformed") {
       recordProtocolFailure(verdict, frame.eventName);
+    }
+    if (
+      verdict !== "error" &&
+      isRecord(parsed) &&
+      typeof parsed.message === "string" &&
+      detectUpstreamErrorFromSseEvent(parsed, frame.eventName).isError
+    ) {
+      setEvidence(
+        "fake-200-error",
+        `data: ${JSON.stringify({ message: parsed.message.slice(0, 1024) })}\n\n`
+      );
     }
     if (!isRecord(parsed) || !shouldInspectFrame(format, frame)) return;
 

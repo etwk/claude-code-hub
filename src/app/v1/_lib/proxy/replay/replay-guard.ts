@@ -667,7 +667,7 @@ export class ProxyReplayGuard {
         .returning({ id: messageRequest.id });
 
       if (auditRow && sourceRequestId) {
-        await ProxyReplayGuard.tryMaterializeAudit(auditRow.id, sourceRequestId);
+        await ProxyReplayGuard.tryMaterializeAudit(auditRow.id, sourceRequestId, identity);
       }
       return auditRow?.id ?? null;
     } catch (error) {
@@ -680,10 +680,11 @@ export class ProxyReplayGuard {
 
   private static async tryMaterializeAudit(
     replayRequestId: number,
-    sourceRequestId: number
+    sourceRequestId: number,
+    identity: ReplayIdentity
   ): Promise<void> {
     try {
-      await materializeReplayAuditFromSource(replayRequestId, sourceRequestId);
+      await materializeReplayAuditFromSource(replayRequestId, sourceRequestId, identity);
     } catch (error) {
       logger.warn("[ReplayGuard] audit materialization failed", {
         replayRequestId,
