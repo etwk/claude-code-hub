@@ -67,6 +67,10 @@ type DetectionOptions = {
 
 const DEFAULT_MAX_JSON_CHARS_FOR_MESSAGE_CHECK = 1000;
 const DEFAULT_MESSAGE_KEYWORD = /error/i;
+const DEFAULT_DETECTION_OPTIONS = {
+  maxJsonCharsForMessageCheck: DEFAULT_MAX_JSON_CHARS_FOR_MESSAGE_CHECK,
+  messageKeyword: DEFAULT_MESSAGE_KEYWORD,
+};
 
 const FAKE_200_CODES = {
   EMPTY_BODY: "FAKE_200_EMPTY_BODY",
@@ -464,6 +468,33 @@ function detectFromJsonObject(
   return { isError: false };
 }
 
+/** Classify an already-parsed SSE event without parsing or copying its wire frame. */
+export function detectUpstreamErrorFromSseEvent(
+  data: Record<string, unknown>,
+  eventName: string | null,
+  options: Required<
+    Pick<DetectionOptions, "maxJsonCharsForMessageCheck" | "messageKeyword">
+  > = DEFAULT_DETECTION_OPTIONS
+): UpstreamErrorDetectionResult {
+  const normalizedEventName = eventName?.trim();
+  const eventData = normalizedEventName ? { ...data, __sseEvent: normalizedEventName } : data;
+  let chars = 0;
+  const errorValue = eventData.error;
+  const messageValue = eventData.message;
+  if (!hasNonEmptyValue(errorValue) && typeof messageValue === "string") {
+    if (messageValue.length >= options.maxJsonCharsForMessageCheck) {
+      chars = options.maxJsonCharsForMessageCheck;
+    } else {
+      try {
+        chars = JSON.stringify(eventData).length;
+      } catch {
+        chars = messageValue.length;
+      }
+    }
+  }
+  return detectFromJsonObject(eventData, chars, options);
+}
+
 /**
  * 用于“流式 SSE 已经结束后”的补充检查：
  * - 响应体为空：视为错误
@@ -544,29 +575,11 @@ export function detectUpstreamErrorFromSseOrJsonText(
   const events = parseSSEData(text);
   for (const evt of events) {
     if (!isPlainRecord(evt.data)) continue;
-    const eventData =
-      typeof evt.event === "string" && evt.event.trim().length > 0
-        ? { ...evt.data, __sseEvent: evt.event.trim() }
-        : evt.data;
-    // 性能优化：只有在 message 是字符串、且“看起来足够小”时才需要精确计算 JSON 字符数。
-    // 对大多数 SSE 事件（message 为对象、或没有 message），无需 JSON.stringify。
-    let chars = 0;
-    const errorValue = eventData.error;
-    const messageValue = eventData.message;
-    if (!hasNonEmptyValue(errorValue) && typeof messageValue === "string") {
-      if (messageValue.length >= merged.maxJsonCharsForMessageCheck) {
-        chars = merged.maxJsonCharsForMessageCheck; // >= 阈值即可跳过 message 关键字判定
-      } else {
-        try {
-          chars = JSON.stringify(eventData).length;
-        } catch {
-          // stringify 失败时回退为近似值（仍保持“仅小体积 JSON 才做 message 检测”的意图）
-          chars = messageValue.length;
-        }
-      }
-    }
-
-    const res = detectFromJsonObject(eventData, chars, merged);
+    const res = detectUpstreamErrorFromSseEvent(
+      evt.data,
+      typeof evt.event === "string" ? evt.event : null,
+      merged
+    );
     if (res.isError) return res;
   }
 

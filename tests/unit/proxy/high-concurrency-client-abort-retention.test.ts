@@ -331,9 +331,11 @@ describe("high concurrency client-abort retention (fix for 499 + affinity churn)
     });
 
     const downstream = await ProxyResponseHandler.dispatch(session, completedResponsesSse());
-    // Codex reads response.completed then hangs up: abort after dispatch
+    const reader = downstream.body!.getReader();
+    const chunk = await reader.read();
+    expect(new TextDecoder().decode(chunk.value)).toContain("response.completed");
     controller.abort(new Error("client detached"));
-    await downstream.body?.cancel("client detached").catch(() => {});
+    await reader.cancel("client detached").catch(() => {});
     await drainHcTasks();
 
     const calls = vi.mocked(updateMessageRequestDetailsDurably).mock.calls;

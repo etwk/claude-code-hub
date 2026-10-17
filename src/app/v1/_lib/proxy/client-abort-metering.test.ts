@@ -39,6 +39,47 @@ describe("createClientAbortMeteringObserver", () => {
     expect(snapshot.retainedBytes).toBeLessThanOrEqual(CLIENT_ABORT_METER_MAX_RETAINED_BYTES);
   });
 
+  it("snapshots only complete frames without ending the usage drain", () => {
+    const observer = createClientAbortMeteringObserver("response");
+    observer.observe(
+      encoder.encode('event: response.completed\ndata: {"type":"response.completed","response":')
+    );
+    const before = observer.snapshot();
+    expect(before).toMatchObject({ terminalSeen: false, text: "", protocolFailure: null });
+
+    observer.switchToDetachedMode();
+    observer.observe(encoder.encode('{"usage":{"input_tokens":10,"output_tokens":5}}}\n\n'));
+    expect(observer.finish()).toMatchObject({ terminalSeen: true, protocolFailure: null });
+    expect(observer.finish().text).toContain('"output_tokens":5');
+    expect(before).toMatchObject({ terminalSeen: false, text: "", protocolFailure: null });
+  });
+
+  it("retains a complete message-only fake-200 error without promoting a partial frame", () => {
+    const observer = createClientAbortMeteringObserver("response");
+    observer.observe(encoder.encode('data: {"message":"upstream error"}'));
+    const before = observer.snapshot();
+    expect(before.text).toBe("");
+
+    observer.observe(encoder.encode("\n\n"));
+    const complete = observer.snapshot();
+    expect(complete.text).toBe('data: {"message":"upstream error"}\n\n');
+    expect(complete.protocolFailure).toBeNull();
+    expect(complete.retainedBytes).toBeLessThanOrEqual(CLIENT_ABORT_METER_MAX_RETAINED_BYTES);
+    expect(before.text).toBe("");
+  });
+
+  it.each([
+    { message: "upstream error", padding: "x".repeat(1000) },
+    { message: "normal bookkeeping" },
+    { choices: [{ delta: { content: "upstream error" } }] },
+  ])("does not invent fake-200 evidence from a neutral frame: %j", (payload) => {
+    const observer = createClientAbortMeteringObserver("openai");
+    observer.observe(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+
+    expect(observer.snapshot().text).toBe("");
+    expect(observer.snapshot().protocolFailure).toBeNull();
+  });
+
   it("retains Claude initial and terminal usage until message_stop", () => {
     const observer = createClientAbortMeteringObserver("claude");
     observer.observe(

@@ -865,7 +865,7 @@ function createActiveHangingResponsesSse(upstreamSignal: AbortSignal): Response 
   });
 }
 
-function createCompletedThenErroredResponsesSse(): Response {
+function createCompletedOpenResponsesSse(): Response {
   const encoder = new TextEncoder();
   const chunks = [
     `event: response.output_text.done\ndata: ${JSON.stringify({
@@ -892,10 +892,6 @@ function createCompletedThenErroredResponsesSse(): Response {
         controller.enqueue(encoder.encode(chunks[index++]));
         return;
       }
-
-      const error = new Error("Response transmission interrupted after final usage");
-      error.name = "ResponseAborted";
-      controller.error(error);
     },
   });
 
@@ -948,9 +944,8 @@ function createTruncatedClaudeSse(): Response {
   });
 }
 
-// A genuinely complete Claude stream (terminal `message_stop`) whose socket is
-// then dropped by the already-departed client must still bill as success.
-function createCompletedThenAbortedClaudeSse(): Response {
+// Keep the transport open after message_stop so the client owns the later cancellation.
+function createCompletedOpenClaudeSse(): Response {
   const encoder = new TextEncoder();
   const chunks = [
     `event: message_start\ndata: ${JSON.stringify({
@@ -980,9 +975,6 @@ function createCompletedThenAbortedClaudeSse(): Response {
         controller.enqueue(encoder.encode(chunks[index++]));
         return;
       }
-      const error = new Error("Response transmission interrupted after message_stop");
-      error.name = "ResponseAborted";
-      controller.error(error);
     },
   });
 
@@ -990,6 +982,18 @@ function createCompletedThenAbortedClaudeSse(): Response {
     status: 200,
     headers: { "content-type": "text/event-stream" },
   });
+}
+
+async function readThroughEvent(response: Response, event: string) {
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  while (!text.includes(event)) {
+    const chunk = await reader.read();
+    expect(chunk.done).toBe(false);
+    text += decoder.decode(chunk.value, { stream: true });
+  }
+  return reader;
 }
 
 async function expectAllFulfilled(tasks: readonly Promise<unknown>[]): Promise<void> {
@@ -2000,7 +2004,7 @@ describe("ProxyResponseHandler stream client abort finalization", () => {
     );
   });
 
-  it("finalizes a complete upstream responses stream as success when the downstream client already closed", async () => {
+  it("keeps cancellation status while collecting a complete upstream response after the client closed", async () => {
     const controller = new AbortController();
     controller.abort();
     const session = createSession(controller.signal);
@@ -2026,7 +2030,8 @@ describe("ProxyResponseHandler stream client abort finalization", () => {
     expect(updateMessageRequestDetailsDurably).toHaveBeenCalledWith(
       123,
       expect.objectContaining({
-        statusCode: 200,
+        statusCode: 499,
+        errorMessage: "CLIENT_ABORTED",
         inputTokens: 463,
         outputTokens: 11,
       }),
@@ -2161,9 +2166,315 @@ describe("ProxyResponseHandler stream client abort finalization", () => {
     expect(SessionManager.storeSessionResponse).not.toHaveBeenCalled();
   });
 
+  it.each(
+    [
+      {
+        name: "Chat",
+        providerType: "openai-compatible",
+        originalFormat: "openai",
+        endpoint: "/v1/chat/completions",
+        initial: 'data: {"choices":[{"delta":{"content":"started"},"finish_reason":null}]}\n\n',
+        terminal:
+          'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}\n\ndata: [DONE]\n\n',
+        status: 200,
+        error: null,
+      },
+      {
+        name: "Messages",
+        providerType: "claude",
+        originalFormat: "claude",
+        endpoint: "/v1/messages",
+        initial:
+          'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0}}}\n\n',
+        terminal:
+          'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n',
+        status: 200,
+        error: null,
+      },
+      ...[
+        { name: "completed", status: 200, error: null },
+        { name: "incomplete", status: 200, error: "RESPONSE_INCOMPLETE" },
+        { name: "failed", status: 502, error: expect.stringContaining("UPSTREAM_PROTOCOL_ERROR") },
+      ].map(({ name, status, error }) => ({
+        name: `Responses ${name}`,
+        providerType: "codex",
+        originalFormat: "response",
+        endpoint: "/v1/responses",
+        initial:
+          'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"started"}\n\n',
+        terminal: `event: response.${name}\ndata: ${JSON.stringify({ type: `response.${name}`, response: { status: name, usage: { input_tokens: 10, output_tokens: 5 } } })}\n\n`,
+        status,
+        error,
+      })),
+      {
+        name: "Gemini passthrough",
+        providerType: "gemini",
+        originalFormat: "gemini",
+        endpoint: "/v1beta/models/gemini-test:streamGenerateContent",
+        initial: 'data: {"candidates":[{"content":{"parts":[{"text":"started"}]}}]}\n\n',
+        terminal:
+          'data: {"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}\n\n',
+        status: 200,
+        error: null,
+      },
+    ].flatMap((fixture) => [false, true].map((terminalFirst) => ({ ...fixture, terminalFirst })))
+  )(
+    "freezes $name cancellation outcome with terminalFirst=$terminalFirst while draining usage",
+    async ({ terminalFirst, initial, terminal, status, error, ...format }) => {
+      const client = new AbortController();
+      const session = createSession(client.signal, format);
+      let source!: ReadableStreamDefaultController<Uint8Array>;
+      const encoder = new TextEncoder();
+      const upstream = new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            source = controller;
+            controller.enqueue(encoder.encode(initial));
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } }
+      );
+      const downstream = await ProxyResponseHandler.dispatch(session, upstream);
+      const reader = downstream.body!.getReader();
+      await reader.read();
+      if (terminalFirst) {
+        source.enqueue(encoder.encode(terminal));
+        await reader.read();
+      }
+      client.abort(new Error("client detached"));
+      if (!terminalFirst) source.enqueue(encoder.encode(terminal));
+      await reader.cancel("client detached").catch(() => {});
+      await drainAsyncTasks();
+
+      expect(updateMessageRequestDetailsDurably).toHaveBeenCalledWith(
+        123,
+        expect.objectContaining({
+          statusCode: terminalFirst ? status : 499,
+          inputTokens: 10,
+          outputTokens: 5,
+        }),
+        expect.objectContaining({ onCommitted: expect.any(Function) })
+      );
+      expect(
+        vi.mocked(updateMessageRequestDetailsDurably).mock.calls.at(-1)?.[1].errorMessage
+      ).toEqual(terminalFirst ? (error ?? undefined) : "CLIENT_ABORTED");
+      expect(getDetachedStreamBudgetSnapshot().activeStreams).toBe(0);
+    }
+  );
+
+  it.each([false, true])(
+    "preserves a complete message-only fake-200 failure only when received before cancellation: %s",
+    async (errorFirst) => {
+      const client = new AbortController();
+      const session = createSession(client.signal);
+      setDeferredStreamingFinalization(session, {
+        providerId: 1,
+        providerName: "avemujica-responses",
+        providerPriority: 1,
+        attemptNumber: 1,
+        totalProvidersAttempted: 1,
+        isFirstAttempt: true,
+        isFailoverSuccess: false,
+        endpointId: 42,
+        endpointUrl: "https://api.test.invalid/v1",
+        upstreamStatusCode: 200,
+      });
+      const encoder = new TextEncoder();
+      const errorFrame = 'data: {"message":"upstream error"}\n\n';
+      let source!: ReadableStreamDefaultController<Uint8Array>;
+      const upstream = new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            source = controller;
+            controller.enqueue(
+              encoder.encode(
+                'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"started"}\n\n'
+              )
+            );
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } }
+      );
+      const downstream = await ProxyResponseHandler.dispatch(session, upstream);
+      const reader = downstream.body!.getReader();
+      await reader.read();
+      if (errorFirst) {
+        source.enqueue(encoder.encode(errorFrame));
+        expect(new TextDecoder().decode((await reader.read()).value)).toBe(errorFrame);
+      }
+      client.abort(new Error("client detached"));
+      if (!errorFirst) source.enqueue(encoder.encode(errorFrame));
+      source.enqueue(
+        encoder.encode(
+          'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":10,"output_tokens":5}}}\n\n'
+        )
+      );
+      await reader.cancel("client detached").catch(() => {});
+      await drainAsyncTasks();
+
+      expect(updateMessageRequestDetailsDurably).toHaveBeenCalledWith(
+        123,
+        expect.objectContaining({
+          statusCode: errorFirst ? 502 : 499,
+          errorMessage: errorFirst
+            ? "FAKE_200_JSON_MESSAGE_KEYWORD_MATCH: upstream error"
+            : "CLIENT_ABORTED",
+          inputTokens: 10,
+          outputTokens: 5,
+          providerChain: [
+            expect.objectContaining({
+              reason: errorFirst ? "retry_failed" : "system_error",
+              statusCode: errorFirst ? 502 : 499,
+            }),
+          ],
+        }),
+        expect.objectContaining({ onCommitted: expect.any(Function) })
+      );
+      if (errorFirst) {
+        expect(recordFailure).toHaveBeenCalledWith(
+          1,
+          expect.objectContaining({ message: "FAKE_200_JSON_MESSAGE_KEYWORD_MATCH" })
+        );
+      } else {
+        expect(recordFailure).not.toHaveBeenCalled();
+      }
+      expect(getDetachedStreamBudgetSnapshot().activeStreams).toBe(0);
+    }
+  );
+
+  it.each([200, 502])(
+    "preserves HTTP %s headers independently of an error body received only after cancellation",
+    async (upstreamStatusCode) => {
+      const client = new AbortController();
+      const session = createSession(client.signal);
+      setDeferredStreamingFinalization(session, {
+        providerId: 1,
+        providerName: "avemujica-responses",
+        providerPriority: 1,
+        attemptNumber: 1,
+        totalProvidersAttempted: 1,
+        isFirstAttempt: true,
+        isFailoverSuccess: false,
+        endpointId: 42,
+        endpointUrl: "https://api.test.invalid/v1",
+        upstreamStatusCode,
+      });
+      let source!: ReadableStreamDefaultController<Uint8Array>;
+      const upstream = new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            source = controller;
+          },
+        }),
+        { status: upstreamStatusCode, headers: { "content-type": "text/event-stream" } }
+      );
+      const downstream = await ProxyResponseHandler.dispatch(session, upstream);
+      client.abort(new Error("client detached before error body"));
+      source.enqueue(
+        new TextEncoder().encode(
+          'data: {"error":{"type":"upstream_error","message":"late structured body"}}\n\n'
+        )
+      );
+      await downstream.body!.cancel("client detached").catch(() => {});
+      await drainAsyncTasks();
+
+      expect(updateMessageRequestDetailsDurably).toHaveBeenCalledWith(
+        123,
+        expect.objectContaining({
+          statusCode: upstreamStatusCode === 502 ? 502 : 499,
+          errorMessage: upstreamStatusCode === 502 ? "HTTP 502" : "CLIENT_ABORTED",
+          providerChain: [
+            expect.objectContaining({
+              reason: upstreamStatusCode === 502 ? "retry_failed" : "system_error",
+              statusCode: upstreamStatusCode === 502 ? 502 : 499,
+            }),
+          ],
+        }),
+        expect.objectContaining({ onCommitted: expect.any(Function) })
+      );
+      if (upstreamStatusCode === 502) {
+        expect(recordFailure).toHaveBeenCalledWith(
+          1,
+          expect.objectContaining({ message: "HTTP 502" })
+        );
+      } else {
+        expect(recordFailure).not.toHaveBeenCalled();
+      }
+      expect(getDetachedStreamBudgetSnapshot().activeStreams).toBe(0);
+    }
+  );
+
+  it.each([
+    {
+      name: "partial message-only error",
+      prefix: 'data: {"message":"upstream ',
+      suffix: 'error"}\n\n',
+      endpoint: "/v1/responses",
+    },
+    {
+      name: "large neutral JSON with an error message",
+      prefix: `data: ${JSON.stringify({ message: "upstream error", padding: "x".repeat(1000) })}\n\n`,
+      suffix: "",
+      endpoint: "/v1/responses",
+    },
+    {
+      name: "opaque raw-passthrough error bytes",
+      prefix: 'data: {"message":"upstream error"}\n\n',
+      suffix: "",
+      endpoint: "/v1/responses/compact",
+    },
+  ])("keeps $name as cancellation rather than inferred upstream failure", async (fixture) => {
+    const client = new AbortController();
+    const session = createSession(client.signal, { endpoint: fixture.endpoint });
+    setDeferredStreamingFinalization(session, {
+      providerId: 1,
+      providerName: "avemujica-responses",
+      providerPriority: 1,
+      attemptNumber: 1,
+      totalProvidersAttempted: 1,
+      isFirstAttempt: true,
+      isFailoverSuccess: false,
+      endpointId: 42,
+      endpointUrl: "https://api.test.invalid/v1",
+      upstreamStatusCode: 200,
+    });
+    const encoder = new TextEncoder();
+    let source!: ReadableStreamDefaultController<Uint8Array>;
+    const upstream = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          source = controller;
+          controller.enqueue(encoder.encode(fixture.prefix));
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } }
+    );
+    const downstream = await ProxyResponseHandler.dispatch(session, upstream);
+    const reader = downstream.body!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe(fixture.prefix);
+    client.abort(new Error("client detached"));
+    if (fixture.endpoint === "/v1/responses") {
+      source.enqueue(
+        encoder.encode(
+          fixture.suffix +
+            'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+        )
+      );
+    }
+    await reader.cancel("client detached").catch(() => {});
+    await drainAsyncTasks();
+
+    expect(updateMessageRequestDetailsDurably).toHaveBeenCalledWith(
+      123,
+      expect.objectContaining({ statusCode: 499, errorMessage: "CLIENT_ABORTED" }),
+      expect.objectContaining({ onCommitted: expect.any(Function) })
+    );
+    expect(recordFailure).not.toHaveBeenCalled();
+    expect(getDetachedStreamBudgetSnapshot().activeStreams).toBe(0);
+  });
+
   it("reclassifies a client-aborted stream as success when final usage was already received", async () => {
     const controller = new AbortController();
-    controller.abort();
     const session = createSession(controller.signal);
     setDeferredStreamingFinalization(session, {
       providerId: 1,
@@ -2178,7 +2489,13 @@ describe("ProxyResponseHandler stream client abort finalization", () => {
       upstreamStatusCode: 200,
     });
 
-    await ProxyResponseHandler.dispatch(session, createCompletedThenErroredResponsesSse());
+    const downstream = await ProxyResponseHandler.dispatch(
+      session,
+      createCompletedOpenResponsesSse()
+    );
+    const reader = await readThroughEvent(downstream, "response.completed");
+    controller.abort(new Error("client detached"));
+    await reader.cancel("client detached").catch(() => {});
     await drainAsyncTasks();
 
     expect(AsyncTaskManager.cancel).not.toHaveBeenCalled();
@@ -2259,7 +2576,8 @@ describe("ProxyResponseHandler stream client abort finalization", () => {
     expect(updateMessageRequestDetailsDurably).toHaveBeenCalledWith(
       123,
       expect.objectContaining({
-        statusCode: 200,
+        statusCode: 499,
+        errorMessage: "CLIENT_ABORTED",
         inputTokens: 463,
         outputTokens: 11,
       }),
@@ -2294,13 +2612,13 @@ describe("ProxyResponseHandler stream client abort finalization", () => {
     );
     expect(updateMessageRequestDetailsDurably).toHaveBeenCalledWith(
       123,
-      expect.objectContaining({ statusCode: 200 }),
+      expect.objectContaining({ statusCode: 499, errorMessage: "CLIENT_ABORTED" }),
       expect.objectContaining({ onCommitted: expect.any(Function) })
     );
     expect(getDetachedStreamBudgetSnapshot().activeStreams).toBe(0);
   });
 
-  it("stops a detached source on an explicit protocol error and records upstream failure", async () => {
+  it("stops a detached source on a later protocol error without overwriting cancellation", async () => {
     const clientController = new AbortController();
     const session = createSession(clientController.signal);
     setDeferredStreamingFinalization(session, {
@@ -2327,8 +2645,8 @@ describe("ProxyResponseHandler stream client abort finalization", () => {
     expect(updateMessageRequestDetailsDurably).toHaveBeenCalledWith(
       123,
       expect.objectContaining({
-        statusCode: 502,
-        errorMessage: expect.stringContaining("UPSTREAM_PROTOCOL_ERROR"),
+        statusCode: 499,
+        errorMessage: "CLIENT_ABORTED",
       }),
       expect.objectContaining({ onCommitted: expect.any(Function) })
     );
@@ -2383,7 +2701,6 @@ describe("ProxyResponseHandler stream client abort finalization", () => {
     "preserves binding state for a client-aborted Discovery $bindingIntent stream",
     async ({ bindingIntent, providerId }) => {
       const controller = new AbortController();
-      controller.abort();
       const session = createSession(controller.signal);
       Object.assign(session, {
         sessionId: `session-client-abort-${bindingIntent}`,
@@ -2420,7 +2737,13 @@ describe("ProxyResponseHandler stream client abort finalization", () => {
         providerSessionRefOwned: true,
       });
 
-      await ProxyResponseHandler.dispatch(session, createCompletedThenErroredResponsesSse());
+      const downstream = await ProxyResponseHandler.dispatch(
+        session,
+        createCompletedOpenResponsesSse()
+      );
+      const reader = await readThroughEvent(downstream, "response.completed");
+      controller.abort(new Error("client detached"));
+      await reader.cancel("client detached").catch(() => {});
       await drainAsyncTasks();
 
       expect(SessionManager.clearVersionedSessionProvider).not.toHaveBeenCalled();
@@ -2519,7 +2842,6 @@ describe("ProxyResponseHandler stream client abort finalization", () => {
 
   it("bills a complete-then-aborted Claude stream as success on the message_stop marker (U01)", async () => {
     const controller = new AbortController();
-    controller.abort();
     const session = createSession(controller.signal, {
       providerType: "anthropic",
       originalFormat: "claude",
@@ -2564,7 +2886,10 @@ describe("ProxyResponseHandler stream client abort finalization", () => {
       upstreamStatusCode: 200,
     });
 
-    await ProxyResponseHandler.dispatch(session, createCompletedThenAbortedClaudeSse());
+    const downstream = await ProxyResponseHandler.dispatch(session, createCompletedOpenClaudeSse());
+    const reader = await readThroughEvent(downstream, "message_stop");
+    controller.abort(new Error("client detached"));
+    await reader.cancel("client detached").catch(() => {});
     await drainAsyncTasks();
 
     expect(updateMessageRequestDetailsDurably).toHaveBeenCalledWith(
