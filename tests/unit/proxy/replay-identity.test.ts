@@ -68,6 +68,27 @@ beforeEach(() => {
 });
 
 describe("deriveReplayIdentity：确定性", () => {
+  it.each(["/v1/systemone", "/V1/SystemOne/?trace=1"])(
+    "does not create a streaming replay identity for System One: %s",
+    (endpoint) => {
+      expect(
+        deriveReplayIdentity(
+          makeSession({
+            endpoint,
+            format: "openai",
+            model: "jev-latest",
+            message: {
+              model: "jev-latest",
+              stream: true,
+              state: "safe state",
+              questions: { decision: { type: "noul", instructions: "Is it safe?" } },
+            },
+          })
+        )
+      ).toBeNull();
+    }
+  );
+
   it("相同规范化输入重推导得到相同 replayId 与 verifier", () => {
     const first = deriveReplayIdentity(makeSession());
     const second = deriveReplayIdentity(makeSession());

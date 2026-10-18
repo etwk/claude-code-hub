@@ -2,13 +2,28 @@ import { Buffer } from "node:buffer";
 import { gzipSync } from "node:zlib";
 import type { Context } from "hono";
 import { createTranslator } from "next-intl";
-import { describe, expect, it, vi } from "vitest";
+import { getLocale } from "next-intl/server";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ProxyModelGuard } from "@/app/v1/_lib/proxy/model-guard";
 import { ProxySession } from "@/app/v1/_lib/proxy/session";
 import {
   parseSystemOneMultipartRequest,
   serializeSystemOneMultipartBody,
 } from "@/app/v1/_lib/proxy/systemone-compat";
+import { withRequestMemoryLifetime } from "@/lib/memory/request-lifetime";
 import enErrors from "../../../messages/en/errors.json";
+import jaErrors from "../../../messages/ja/errors.json";
+import ruErrors from "../../../messages/ru/errors.json";
+import zhCnErrors from "../../../messages/zh-CN/errors.json";
+import zhTwErrors from "../../../messages/zh-TW/errors.json";
+
+const errorsByLocale = {
+  en: enErrors,
+  ja: jaErrors,
+  ru: ruErrors,
+  "zh-CN": zhCnErrors,
+  "zh-TW": zhTwErrors,
+};
 
 vi.mock("@/repository/model-price", () => ({
   findLatestPriceByModel: vi.fn(),
@@ -20,13 +35,22 @@ vi.mock("@/repository/system-config", () => ({
 
 vi.mock("next-intl/server", () => ({
   getLocale: vi.fn(async () => "en"),
-  getTranslations: vi.fn(async () =>
-    createTranslator({ locale: "en", messages: { errors: enErrors }, namespace: "errors" })
+  getTranslations: vi.fn(async ({ locale }: { locale: string }) =>
+    createTranslator({
+      locale,
+      messages: { errors: errorsByLocale[locale as keyof typeof errorsByLocale] },
+      namespace: "errors",
+    })
   ),
 }));
 
+beforeEach(() => {
+  vi.mocked(getLocale).mockResolvedValue("en");
+});
+
 const BOUNDARY = "systemone-test-boundary";
 const CONTENT_TYPE = `multipart/form-data; boundary=${BOUNDARY}`;
+const LARGE_REQUEST_BODY_BYTES = 10 * 1024 * 1024;
 const message = {
   model: "system-one",
   state: { text: "A snowy day: 雪", _source: "client" },
@@ -73,6 +97,12 @@ function multipart(
   }
   chunks.push(Buffer.from(closing));
   return Uint8Array.from(Buffer.concat(chunks)).buffer;
+}
+
+function largeMultipart(requestBody = requestJson): ArrayBuffer {
+  const image = Buffer.alloc(LARGE_REQUEST_BODY_BYTES, 0xff);
+  binaryImage.copy(image);
+  return multipart([requestPart(requestBody), { ...imagePart(), body: image }]);
 }
 
 function createContext(request: Request): Context {
@@ -324,6 +354,88 @@ describe("ProxySession System One body parsing", () => {
     expect(session.request.log).not.toContain("not-a-delimiter");
     expect(session.request.log).not.toContain("\ufffd");
   });
+
+  it.each(["en", "ja", "ru", "zh-CN", "zh-TW"] as const)(
+    "returns a localized invalid_request_error for a large missing-model upload in %s",
+    async (locale) => {
+      vi.mocked(getLocale).mockResolvedValue(locale);
+      const expectedMessage = errorsByLocale[locale].REQUIRED_FIELD.replace("{field}", "model");
+      const withoutModel = {
+        state: message.state,
+        questions: message.questions,
+        assets: message.assets,
+      };
+      const buffer = largeMultipart(JSON.stringify(withoutModel));
+      expect(buffer.byteLength).toBeGreaterThanOrEqual(LARGE_REQUEST_BODY_BYTES);
+      const request = createRequest(buffer);
+      // An absent Content-Length must not bypass the actual-body-size regression.
+      expect(request.headers.has("content-length")).toBe(false);
+
+      const response = await withRequestMemoryLifetime(async () => {
+        const session = await ProxySession.fromContext(createContext(request));
+        session.authState = { user: { allowedModels: [] } } as ProxySession["authState"];
+        expect(session.request.model).toBeNull();
+        expect(session.request.message).toEqual(withoutModel);
+        const errorResponse = await ProxyModelGuard.ensure(session);
+        expect(errorResponse).not.toBeNull();
+        return errorResponse!;
+      });
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({
+        error: { type: "invalid_request_error", message: expectedMessage },
+      });
+    }
+  );
+
+  it("accepts a valid large upload while keeping binary bytes out of request.log", async () => {
+    const buffer = largeMultipart();
+    expect(buffer.byteLength).toBeGreaterThanOrEqual(LARGE_REQUEST_BODY_BYTES);
+    const request = createRequest(buffer, { "content-length": String(buffer.byteLength) });
+
+    await withRequestMemoryLifetime(async () => {
+      const session = await ProxySession.fromContext(createContext(request));
+      session.authState = { user: { allowedModels: [] } } as ProxySession["authState"];
+
+      expect(await ProxyModelGuard.ensure(session)).toBeNull();
+      expect(session.request.model).toBe(message.model);
+      expect(session.request.message).toEqual(message);
+      expect(Buffer.from(session.request.buffer!).equals(Buffer.from(buffer))).toBe(true);
+      expect(session.headers.get("content-type")).toBe(CONTENT_TYPE);
+      expect(session.request.systemOneMultipart).toEqual(
+        parseSystemOneMultipartRequest(buffer, CONTENT_TYPE)?.metadata
+      );
+      expect(JSON.parse(session.request.log)).toEqual(message);
+      expect(Buffer.byteLength(session.request.log)).toBeLessThan(1024);
+      expect(session.request.log).not.toContain("photo.png");
+      expect(session.request.log).not.toContain("not-a-delimiter");
+      expect(session.request.log).not.toContain("\ufffd");
+      return new Response(null, { status: 204 });
+    });
+  });
+
+  it.each(["/v1/responses", "/v1/rerank"])(
+    "rejects large missing-model bodies before the guard on %s",
+    async (pathname) => {
+      vi.mocked(getLocale).mockResolvedValue("ja");
+      const body = JSON.stringify({ input: "x".repeat(LARGE_REQUEST_BODY_BYTES) });
+      expect(Buffer.byteLength(body)).toBeGreaterThanOrEqual(LARGE_REQUEST_BODY_BYTES);
+      const request = new Request(`https://hub.test${pathname}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+      });
+
+      await expect(
+        withRequestMemoryLifetime(async () => {
+          await ProxySession.fromContext(createContext(request));
+          return new Response(null, { status: 204 });
+        })
+      ).rejects.toMatchObject({
+        statusCode: 400,
+      });
+    }
+  );
 
   it.each(["null", "[]", '[{"model":"system-one"}]', '"string"', "42", "true"])(
     "keeps non-object JSON %s in the raw-body fallback rather than assigning it as the message",

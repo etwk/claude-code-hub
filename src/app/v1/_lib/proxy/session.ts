@@ -395,7 +395,12 @@ export class ProxySession {
       (bodyResult.actualBodyBytes !== undefined &&
         bodyResult.actualBodyBytes >= LARGE_REQUEST_BODY_BYTES);
 
-    if (!resolvedModel && isLargeRequestBody) {
+    // System One uses its localized model guard regardless of request body size.
+    if (
+      !resolvedModel &&
+      isLargeRequestBody &&
+      normalizeEndpointPath(requestUrl.pathname) !== V1_ENDPOINT_PATHS.SYSTEMONE
+    ) {
       logger.warn("[ProxySession] Missing model for large request body", {
         pathname: requestUrl.pathname,
         contentLength: bodyResult.contentLength ?? undefined,

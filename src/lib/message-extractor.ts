@@ -217,35 +217,40 @@ export function extractTextFromRerankRequest(message: Record<string, unknown>): 
   return texts;
 }
 
-function collectSystemOneText(
-  value: unknown,
-  texts: string[],
-  assetPattern: RegExp | null,
-  depth = 0
-): void {
-  if (depth > 64) return;
-  if (typeof value === "string") {
-    if (assetPattern === null) {
-      if (value.length > 0) texts.push(value);
-      return;
-    }
-    // Image spans separate text; removing them must not join unrelated words.
-    assetPattern.lastIndex = 0;
-    let start = 0;
-    let match = assetPattern.exec(value);
-    while (match !== null) {
-      if (match.index > start) texts.push(value.slice(start, match.index));
-      start = assetPattern.lastIndex;
-      match = assetPattern.exec(value);
-    }
-    if (start < value.length) texts.push(value.slice(start));
-  } else if (Array.isArray(value)) {
-    for (const item of value) collectSystemOneText(item, texts, assetPattern, depth + 1);
-  } else if (value !== null && typeof value === "object") {
-    for (const [name, nested] of Object.entries(value)) {
-      // Object keys stay model-visible text even when they equal an image reference.
-      if (name.length > 0) texts.push(name);
-      collectSystemOneText(nested, texts, assetPattern, depth + 1);
+function collectSystemOneText(value: unknown, texts: string[], assetPattern: RegExp | null): void {
+  const pending: { value: unknown; key?: string }[] = [{ value }];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    // Object keys stay model-visible text even when they equal an image reference.
+    if (current.key) texts.push(current.key);
+    const nested = current.value;
+    if (typeof nested === "string") {
+      if (assetPattern === null) {
+        if (nested.length > 0) texts.push(nested);
+        continue;
+      }
+      // Image spans separate text; removing them must not join unrelated words.
+      assetPattern.lastIndex = 0;
+      let start = 0;
+      let match = assetPattern.exec(nested);
+      while (match !== null) {
+        if (match.index > start) texts.push(nested.slice(start, match.index));
+        start = assetPattern.lastIndex;
+        match = assetPattern.exec(nested);
+      }
+      if (start < nested.length) texts.push(nested.slice(start));
+    } else if (Array.isArray(nested)) {
+      // Reverse the work stack to preserve depth-first array and object text order.
+      for (let index = nested.length - 1; index >= 0; index--) {
+        pending.push({ value: nested[index] });
+      }
+    } else if (nested !== null && typeof nested === "object") {
+      const object = nested as Record<string, unknown>;
+      const keys = Object.keys(object);
+      for (let index = keys.length - 1; index >= 0; index--) {
+        const key = keys[index];
+        pending.push({ value: object[key], key });
+      }
     }
   }
 }
@@ -283,7 +288,7 @@ export function extractTextFromSystemOneRequest(message: Record<string, unknown>
     if (criteria !== null && typeof criteria === "object" && !Array.isArray(criteria)) {
       for (const [label, description] of Object.entries(criteria)) {
         if (type !== "noul" && label.length > 0) texts.push(label);
-        collectSystemOneText(description, texts, assetPattern, 1);
+        collectSystemOneText(description, texts, assetPattern);
       }
     } else {
       collectSystemOneText(criteria, texts, assetPattern);

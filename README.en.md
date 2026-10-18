@@ -174,19 +174,21 @@ bodies are decoded before inspection. Forward the required
 `TypeSafe-Danger-Zone-Images: true` header when using images or `box` questions;
 TypeSafe's feature, image, and question validation remains upstream-owned.
 
-A nonblank string `model` is required, with localized validation errors. Normal
-authentication, model allowlists, provider groups, rate limits, spending checks,
-model redirects, and configured request filters apply. Nested `state`, question,
+A nonblank string `model` is required, with localized validation errors even for
+large multipart uploads. Normal authentication, model allowlists, provider groups,
+rate limits, spending checks, model redirects, and configured request filters apply. Nested `state`, question,
 and asset fields (including underscore-prefixed keys) are preserved; private
-top-level parameters are removed. Sensitive-word checks inspect nested state,
-instructions, criteria, their literal object keys, and choice labels, not asset
-bytes or transport metadata. Image-reference spans in values are excluded without
-joining the surrounding text; object keys remain literal text, matching
+top-level parameters are removed. Sensitive-word checks inspect text values,
+literal object keys, and choice labels in nested state, instructions, and criteria
+at every depth. Asset bytes and transport metadata are excluded. Image-reference
+spans in values are excluded without joining the surrounding text; object keys remain literal text, matching
 [TypeSafe's reference rules](https://docs.typesafe.ai/images#references).
-The endpoint bypasses fake streaming even for whitelisted models. Accepted path
-variants are forwarded canonically; successful JSON answers and TypeSafe response
-headers are preserved. CCH's existing model-list endpoint keeps its existing format;
-this addition does not implement TypeSafe SDK model discovery.
+The endpoint always uses non-streaming JSON transport and timeouts, even if the
+client or a request filter sets `stream: true` or the model is whitelisted for
+fake streaming. Accepted path variants are forwarded canonically; successful JSON
+answers and TypeSafe response headers are preserved. CCH's existing model-list
+endpoint keeps its existing format; this addition does not implement TypeSafe SDK
+model discovery.
 
 Accounting reads only the response's `usage`: `input_tokens`/`output_tokens`, with
 `prompt_tokens`/`completion_tokens` aliases. Counts must be nonnegative safe integers;

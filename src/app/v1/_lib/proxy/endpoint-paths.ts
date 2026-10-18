@@ -63,6 +63,10 @@ export function isResponseCompactEndpointPath(pathname: string): boolean {
   return normalizeEndpointPath(pathname) === V1_ENDPOINT_PATHS.RESPONSES_COMPACT;
 }
 
+export function isSystemOneEndpointPath(pathname: string): boolean {
+  return normalizeEndpointPath(pathname) === V1_ENDPOINT_PATHS.SYSTEMONE;
+}
+
 export function toV1RoutePath(pathname: string): string {
   if (!pathname.startsWith(V1_PREFIX)) {
     return pathname;

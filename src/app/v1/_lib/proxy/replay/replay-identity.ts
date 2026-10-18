@@ -1,6 +1,7 @@
 import { getEnvConfig } from "@/lib/config/env.schema";
 import { buildScopeTag, sha256Hex, stableStringify } from "@/lib/request-identity";
 import { getCachedProxyRuntimeSettings } from "@/lib/system-settings/proxy-runtime";
+import { isSystemOneEndpointPath } from "../endpoint-paths";
 import type { ClientFormat } from "../format-mapper";
 import type { ProxySession } from "../session";
 
@@ -53,6 +54,8 @@ export function deriveReplayIdentity(session: ProxySession): ReplayIdentity | nu
 
     const message = session.request.message;
     if ((message as Record<string, unknown>).stream !== true) return null;
+    const endpoint = session.getEndpoint() ?? "/";
+    if (isSystemOneEndpointPath(endpoint)) return null;
 
     const keyId = session.authState?.key?.id;
     const userId = session.authState?.user?.id;
@@ -60,7 +63,6 @@ export function deriveReplayIdentity(session: ProxySession): ReplayIdentity | nu
 
     const format = session.originalFormat;
     const model = session.getOriginalModel();
-    const endpoint = session.getEndpoint() ?? "/";
     const scopeTag = buildScopeTag(keyId, format, model);
     const bodyHash = sha256Hex(stableStringify(message));
     const idempotencyKey =

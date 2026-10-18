@@ -484,6 +484,54 @@ describe("ProxyForwarder - first-byte hedge scheduling", () => {
     vi.restoreAllMocks();
   });
 
+  test.each([false, true])(
+    "keeps System One JSON out of stream racing with discoveryEnabled=%s",
+    async (discoveryEnabled) => {
+      const provider = createProvider({ providerType: "openai-compatible" });
+      const session = createSession();
+      session.requestUrl = new URL("https://example.com/V1/SystemOne/?alt=sse");
+      session.originalFormat = "openai";
+      session.endpointPolicy = resolveEndpointPolicy(session.requestUrl.pathname);
+      session.authState = {
+        success: true,
+        user: null,
+        key: { id: 20 },
+        apiKey: null,
+      } as typeof session.authState;
+      session.request.message = {
+        model: "jev-latest",
+        stream: true,
+        state: "safe state",
+        questions: { decision: { type: "noul", instructions: "Is it safe?" } },
+      };
+      session.request.model = "jev-latest";
+      session.setProvider(provider);
+      mocks.getCachedSystemSettings.mockResolvedValue({ discoveryEnabled });
+      mocks.pickDiscoveryProviders.mockResolvedValueOnce([provider]);
+      const nativeResult = {
+        model: "jev-latest",
+        answers: { decision: { type: "noul", noul: 0.98 } },
+        usage: { input_tokens: 11, output_tokens: 0 },
+      };
+      const doForward = vi.spyOn(ProxyForwarder as never, "doForward").mockImplementation(
+        async () =>
+          new Response(JSON.stringify(nativeResult), {
+            headers: { "content-type": "application/json" },
+          })
+      );
+
+      const response = await ProxyForwarder.send(session);
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(nativeResult);
+      expect(doForward).toHaveBeenCalledTimes(1);
+      expect(mocks.acquireSessionDiscoveryLease).not.toHaveBeenCalled();
+      expect(session.providerChain).toContainEqual(
+        expect.objectContaining({ reason: "request_success", statusCode: 200 })
+      );
+    }
+  );
+
   test("Discovery actively probes an unknown binding capability before acquiring its lease", async () => {
     const provider = createProvider({ id: 1 });
     const session = createSession();

@@ -163,13 +163,14 @@ JSON 请求，其后为 `assets` 引用的图片 part。转发仅替换 JSON par
 文件名与 boundary。入站压缩请求先解压再检查。图片或 `box` 问题需传递
 `TypeSafe-Danger-Zone-Images: true`；具体图片、问题及功能校验仍由上游负责。
 
-`model` 必须是非空白字符串，校验错误沿用请求语言翻译。认证、模型白名单、供应商
+`model` 必须是非空白字符串，校验错误沿用请求语言翻译，包括大尺寸 multipart 上传。认证、模型白名单、供应商
 分组、速率及消费额度、模型重定向和已配置的请求过滤规则沿用现有流程。保留嵌套
 `state`、问题和资源字段（包括下划线开头的键），仅移除顶层私有参数。敏感词检查
-覆盖嵌套 state、instructions、criteria 的文本值、对象键及 choice 标签，不扫描资源字节或传输元数据。
+覆盖嵌套 state、instructions、criteria 的文本值、对象键及 choice 标签，不因嵌套层级跳过检查，也不扫描资源字节或传输元数据。
 值中的图片引用片段不作为文本检查，也不会拼接其前后的文本；对象键仍是字面文本，
 遵循 [TypeSafe 引用规则](https://docs.typesafe.ai/images#references)。
-即使命中 fake-streaming 白名单也不合成流。接受的路径变体规范化转发，成功 JSON
+此端点始终使用非流式 JSON 传输及超时，即使客户端或过滤器设置 `stream: true`，
+或模型命中 fake-streaming 白名单，也不合成流。接受的路径变体规范化转发，成功 JSON
 答案及 TypeSafe 响应头保持原样。CCH 模型列表端点仍使用原有格式，本功能不实现
 TypeSafe SDK 的模型发现。
 

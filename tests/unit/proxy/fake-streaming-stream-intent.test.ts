@@ -25,6 +25,17 @@ function inputs({
 }
 
 describe("detectClientStreamIntent", () => {
+  test.each(["/v1/systemone", "/V1/SystemOne/?trace=1"])(
+    "keeps System One non-streaming despite body and query flags: %s",
+    (pathname) => {
+      expect(
+        detectClientStreamIntent(
+          inputs({ format: "openai", pathname, search: "?alt=sse", body: { stream: true } })
+        )
+      ).toBe(false);
+    }
+  );
+
   describe("standard formats (claude / openai / response)", () => {
     test.each<ClientFormat>(["claude", "openai", "response"])(
       "%s: body.stream === true => stream",

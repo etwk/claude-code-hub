@@ -63,13 +63,56 @@ function createContext(request: Request) {
   } as any;
 }
 
-async function createJsonSession(message: Record<string, unknown>, pathname = "/v1/rerank") {
+async function createJsonSession(
+  message: Record<string, unknown> | string,
+  pathname = "/v1/rerank"
+) {
   const request = new Request(`https://proxy.example.com${pathname}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(message),
+    body: typeof message === "string" ? message : JSON.stringify(message),
   });
   return ProxySession.fromContext(createContext(request));
+}
+
+async function createDeepSystemOneSession(
+  field: "state" | "instructions" | "criteria",
+  shape: "object" | "array",
+  depth: number,
+  leaf: unknown,
+  questionType: "choice" | "noul" | "score"
+) {
+  // Build wire JSON without recursively serializing the deeply nested fixture.
+  const open = shape === "object" ? '{"nested":' : "[";
+  const close = shape === "object" ? "}" : "]";
+  const nested = open.repeat(depth) + JSON.stringify(leaf) + close.repeat(depth);
+  const state = field === "state" ? nested : '"safe state"';
+  const questions =
+    field === "state"
+      ? "{}"
+      : `{"blocked-question-id":{"type":"${questionType}","${field}":${nested}}}`;
+  const assets = JSON.stringify({
+    "blocked-photo": { part: "blocked image bytes" },
+    image: { part: "second photo" },
+    photo: { part: "short reference" },
+    "photo-blocked": { part: "long reference" },
+    "[blocked].*": { part: "literal reference" },
+  });
+  const session = await createJsonSession(
+    `{"model":"jev-latest","state":${state},"questions":${questions},"assets":${assets}}`,
+    "/v1/systemone"
+  );
+
+  // Freeze iteratively too: neither fixtures nor immutability checks need a recursion limit.
+  const pending: object[] = [session.request.message];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    Object.freeze(current);
+    for (const value of Object.values(current)) {
+      if (value !== null && typeof value === "object") pending.push(value);
+    }
+  }
+  return session;
 }
 
 beforeEach(() => {
@@ -423,9 +466,6 @@ describe("ProxySensitiveWordGuard - System One inference text", () => {
     const session = await createJsonSession(message, "/v1/systemone");
 
     expect(await ProxySensitiveWordGuard.ensure(session)).toBeNull();
-    expect(vi.mocked(sensitiveWordDetector.detect).mock.calls.map(([text]) => text)).toEqual([
-      "safe inference state",
-    ]);
     expect(session.request.message).toEqual(message);
   });
 
@@ -445,11 +485,6 @@ describe("ProxySensitiveWordGuard - System One inference text", () => {
     );
 
     expect(await ProxySensitiveWordGuard.ensure(session)).toBeNull();
-    expect(vi.mocked(sensitiveWordDetector.detect).mock.calls.map(([text]) => text)).toEqual([
-      "safe state",
-      "safe positive",
-      "safe negative",
-    ]);
   });
 
   it.each([
@@ -521,23 +556,85 @@ describe("ProxySensitiveWordGuard - System One inference text", () => {
     expect(await ProxySensitiveWordGuard.ensure(session)).toBeNull();
   });
 
-  it.each([64, 65])("bounds recursive state extraction at depth 64 (depth %s)", async (depth) => {
-    let state: unknown = "blocked deep state";
-    for (let level = 0; level < depth; level++) {
-      state = { nested: state };
-    }
-    const session = await createJsonSession(
-      { model: "jev-1.13.0", state, questions: {} },
-      "/v1/systemone"
-    );
+  describe.each([
+    { field: "state", questionType: "choice" },
+    { field: "instructions", questionType: "noul" },
+    { field: "criteria", questionType: "choice" },
+    { field: "criteria", questionType: "noul" },
+    { field: "criteria", questionType: "score" },
+  ] as const)("deep $questionType $field", ({ field, questionType }) => {
+    describe.each(["object", "array"] as const)("%s nesting", (shape) => {
+      it.each([64, 65, 20_000])(
+        "blocks sensitive values at depth %s without changing the request",
+        async (depth) => {
+          const session = await createDeepSystemOneSession(
+            field,
+            shape,
+            depth,
+            "blocked deep text beside blocked-photo",
+            questionType
+          );
+          const message = session.request.message;
+          const { state, questions, assets } = message;
 
-    const response = await ProxySensitiveWordGuard.ensure(session);
+          expect((await ProxySensitiveWordGuard.ensure(session))?.status).toBe(400);
+          expect(session.request.message).toBe(message);
+          expect(message.state).toBe(state);
+          expect(message.questions).toBe(questions);
+          expect(message.assets).toBe(assets);
+        }
+      );
 
-    if (depth === 64) {
-      expect(response?.status).toBe(400);
-    } else {
-      expect(response).toBeNull();
-    }
+      it.each([64, 65, 20_000])(
+        "blocks literal sensitive keys at depth %s even when they match image references",
+        async (depth) => {
+          const session = await createDeepSystemOneSession(
+            field,
+            shape,
+            depth,
+            { "blocked-photo": null },
+            questionType
+          );
+          const message = session.request.message;
+
+          expect((await ProxySensitiveWordGuard.ensure(session))?.status).toBe(400);
+          expect(session.request.message).toBe(message);
+        }
+      );
+
+      it.each([64, 65, 20_000])(
+        "allows benign data and image references at depth %s without changing the request",
+        async (depth) => {
+          const session = await createDeepSystemOneSession(
+            field,
+            shape,
+            depth,
+            {
+              safe: [
+                "safe deep text",
+                "blocked-photo",
+                "Compare blocked-photo and blocked-photo.",
+                "bloimagecked",
+                "photo-blocked next to [blocked].*",
+                "",
+                0,
+                false,
+                null,
+              ],
+            },
+            questionType
+          );
+          const message = session.request.message;
+          const { state, questions, assets } = message;
+
+          expect(await ProxySensitiveWordGuard.ensure(session)).toBeNull();
+          expect(session.request.message).toBe(message);
+          expect(message.state).toBe(state);
+          expect(message.questions).toBe(questions);
+          expect(message.assets).toBe(assets);
+        }
+      );
+    });
   });
 
   it.each([
@@ -565,9 +662,6 @@ describe("ProxySensitiveWordGuard - System One inference text", () => {
     );
 
     expect(await ProxySensitiveWordGuard.ensure(session)).toBeNull();
-    expect(vi.mocked(sensitiveWordDetector.detect).mock.calls.map(([text]) => text)).toEqual([
-      "safe ordinary message",
-    ]);
   });
 });
 

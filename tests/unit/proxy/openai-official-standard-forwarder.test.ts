@@ -222,6 +222,106 @@ describe.each(["json", "multipart"] as const)(
       vi.clearAllMocks();
     });
 
+    it.each(["client", "filter"] as const)(
+      "uses non-streaming timeouts when %s supplies stream true",
+      async (streamSource) => {
+        vi.useFakeTimers();
+        try {
+          const provider = createProvider("openai-compatible");
+          provider.firstByteTimeoutStreamingMs = 5;
+          provider.requestTimeoutNonStreamingMs = 1_000;
+          const session = createSession("/V1/SystemOne/?alt=sse", "openai-compatible");
+          const body: Record<string, unknown> = {
+            model: "jev-latest",
+            state: "safe state",
+            questions: { decision: { type: "noul", instructions: "Is it safe?" } },
+            ...(streamSource === "client" ? { stream: true } : {}),
+          };
+          session.method = "POST";
+          session.request.message = body;
+          session.request.model = "jev-latest";
+          if (encoding === "multipart") {
+            const form = new FormData();
+            form.append(
+              "request",
+              new Blob([JSON.stringify(body)], { type: "application/json" }),
+              "request.json"
+            );
+            form.append("photo", new Blob([new Uint8Array([0x89, 0x50, 0x00, 0xff])]), "photo.png");
+            const request = new Request("https://proxy.example.com/v1/systemone", {
+              method: "POST",
+              body: form,
+            });
+            const contentType = request.headers.get("content-type")!;
+            session.request.buffer = await request.arrayBuffer();
+            session.request.systemOneMultipart = parseSystemOneMultipartRequest(
+              session.request.buffer,
+              contentType
+            )!.metadata;
+            session.headers.set("content-type", contentType);
+          }
+          if (streamSource === "filter") {
+            vi.mocked(requestFilterEngine.applyFinal).mockImplementationOnce(
+              async (_session, outgoingBody) => {
+                outgoingBody.stream = true;
+              }
+            );
+          }
+          const nativeResult = {
+            model: "jev-latest",
+            answers: { decision: { type: "noul", noul: 0.98 } },
+            usage: { input_tokens: 11, output_tokens: 0 },
+          };
+          let outgoing: Record<string, unknown> | undefined;
+          vi.spyOn(ProxyForwarder as never, "fetchWithoutAutoDecode").mockImplementationOnce(
+            async (_url: string, init: RequestInit) => {
+              outgoing =
+                encoding === "multipart"
+                  ? parseSystemOneMultipartRequest(
+                      init.body as ArrayBuffer,
+                      new Headers(init.headers).get("content-type")!
+                    )!.requestMessage
+                  : JSON.parse(init.body as string);
+              const { promise, resolve, reject } = Promise.withResolvers<Response>();
+              const signal = init.signal!;
+              const onAbort = () => {
+                clearTimeout(timer);
+                reject(signal.reason);
+              };
+              const timer = setTimeout(() => {
+                signal.removeEventListener("abort", onAbort);
+                resolve(
+                  new Response(JSON.stringify(nativeResult), {
+                    headers: { "content-type": "application/json" },
+                  })
+                );
+              }, 25);
+              signal.addEventListener("abort", onAbort, { once: true });
+              return promise;
+            }
+          );
+          const { doForward } = ProxyForwarder as unknown as {
+            doForward: (
+              session: ProxySession,
+              provider: Provider,
+              baseUrl: string
+            ) => Promise<Response>;
+          };
+          const result = doForward(session, provider, provider.url).then(
+            async (response) => ({ status: response.status, body: await response.json() }),
+            (error) => ({ error })
+          );
+          await vi.advanceTimersByTimeAsync(50);
+          expect(await result).toEqual({ status: 200, body: nativeResult });
+          expect(outgoing?.stream).toBe(true);
+          expect(body.stream).toBe(streamSource === "client" ? true : undefined);
+        } finally {
+          vi.useRealTimers();
+          vi.restoreAllMocks();
+        }
+      }
+    );
+
     it("redirects then resets the model without leaking final-filter changes across providers", async () => {
       const providerA = createProvider("openai-compatible");
       providerA.url = "https://api.typesafe.ai/v1";
