@@ -166,6 +166,7 @@ import {
   type StreamGateResult,
   StreamPrecommitError,
 } from "./stream-gate/stream-content-gate";
+import { serializeSystemOneMultipartBody } from "./systemone-compat";
 import {
   detectThinkingBudgetRectifierTrigger,
   rectifyThinkingBudget,
@@ -3821,14 +3822,22 @@ export class ProxyForwarder {
             });
           }
         } else {
-          // Rerank documents are opaque application data; filter only private top-level parameters.
+          // Rerank documents and System One inference fields are opaque application data.
+          const normalizedPath = normalizeEndpointPath(requestPath);
           const filteredMessage = filterPrivateParameters(
             session.request.message,
-            normalizeEndpointPath(requestPath) !== V1_ENDPOINT_PATHS.RERANK
+            normalizedPath !== V1_ENDPOINT_PATHS.RERANK &&
+              normalizedPath !== V1_ENDPOINT_PATHS.SYSTEMONE
           ) as Record<string, unknown>;
 
           // 将 metadata.user_id 注入放在私有参数过滤之后，避免受过滤逻辑影响。
           let messageToSend: Record<string, unknown> = filteredMessage;
+          const systemOneMultipart = session.request.systemOneMultipart;
+          if (systemOneMultipart) {
+            if (!session.request.buffer)
+              throw new Error("Missing System One multipart request buffer");
+            processedHeaders.set("content-type", systemOneMultipart.contentType);
+          }
           if (provider.providerType === "claude" || provider.providerType === "claude-auth") {
             const settings = await getCachedSystemSettings();
             const enabled = settings.enableClaudeMetadataUserIdInjection ?? true;
@@ -3867,7 +3876,13 @@ export class ProxyForwarder {
           }
 
           const bodyString = JSON.stringify(messageToSend);
-          requestBody = bodyString;
+          requestBody = systemOneMultipart
+            ? serializeSystemOneMultipartBody(
+                session.request.buffer!,
+                systemOneMultipart,
+                bodyString
+              )
+            : bodyString;
           session.forwardedRequestBody = retainForwardedBody ? bodyString : null;
           isStreaming = messageToSend.stream === true;
 
@@ -8982,6 +8997,7 @@ export class ProxyForwarder {
     if (logDescriptor) Object.defineProperty(target.request, "log", logDescriptor);
     target.request.note = source.request.note;
     target.request.model = source.request.model;
+    target.request.systemOneMultipart = source.request.systemOneMultipart;
     target.request.imageRequestMetadata = cloneOpenAIImageRequestMetadata(
       source.request.imageRequestMetadata
     );

@@ -4,7 +4,7 @@ import { ProxyResponses } from "./responses";
 import type { ProxySession } from "./session";
 
 /**
- * Require a model for rerank scheduling, then enforce user model restrictions.
+ * Require a model for rerank and System One scheduling, then enforce user model restrictions.
  * Other endpoints retain their existing optional-model behavior when unrestricted.
  * User allowlists use case-insensitive exact matching.
  */
@@ -16,7 +16,11 @@ export class ProxyModelGuard {
       return null;
     }
 
-    if (normalizeEndpointPath(session.requestUrl.pathname) === V1_ENDPOINT_PATHS.RERANK) {
+    const normalizedPath = normalizeEndpointPath(session.requestUrl.pathname);
+    if (
+      normalizedPath === V1_ENDPOINT_PATHS.RERANK ||
+      normalizedPath === V1_ENDPOINT_PATHS.SYSTEMONE
+    ) {
       const model = session.request.message.model;
       if (typeof model !== "string" || model.trim() === "") {
         const { getLocale } = await import("next-intl/server");

@@ -299,6 +299,14 @@ const KNOWN_ENDPOINT_FAMILIES: readonly EndpointFamily[] = Object.freeze([
     match: (pathname) => pathname === "/v1/rerank",
   },
   {
+    id: "openai-systemone",
+    surface: "openai",
+    accountingTier: "optional_usage",
+    modelRequired: true,
+    rawPassthrough: false,
+    match: (pathname) => pathname === "/v1/systemone",
+  },
+  {
     id: "openai-moderations",
     surface: "openai",
     accountingTier: "none",

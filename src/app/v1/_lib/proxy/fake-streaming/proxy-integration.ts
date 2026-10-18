@@ -56,8 +56,9 @@ export async function tryFakeStreamingPath(
   );
   if (!eligible) return null;
 
-  // Rerank shares the OpenAI surface, not the Chat streaming response contract.
-  if (resolveEndpointFamilyByPath(session.requestUrl.pathname)?.id === "openai-rerank") {
+  // These endpoints share the OpenAI surface, not the Chat streaming response contract.
+  const endpointFamilyId = resolveEndpointFamilyByPath(session.requestUrl.pathname)?.id;
+  if (endpointFamilyId === "openai-rerank" || endpointFamilyId === "openai-systemone") {
     return null;
   }
 

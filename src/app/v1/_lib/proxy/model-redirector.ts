@@ -126,10 +126,11 @@ export class ModelRedirector {
       // 更新缓存的 model 字段
       session.request.model = redirectedModel;
 
-      // 重新生成请求 buffer（使用 TextEncoder）
-      const updatedBody = JSON.stringify(session.request.message);
-      const encoder = new TextEncoder();
-      session.request.buffer = encoder.encode(updatedBody).buffer;
+      // System One keeps the original multipart bytes; the forwarder replaces its JSON part.
+      if (!session.request.systemOneMultipart) {
+        const updatedBody = JSON.stringify(session.request.message);
+        session.request.buffer = new TextEncoder().encode(updatedBody).buffer;
+      }
     }
 
     // 更新日志（记录重定向）
@@ -225,7 +226,10 @@ export class ModelRedirector {
     }
 
     // 重新生成请求 buffer
-    if (!isOpenAIImageMultipartRequest(imageRequestMetadata)) {
+    if (
+      !isOpenAIImageMultipartRequest(imageRequestMetadata) &&
+      !session.request.systemOneMultipart
+    ) {
       const updatedBody = JSON.stringify(session.request.message);
       session.request.buffer = new TextEncoder().encode(updatedBody).buffer;
     }

@@ -89,6 +89,31 @@ describe("buildProxyUrl", () => {
     );
   });
 
+  test.each([
+    ["https://api.typesafe.ai", "https://api.typesafe.ai/v1/systemone"],
+    ["https://api.typesafe.ai/v1/", "https://api.typesafe.ai/v1/systemone"],
+    ["https://api.typesafe.ai/v1/systemone/", "https://api.typesafe.ai/v1/systemone"],
+    ["https://openrouter.ai/api", "https://openrouter.ai/api/v1/systemone"],
+    ["https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/systemone"],
+    ["https://ai-gateway.vercel.sh/typesafe", "https://ai-gateway.vercel.sh/typesafe/v1/systemone"],
+    ["https://gateway.example/systemone", "https://gateway.example/systemone"],
+    [
+      "https://gateway.example/api/systemone-archive",
+      "https://gateway.example/api/systemone-archive/v1/systemone",
+    ],
+  ])("joins System One provider URL %s", (base, expected) => {
+    expectBuiltUrl(base, "/V1/SystemOne/?trace=one%2Ftwo", `${expected}?trace=one%2Ftwo`);
+  });
+
+  test("replaces the System One provider query and canonicalizes fallback paths", () => {
+    expectBuiltUrl(
+      "https://api.typesafe.ai/v1/systemone?base=1",
+      "/v1/systemone",
+      "https://api.typesafe.ai/v1/systemone"
+    );
+    expectBuiltUrl("invalid-base", "/V1/SystemOne/?x=1", "invalid-base/v1/systemone?x=1");
+  });
+
   test("子路径不丢失：baseUrl=/v1/messages + request=/v1/messages/count_tokens", () => {
     expectBuiltUrl(
       "https://api.example.com/v1/messages",

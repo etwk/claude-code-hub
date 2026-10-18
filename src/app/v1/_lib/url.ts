@@ -11,6 +11,7 @@ const targetEndpoints = [
   "/chat/completions", // OpenAI Compatible
   "/embeddings", // OpenAI Compatible Embeddings
   "/rerank", // OpenAI Compatible Rerank
+  "/systemone", // TypeSafe System One
   "/images", // OpenAI Compatible Images API
   "/audio/transcriptions", // OpenAI Compatible Audio API
   "/audio/translations", // OpenAI Compatible Audio API
@@ -108,14 +109,15 @@ function endsWithSegments(haystack: string[], needle: string[]): boolean {
  * @returns 拼接后的完整URL字符串
  */
 export function buildProxyUrl(baseUrl: string, requestUrl: URL): string {
+  const normalizedPath = normalizeEndpointPath(requestUrl.pathname);
+  const requestPath =
+    normalizedPath === V1_ENDPOINT_PATHS.RERANK || normalizedPath === V1_ENDPOINT_PATHS.SYSTEMONE
+      ? normalizedPath
+      : requestUrl.pathname;
   try {
     // 解析baseUrl
     const baseUrlObj = new URL(baseUrl);
     const basePath = baseUrlObj.pathname.replace(/\/$/, ""); // 移除末尾斜杠
-    const requestPath =
-      normalizeEndpointPath(requestUrl.pathname) === V1_ENDPOINT_PATHS.RERANK
-        ? V1_ENDPOINT_PATHS.RERANK
-        : requestUrl.pathname;
 
     // Case 1: baseUrl 已是 requestPath 的前缀（例如 base=/v1/messages, req=/v1/messages/count_tokens）
     // 直接使用 requestPath，避免丢失子路径。
@@ -177,7 +179,7 @@ export function buildProxyUrl(baseUrl: string, requestUrl: URL): string {
     logger.error("URL构建失败:", error);
     // 降级到字符串拼接
     const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
-    return `${normalizedBaseUrl}${requestUrl.pathname}${requestUrl.search}`;
+    return `${normalizedBaseUrl}${requestPath}${requestUrl.search}`;
   }
 }
 

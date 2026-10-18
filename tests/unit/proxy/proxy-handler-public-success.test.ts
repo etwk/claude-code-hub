@@ -245,6 +245,40 @@ describe("handleProxyRequest public success behavior", () => {
     }
   );
 
+  it.each(["/v1/systemone", "/V1/SystemOne/"])(
+    "keeps whitelisted System One models on the JSON path at %s",
+    async (pathname) => {
+      boundary.loadSettings.mockResolvedValue({
+        ...defaultSettings,
+        fakeStreamingWhitelist: [{ model: "jev-latest", groupTags: [] }],
+      });
+      const request = {
+        model: "jev-latest",
+        state: "A refund request",
+        questions: { billing: { type: "noul", instructions: "Is this billing?" } },
+      };
+      const result = {
+        model: "jev-1.13.0",
+        answers: { billing: { type: "noul", noul: 0.98 } },
+        usage: { input_tokens: 20, output_tokens: 2 },
+      };
+      boundary.send.mockResolvedValue(
+        new Response(JSON.stringify(result), {
+          headers: { "content-type": "application/json", "x-typesafe-request-id": "req-1" },
+        })
+      );
+
+      const response = await handleProxyRequest(createContext(pathname, request));
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(response.headers.get("x-typesafe-request-id")).toBe("req-1");
+      expect(await response.json()).toEqual(result);
+      expect(observedSession?.request.message).not.toHaveProperty("stream");
+      expect(boundary.send).toHaveBeenCalledOnce();
+    }
+  );
+
   it("normalizes Responses input and output at the public boundary", async () => {
     boundary.send.mockImplementation(
       async (session) =>

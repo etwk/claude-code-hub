@@ -6160,11 +6160,14 @@ export function extractUsageMetrics(value: unknown): UsageMetrics | null {
   return hasAny ? result : null;
 }
 
-function asRerankTokenCount(value: unknown): number | undefined {
+function asNonnegativeTokenCount(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
-function parseRerankUsage(parsed: unknown): {
+function parseOptionalTokenUsage(
+  parsed: unknown,
+  includeRerankReports: boolean
+): {
   usageRecord: Record<string, unknown> | null;
   usageMetrics: UsageMetrics | null;
 } {
@@ -6180,19 +6183,18 @@ function parseRerankUsage(parsed: unknown): {
     }
 
     const inputTokens =
-      asRerankTokenCount(value.input_tokens) ??
-      (standard ? asRerankTokenCount(value.prompt_tokens) : undefined);
+      asNonnegativeTokenCount(value.input_tokens) ??
+      (standard ? asNonnegativeTokenCount(value.prompt_tokens) : undefined);
     const outputTokens =
-      asRerankTokenCount(value.output_tokens) ??
-      (standard ? asRerankTokenCount(value.completion_tokens) : undefined);
-    const totalTokens = asRerankTokenCount(value.total_tokens);
+      asNonnegativeTokenCount(value.output_tokens) ??
+      (standard ? asNonnegativeTokenCount(value.completion_tokens) : undefined);
+    const totalTokens = asNonnegativeTokenCount(value.total_tokens);
 
     if (totalOnly) {
       if (inputTokens !== undefined || (outputTokens ?? 0) > 0 || totalTokens === undefined) {
         return;
       }
-      // Reranking consumes input tokens, not generated text. An explicit zero
-      // output does not make an otherwise total-only report ambiguous.
+      // With no directional split and no positive output, account the total as consumed input.
       usageMetrics = { input_tokens: totalTokens, output_tokens: outputTokens ?? 0 };
     } else {
       if (inputTokens === undefined && (outputTokens ?? 0) === 0) {
@@ -6208,14 +6210,15 @@ function parseRerankUsage(parsed: unknown): {
     usageRecord = value;
   };
 
-  const meta = isRecord(parsed.meta) ? parsed.meta : null;
-  // Select one valid report, never add or merge competing token counts.
-  // Explicit directions outrank totals; billed units outrank raw meta.tokens.
+  const meta = includeRerankReports && isRecord(parsed.meta) ? parsed.meta : null;
+  // Select one valid report, never merge competing token counts. Cohere reports apply only to rerank.
   applyUsage(parsed.usage, false, true);
-  applyUsage(meta?.billed_units, false, false);
+  if (meta) applyUsage(meta.billed_units, false, false);
   applyUsage(parsed.usage, true, true);
-  applyUsage(meta?.billed_units, true, false);
-  applyUsage(meta?.tokens, false, false);
+  if (meta) {
+    applyUsage(meta.billed_units, true, false);
+    applyUsage(meta.tokens, false, false);
+  }
 
   return { usageRecord, usageMetrics };
 }
@@ -6228,13 +6231,16 @@ export function parseUsageFromResponseText(
   usageRecord: Record<string, unknown> | null;
   usageMetrics: UsageMetrics | null;
 } {
+  const normalizedPath = pathname === undefined ? undefined : normalizeEndpointPath(pathname);
   if (
     providerType === "openai-compatible" &&
-    pathname !== undefined &&
-    normalizeEndpointPath(pathname) === V1_ENDPOINT_PATHS.RERANK
+    (normalizedPath === V1_ENDPOINT_PATHS.RERANK || normalizedPath === V1_ENDPOINT_PATHS.SYSTEMONE)
   ) {
     try {
-      return parseRerankUsage(JSON.parse(responseText));
+      return parseOptionalTokenUsage(
+        JSON.parse(responseText),
+        normalizedPath === V1_ENDPOINT_PATHS.RERANK
+      );
     } catch {
       return { usageRecord: null, usageMetrics: null };
     }

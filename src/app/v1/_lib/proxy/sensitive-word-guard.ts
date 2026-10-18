@@ -16,7 +16,11 @@
 import { db } from "@/drizzle/db";
 import { messageRequest } from "@/drizzle/schema";
 import { logger } from "@/lib/logger";
-import { extractTextFromMessages, extractTextFromRerankRequest } from "@/lib/message-extractor";
+import {
+  extractTextFromMessages,
+  extractTextFromRerankRequest,
+  extractTextFromSystemOneRequest,
+} from "@/lib/message-extractor";
 import { sensitiveWordDetector } from "@/lib/sensitive-word-detector";
 import { normalizeEndpointPath, V1_ENDPOINT_PATHS } from "./endpoint-paths";
 import { ProxyResponses } from "./responses";
@@ -36,8 +40,12 @@ export class ProxySensitiveWordGuard {
       }
 
       // 提取所有需要检测的文本
-      const texts = extractTextFromMessages(session.request.message);
-      if (normalizeEndpointPath(session.requestUrl.pathname) === V1_ENDPOINT_PATHS.RERANK) {
+      const normalizedPath = normalizeEndpointPath(session.requestUrl.pathname);
+      const texts =
+        normalizedPath === V1_ENDPOINT_PATHS.SYSTEMONE
+          ? extractTextFromSystemOneRequest(session.request.message)
+          : extractTextFromMessages(session.request.message);
+      if (normalizedPath === V1_ENDPOINT_PATHS.RERANK) {
         texts.push(...extractTextFromRerankRequest(session.request.message));
       }
 

@@ -150,6 +150,50 @@ positive output count does not imply an input split. `search_units` are not
 tokens. Without token usage, existing per-request pricing can still bill a
 successful response; token counts are never fabricated.
 
+### System One API
+
+Send TypeSafe-compatible requests to `POST /v1/systemone` with a CCH API key.
+Configure an **OpenAI Compatible** provider with your TypeSafe API key, URL
+`https://api.typesafe.ai` (also accepts `/v1` or the full `/v1/systemone` URL),
+and an explicit model allowlist such as `jev-latest`. Gateway prefixes such as
+`https://openrouter.ai/api` and `https://ai-gateway.vercel.sh/typesafe` are retained.
+Responses, Messages, and Gemini providers are not used for this endpoint.
+
+```bash
+curl https://your-cch.example/v1/systemone \
+  -H "Authorization: Bearer $CCH_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"jev-latest","state":"I was charged twice.","questions":{"billing":{"type":"noul","instructions":"Is this about billing?"}}}'
+```
+
+JSON and TypeSafe's experimental image-upload multipart format are supported:
+the first part is named `request` and contains the JSON request, followed by
+image parts referenced by `assets`. Multipart forwarding replaces only that JSON
+part, preserving image bytes, filenames, and boundary framing. Inbound compressed
+bodies are decoded before inspection. Forward the required
+`TypeSafe-Danger-Zone-Images: true` header when using images or `box` questions;
+TypeSafe's feature, image, and question validation remains upstream-owned.
+
+A nonblank string `model` is required, with localized validation errors. Normal
+authentication, model allowlists, provider groups, rate limits, spending checks,
+model redirects, and configured request filters apply. Nested `state`, question,
+and asset fields (including underscore-prefixed keys) are preserved; private
+top-level parameters are removed. Sensitive-word checks inspect nested state,
+instructions, criteria, and choice labels, not asset bytes or transport metadata.
+Image-reference spans are excluded without joining the surrounding text; Choice
+option names remain literal text, matching [TypeSafe's reference rules](https://docs.typesafe.ai/images#references).
+The endpoint bypasses fake streaming even for whitelisted models. Accepted path
+variants are forwarded canonically; successful JSON answers and TypeSafe response
+headers are preserved. CCH's existing model-list endpoint keeps its existing format;
+this addition does not implement TypeSafe SDK model discovery.
+
+Accounting reads only the response's `usage`: `input_tokens`/`output_tokens`, with
+`prompt_tokens`/`completion_tokens` aliases. Counts must be nonnegative safe integers;
+explicit input zero wins. A total-only report is consumed input with zero output;
+positive output does not imply an input split. Missing/null token counts and zero
+output alone allow existing per-request pricing on successful responses. Upstream
+monetary `cost` fields are not token counts or a replacement for local pricing.
+
 For schema-changing upgrades, follow the [database rollback procedure](docs/database-upgrade-rollback.md).
 Changing the application image alone does not undo database migrations or triggers.
 

@@ -216,3 +216,76 @@ export function extractTextFromRerankRequest(message: Record<string, unknown>): 
 
   return texts;
 }
+
+function collectSystemOneText(
+  value: unknown,
+  texts: string[],
+  assetPattern: RegExp | null,
+  depth = 0
+): void {
+  if (depth > 64) return;
+  if (typeof value === "string") {
+    if (assetPattern === null) {
+      if (value.length > 0) texts.push(value);
+      return;
+    }
+    // Image spans separate text; removing them must not join unrelated words.
+    assetPattern.lastIndex = 0;
+    let start = 0;
+    let match = assetPattern.exec(value);
+    while (match !== null) {
+      if (match.index > start) texts.push(value.slice(start, match.index));
+      start = assetPattern.lastIndex;
+      match = assetPattern.exec(value);
+    }
+    if (start < value.length) texts.push(value.slice(start));
+  } else if (Array.isArray(value)) {
+    for (const item of value) collectSystemOneText(item, texts, assetPattern, depth + 1);
+  } else if (value !== null && typeof value === "object") {
+    for (const nested of Object.values(value)) {
+      collectSystemOneText(nested, texts, assetPattern, depth + 1);
+    }
+  }
+}
+
+/** Inspect inference text, not images, asset references, question IDs, or transport metadata. */
+export function extractTextFromSystemOneRequest(message: Record<string, unknown>): string[] {
+  const texts: string[] = [];
+  const references =
+    message.assets !== null && typeof message.assets === "object" && !Array.isArray(message.assets)
+      ? Object.keys(message.assets).filter((reference) => reference.length > 0)
+      : [];
+  // Literal, case-sensitive, non-overlapping matches; complete references win over prefixes.
+  const assetPattern =
+    references.length > 0
+      ? new RegExp(
+          references
+            .sort((left, right) => right.length - left.length)
+            .map((reference) => reference.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+            .join("|"),
+          "g"
+        )
+      : null;
+  collectSystemOneText(message.state, texts, assetPattern);
+  if (
+    message.questions === null ||
+    typeof message.questions !== "object" ||
+    Array.isArray(message.questions)
+  ) {
+    return texts;
+  }
+  for (const question of Object.values(message.questions)) {
+    if (question === null || typeof question !== "object" || Array.isArray(question)) continue;
+    const { instructions, criteria, type } = question as Record<string, unknown>;
+    collectSystemOneText(instructions, texts, assetPattern);
+    if (criteria !== null && typeof criteria === "object" && !Array.isArray(criteria)) {
+      for (const [label, description] of Object.entries(criteria)) {
+        if (type !== "noul" && label.length > 0) texts.push(label);
+        collectSystemOneText(description, texts, assetPattern, 1);
+      }
+    } else {
+      collectSystemOneText(criteria, texts, assetPattern);
+    }
+  }
+  return texts;
+}

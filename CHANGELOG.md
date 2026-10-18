@@ -8,6 +8,10 @@
 
 ### 新增
 
+- 原生支持 `POST /v1/systemone`：通过 OpenAI Compatible 供应商转发 TypeSafe JSON
+  及实验性图片 multipart 请求，保留嵌套应用字段和二进制图片；沿用认证、模型白名单、
+  分组、限额、模型重定向与过滤规则，增加区分图片引用和字面选项名的语义文本检查，排除 fake-streaming，
+  支持可空 token 用量与现有按次计费，不更改模型发现格式
 - 原生支持 `POST /v1/rerank`：通过 OpenAI Compatible 供应商转发，保留文档字段与重排结果，
   沿用认证、模型白名单、分组及额度检查；支持标准与 Cohere 风格 token 用量，total-only
   用量按输入计费，缺少 token 用量时保留现有按次计费行为
