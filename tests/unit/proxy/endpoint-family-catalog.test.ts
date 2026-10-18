@@ -78,6 +78,13 @@ const FAMILY_SAMPLES = [
     modelRequired: true,
   },
   {
+    id: "openai-systemone",
+    path: "/v1/systemone",
+    format: "openai",
+    accountingTier: "optional_usage",
+    modelRequired: true,
+  },
+  {
     id: "openai-moderations",
     path: "/v1/moderations",
     format: "openai",

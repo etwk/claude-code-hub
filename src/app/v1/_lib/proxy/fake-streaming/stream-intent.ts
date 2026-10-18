@@ -1,3 +1,4 @@
+import { isSystemOneEndpointPath } from "../endpoint-paths";
 import type { ClientFormat } from "../format-mapper";
 
 export interface StreamIntentInputs {
@@ -30,6 +31,7 @@ function bodyStreamFlag(body: Record<string, unknown> | null): boolean {
  * request body streams.
  */
 export function detectClientStreamIntent(input: StreamIntentInputs): boolean {
+  if (isSystemOneEndpointPath(input.pathname)) return false;
   if (isGeminiFamily(input.format)) {
     if (input.pathname.includes(":streamGenerateContent")) return true;
     if (hasAltSse(input.search)) return true;

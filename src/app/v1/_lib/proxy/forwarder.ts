@@ -101,7 +101,11 @@ import { type DiscoveryAction, DiscoveryCoordinator } from "./discovery-coordina
 import { startDiscoveryLeaseHeartbeat } from "./discovery-lease-heartbeat";
 import { type DiscoveryProtocol, DiscoveryValidityParser } from "./discovery-validity";
 import { isStandardProxyEndpointPath } from "./endpoint-family-catalog";
-import { normalizeEndpointPath, V1_ENDPOINT_PATHS } from "./endpoint-paths";
+import {
+  isSystemOneEndpointPath,
+  normalizeEndpointPath,
+  V1_ENDPOINT_PATHS,
+} from "./endpoint-paths";
 import { resolveEndpointPolicy, shouldEnforceStrictEndpointPoolPolicy } from "./endpoint-policy";
 import {
   ALL_PROVIDERS_UNAVAILABLE_MESSAGE,
@@ -166,6 +170,7 @@ import {
   type StreamGateResult,
   StreamPrecommitError,
 } from "./stream-gate/stream-content-gate";
+import { serializeSystemOneMultipartBody } from "./systemone-compat";
 import {
   detectThinkingBudgetRectifierTrigger,
   rectifyThinkingBudget,
@@ -3821,14 +3826,22 @@ export class ProxyForwarder {
             });
           }
         } else {
-          // Rerank documents are opaque application data; filter only private top-level parameters.
+          // Rerank documents and System One inference fields are opaque application data.
+          const normalizedPath = normalizeEndpointPath(requestPath);
           const filteredMessage = filterPrivateParameters(
             session.request.message,
-            normalizeEndpointPath(requestPath) !== V1_ENDPOINT_PATHS.RERANK
+            normalizedPath !== V1_ENDPOINT_PATHS.RERANK &&
+              normalizedPath !== V1_ENDPOINT_PATHS.SYSTEMONE
           ) as Record<string, unknown>;
 
           // 将 metadata.user_id 注入放在私有参数过滤之后，避免受过滤逻辑影响。
           let messageToSend: Record<string, unknown> = filteredMessage;
+          const systemOneMultipart = session.request.systemOneMultipart;
+          if (systemOneMultipart) {
+            if (!session.request.buffer)
+              throw new Error("Missing System One multipart request buffer");
+            processedHeaders.set("content-type", systemOneMultipart.contentType);
+          }
           if (provider.providerType === "claude" || provider.providerType === "claude-auth") {
             const settings = await getCachedSystemSettings();
             const enabled = settings.enableClaudeMetadataUserIdInjection ?? true;
@@ -3867,9 +3880,15 @@ export class ProxyForwarder {
           }
 
           const bodyString = JSON.stringify(messageToSend);
-          requestBody = bodyString;
+          requestBody = systemOneMultipart
+            ? serializeSystemOneMultipartBody(
+                session.request.buffer!,
+                systemOneMultipart,
+                bodyString
+              )
+            : bodyString;
           session.forwardedRequestBody = retainForwardedBody ? bodyString : null;
-          isStreaming = messageToSend.stream === true;
+          isStreaming = !isSystemOneEndpointPath(requestPath) && messageToSend.stream === true;
 
           if (process.env.NODE_ENV === "development") {
             logger.trace("ProxyForwarder: Forwarding request", {
@@ -4825,7 +4844,10 @@ export class ProxyForwarder {
 
   private static shouldUseStreamingHedge(session: ProxySession): boolean {
     const endpointPolicy = ProxyForwarder.getEndpointPolicy(session);
-    if (session.isStreamingHedgeDisabled()) {
+    if (
+      isSystemOneEndpointPath(session.requestUrl.pathname) ||
+      session.isStreamingHedgeDisabled()
+    ) {
       return false;
     }
     return (
@@ -4850,7 +4872,9 @@ export class ProxyForwarder {
     if (!endpointPolicy.allowRetry) return { status: "skipped", reason: "retry_not_allowed" };
     if (!endpointPolicy.allowProviderSwitch)
       return { status: "skipped", reason: "provider_switch_not_allowed" };
-    if (message?.stream !== true) return { status: "skipped", reason: "non_streaming" };
+    if (message?.stream !== true || isSystemOneEndpointPath(session.requestUrl.pathname)) {
+      return { status: "skipped", reason: "non_streaming" };
+    }
     if (endpointPolicy.bypassForwarderPreprocessing)
       return { status: "skipped", reason: "raw_passthrough" };
     if (protocol === "unknown") return { status: "skipped", reason: "unsupported_protocol" };
@@ -8982,6 +9006,7 @@ export class ProxyForwarder {
     if (logDescriptor) Object.defineProperty(target.request, "log", logDescriptor);
     target.request.note = source.request.note;
     target.request.model = source.request.model;
+    target.request.systemOneMultipart = source.request.systemOneMultipart;
     target.request.imageRequestMetadata = cloneOpenAIImageRequestMetadata(
       source.request.imageRequestMetadata
     );

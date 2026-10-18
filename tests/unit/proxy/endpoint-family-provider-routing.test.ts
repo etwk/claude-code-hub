@@ -75,6 +75,12 @@ const ENDPOINT_PROVIDER_CASES = [
     expectedProviderType: "openai-compatible",
   },
   {
+    id: "openai-systemone",
+    path: "/v1/systemone",
+    requestedModel: "jev-latest",
+    expectedProviderType: "openai-compatible",
+  },
+  {
     id: "openai-moderations",
     path: "/v1/moderations",
     requestedModel: "",

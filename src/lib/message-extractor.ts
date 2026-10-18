@@ -216,3 +216,83 @@ export function extractTextFromRerankRequest(message: Record<string, unknown>): 
 
   return texts;
 }
+
+function collectSystemOneText(value: unknown, texts: string[], assetPattern: RegExp | null): void {
+  const pending: { value: unknown; key?: string }[] = [{ value }];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    // Object keys stay model-visible text even when they equal an image reference.
+    if (current.key) texts.push(current.key);
+    const nested = current.value;
+    if (typeof nested === "string") {
+      if (assetPattern === null) {
+        if (nested.length > 0) texts.push(nested);
+        continue;
+      }
+      // Image spans separate text; removing them must not join unrelated words.
+      assetPattern.lastIndex = 0;
+      let start = 0;
+      let match = assetPattern.exec(nested);
+      while (match !== null) {
+        if (match.index > start) texts.push(nested.slice(start, match.index));
+        start = assetPattern.lastIndex;
+        match = assetPattern.exec(nested);
+      }
+      if (start < nested.length) texts.push(nested.slice(start));
+    } else if (Array.isArray(nested)) {
+      // Reverse the work stack to preserve depth-first array and object text order.
+      for (let index = nested.length - 1; index >= 0; index--) {
+        pending.push({ value: nested[index] });
+      }
+    } else if (nested !== null && typeof nested === "object") {
+      const object = nested as Record<string, unknown>;
+      const keys = Object.keys(object);
+      for (let index = keys.length - 1; index >= 0; index--) {
+        const key = keys[index];
+        pending.push({ value: object[key], key });
+      }
+    }
+  }
+}
+
+/** Inspect inference text, not images, asset references, question IDs, or transport metadata. */
+export function extractTextFromSystemOneRequest(message: Record<string, unknown>): string[] {
+  const texts: string[] = [];
+  const references =
+    message.assets !== null && typeof message.assets === "object" && !Array.isArray(message.assets)
+      ? Object.keys(message.assets).filter((reference) => reference.length > 0)
+      : [];
+  // Literal, case-sensitive, non-overlapping matches; complete references win over prefixes.
+  const assetPattern =
+    references.length > 0
+      ? new RegExp(
+          references
+            .sort((left, right) => right.length - left.length)
+            .map((reference) => reference.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+            .join("|"),
+          "g"
+        )
+      : null;
+  collectSystemOneText(message.state, texts, assetPattern);
+  if (
+    message.questions === null ||
+    typeof message.questions !== "object" ||
+    Array.isArray(message.questions)
+  ) {
+    return texts;
+  }
+  for (const question of Object.values(message.questions)) {
+    if (question === null || typeof question !== "object" || Array.isArray(question)) continue;
+    const { instructions, criteria, type } = question as Record<string, unknown>;
+    collectSystemOneText(instructions, texts, assetPattern);
+    if (criteria !== null && typeof criteria === "object" && !Array.isArray(criteria)) {
+      for (const [label, description] of Object.entries(criteria)) {
+        if (type !== "noul" && label.length > 0) texts.push(label);
+        collectSystemOneText(description, texts, assetPattern);
+      }
+    } else {
+      collectSystemOneText(criteria, texts, assetPattern);
+    }
+  }
+  return texts;
+}

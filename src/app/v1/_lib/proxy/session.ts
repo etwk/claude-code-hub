@@ -1,5 +1,10 @@
 import type { Context } from "hono";
-import { isCountTokensEndpointPath, V1_ENDPOINT_PATHS } from "@/app/v1/_lib/proxy/endpoint-paths";
+import { getLocale } from "next-intl/server";
+import {
+  isCountTokensEndpointPath,
+  normalizeEndpointPath,
+  V1_ENDPOINT_PATHS,
+} from "@/app/v1/_lib/proxy/endpoint-paths";
 import { isRemoteCompactionV2Request } from "@/app/v1/_lib/proxy/remote-compaction";
 import { loadRequestBody, retainRequestMemory } from "@/lib/body-store/request-body-store";
 import { logger } from "@/lib/logger";
@@ -57,6 +62,8 @@ import {
   parseOpenAIImageMultipartMetadata,
 } from "./openai-image-compat";
 import type { ReplayIdentity } from "./replay/replay-identity";
+import type { SystemOneMultipartMetadata } from "./systemone-compat";
+import { parseSystemOneMultipartRequest } from "./systemone-compat";
 
 /** F2 Replay 的会话内状态：guard 阶段抢到 owner 租约后填充。 */
 export interface SessionReplayState {
@@ -123,6 +130,7 @@ export interface ProxyRequestPayload {
   note?: string;
   model: string | null;
   imageRequestMetadata?: OpenAIImageRequestMetadata | null;
+  systemOneMultipart?: SystemOneMultipartMetadata;
 }
 
 interface RequestBodyResult {
@@ -134,6 +142,7 @@ interface RequestBodyResult {
   contentLength?: number | null;
   actualBodyBytes?: number;
   imageRequestMetadata?: OpenAIImageRequestMetadata | null;
+  systemOneMultipart?: SystemOneMultipartMetadata;
   /**
    * 入站请求体实际解压所用的 content-encoding（链）。
    * 非空表示代理已解压请求体，调用方需剥离出站 `content-encoding` 头，
@@ -386,7 +395,12 @@ export class ProxySession {
       (bodyResult.actualBodyBytes !== undefined &&
         bodyResult.actualBodyBytes >= LARGE_REQUEST_BODY_BYTES);
 
-    if (!resolvedModel && isLargeRequestBody) {
+    // System One uses its localized model guard regardless of request body size.
+    if (
+      !resolvedModel &&
+      isLargeRequestBody &&
+      normalizeEndpointPath(requestUrl.pathname) !== V1_ENDPOINT_PATHS.SYSTEMONE
+    ) {
       logger.warn("[ProxySession] Missing model for large request body", {
         pathname: requestUrl.pathname,
         contentLength: bodyResult.contentLength ?? undefined,
@@ -406,6 +420,7 @@ export class ProxySession {
       note: bodyResult.requestBodyLogNote,
       model: resolvedModel,
       imageRequestMetadata: bodyResult.imageRequestMetadata,
+      systemOneMultipart: bodyResult.systemOneMultipart,
     };
     if (bodyResult.lazyLog) setLazyRequestLog(request);
 
@@ -1785,14 +1800,47 @@ async function parseRequestBody(c: Context): Promise<RequestBodyResult> {
     };
   }
 
+  if (
+    normalizeEndpointPath(pathname) === V1_ENDPOINT_PATHS.SYSTEMONE &&
+    contentType?.split(";", 1)[0].trim().toLowerCase() === "multipart/form-data"
+  ) {
+    const parsed = parseSystemOneMultipartRequest(rawBodyBuffer, contentType);
+    if (!parsed) {
+      throw new ProxyError(
+        await getErrorMessageServer(await getLocale(), ERROR_CODES.REQUIRED_FIELD, {
+          field: "request",
+        }),
+        400
+      );
+    }
+    loaded.lease.shrinkTo(loaded.retainedBytes);
+    return {
+      requestMessage: parsed.requestMessage,
+      requestBodyLog: "",
+      lazyLog: true,
+      requestBodyBuffer: rawBodyBuffer,
+      contentLength,
+      actualBodyBytes: receivedBodyBytes,
+      systemOneMultipart: parsed.metadata,
+      decodedContentEncoding: loaded.encoding ?? undefined,
+    };
+  }
+
   // 非 multipart：按 content-encoding（zstd/gzip/deflate/br）解压请求体，
   // 使下游模型解析、过滤、计费、日志与转发都基于明文。
   const requestBodyBuffer = loaded.buffer;
   const requestBodyText = new TextDecoder().decode(requestBodyBuffer);
 
   try {
-    const parsedMessage = JSON.parse(requestBodyText) as Record<string, unknown>;
-    requestMessage = parsedMessage; // 保留原始数据用于业务逻辑
+    const parsedMessage: unknown = JSON.parse(requestBodyText);
+    if (
+      parsedMessage === null ||
+      typeof parsedMessage !== "object" ||
+      Array.isArray(parsedMessage)
+    ) {
+      throw new TypeError("Expected a JSON request object");
+    }
+    requestMessage = parsedMessage as Record<string, unknown>;
     requestBodyLog = ""; // 有消费者读取 request.log 时才生成日志视图。
   } catch {
     requestMessage = { raw: requestBodyText };

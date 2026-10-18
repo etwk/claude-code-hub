@@ -143,6 +143,43 @@ Token 用量可选。计费只选择一个来源，不叠加不同报告：依�
 `search_units` 不转换为 token。缺少 token 用量时，成功响应仍可使用现有按次计费，
 不会虚构 token 数量。
 
+### System One API
+
+使用 CCH API Key 向 `POST /v1/systemone` 发送 TypeSafe 兼容请求。配置
+**OpenAI Compatible** 供应商，填入 TypeSafe API Key、`https://api.typesafe.ai`
+（也接受 `/v1` 基础地址或完整 `/v1/systemone` URL），并显式配置如 `jev-latest`
+的模型白名单。保留 OpenRouter 的 `/api`、Vercel 的 `/typesafe` 等网关前缀。
+此端点不使用 Responses、Messages 或 Gemini 供应商。
+
+```bash
+curl https://your-cch.example/v1/systemone \
+  -H "Authorization: Bearer $CCH_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"jev-latest","state":"I was charged twice.","questions":{"billing":{"type":"noul","instructions":"Is this about billing?"}}}'
+```
+
+支持 JSON 及 TypeSafe 实验性图片上传 multipart 格式：首个 `request` part 包含
+JSON 请求，其后为 `assets` 引用的图片 part。转发仅替换 JSON part，保留图片字节、
+文件名与 boundary。入站压缩请求先解压再检查。图片或 `box` 问题需传递
+`TypeSafe-Danger-Zone-Images: true`；具体图片、问题及功能校验仍由上游负责。
+
+`model` 必须是非空白字符串，校验错误沿用请求语言翻译，包括大尺寸 multipart 上传。认证、模型白名单、供应商
+分组、速率及消费额度、模型重定向和已配置的请求过滤规则沿用现有流程。保留嵌套
+`state`、问题和资源字段（包括下划线开头的键），仅移除顶层私有参数。敏感词检查
+覆盖嵌套 state、instructions、criteria 的文本值、对象键及 choice 标签，不因嵌套层级跳过检查，也不扫描资源字节或传输元数据。
+值中的图片引用片段不作为文本检查，也不会拼接其前后的文本；对象键仍是字面文本，
+遵循 [TypeSafe 引用规则](https://docs.typesafe.ai/images#references)。
+此端点始终使用非流式 JSON 传输及超时，即使客户端或过滤器设置 `stream: true`，
+或模型命中 fake-streaming 白名单，也不合成流。接受的路径变体规范化转发，成功 JSON
+答案及 TypeSafe 响应头保持原样。CCH 模型列表端点仍使用原有格式，本功能不实现
+TypeSafe SDK 的模型发现。
+
+计费仅读取响应 `usage` 的 `input_tokens`/`output_tokens`，兼容
+`prompt_tokens`/`completion_tokens` 别名。计数必须是非负安全整数，保留显式输入零值。
+仅有总量时按输入消耗计费、输出为零；正数输出不会用于反推输入。缺失/null token
+计数或仅有零输出时，成功请求可沿用现有按次价格。上游金额 `cost` 字段不转换为
+token，也不替代本地定价。
+
 涉及 schema 的升级请遵循[数据库回滚流程](docs/database-upgrade-rollback.md)；
 仅回退应用镜像不会撤销数据库迁移或触发器。
 

@@ -17,6 +17,7 @@ import { sanitizeErrorTextForDetail } from "@/lib/utils/upstream-error-detection
 import { updateMessageRequestDetailsDurably } from "@/repository/message";
 import type { SystemSettings } from "@/types/system-config";
 import { deriveClientSafeUpstreamErrorMessage } from "./client-error-message";
+import { isSystemOneEndpointPath } from "./endpoint-paths";
 import { attachSessionIdToErrorResponse } from "./error-session-id";
 import {
   ALL_PROVIDERS_UNAVAILABLE_MESSAGE,
@@ -53,6 +54,7 @@ function getErrorResponseText(error: unknown): string {
 
 function isRequestStreaming(session: ProxySession): boolean {
   const requestUrl = session.requestUrl;
+  if (requestUrl && isSystemOneEndpointPath(requestUrl.pathname)) return false;
 
   return (
     session.request?.message?.stream === true ||

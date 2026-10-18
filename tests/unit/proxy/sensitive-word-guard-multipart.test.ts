@@ -63,13 +63,56 @@ function createContext(request: Request) {
   } as any;
 }
 
-async function createJsonSession(message: Record<string, unknown>, pathname = "/v1/rerank") {
+async function createJsonSession(
+  message: Record<string, unknown> | string,
+  pathname = "/v1/rerank"
+) {
   const request = new Request(`https://proxy.example.com${pathname}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(message),
+    body: typeof message === "string" ? message : JSON.stringify(message),
   });
   return ProxySession.fromContext(createContext(request));
+}
+
+async function createDeepSystemOneSession(
+  field: "state" | "instructions" | "criteria",
+  shape: "object" | "array",
+  depth: number,
+  leaf: unknown,
+  questionType: "choice" | "noul" | "score"
+) {
+  // Build wire JSON without recursively serializing the deeply nested fixture.
+  const open = shape === "object" ? '{"nested":' : "[";
+  const close = shape === "object" ? "}" : "]";
+  const nested = open.repeat(depth) + JSON.stringify(leaf) + close.repeat(depth);
+  const state = field === "state" ? nested : '"safe state"';
+  const questions =
+    field === "state"
+      ? "{}"
+      : `{"blocked-question-id":{"type":"${questionType}","${field}":${nested}}}`;
+  const assets = JSON.stringify({
+    "blocked-photo": { part: "blocked image bytes" },
+    image: { part: "second photo" },
+    photo: { part: "short reference" },
+    "photo-blocked": { part: "long reference" },
+    "[blocked].*": { part: "literal reference" },
+  });
+  const session = await createJsonSession(
+    `{"model":"jev-latest","state":${state},"questions":${questions},"assets":${assets}}`,
+    "/v1/systemone"
+  );
+
+  // Freeze iteratively too: neither fixtures nor immutability checks need a recursion limit.
+  const pending: object[] = [session.request.message];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    Object.freeze(current);
+    for (const value of Object.values(current)) {
+      if (value !== null && typeof value === "object") pending.push(value);
+    }
+  }
+  return session;
 }
 
 beforeEach(() => {
@@ -260,4 +303,416 @@ describe("ProxySensitiveWordGuard - rerank text", () => {
 
     expect((await ProxySensitiveWordGuard.ensure(session))?.status).toBe(400);
   });
+});
+
+describe("ProxySensitiveWordGuard - System One inference text", () => {
+  it.each(["/v1/systemone", "/V1/SystemOne/", "/v1/systemone?trace=1"])(
+    "blocks nested state on normalized endpoint %s",
+    async (pathname) => {
+      const session = await createJsonSession(
+        {
+          model: "jev-1.13.0",
+          state: { history: ["safe context", { _application: { text: "blocked state" } }] },
+          questions: {},
+        },
+        pathname
+      );
+      const original = structuredClone(session.request.message);
+      const state = session.request.message.state;
+
+      const response = await ProxySensitiveWordGuard.ensure(session);
+
+      expect(response?.status).toBe(400);
+      expect(await response?.json()).toMatchObject({
+        error: { type: "invalid_request_error" },
+      });
+      expect(session.request.message).toEqual(original);
+      expect(session.request.message.state).toBe(state);
+    }
+  );
+
+  it.each([
+    "blocked string state",
+    ["safe state", "blocked array state"],
+    { history: { nested: [{ content: "blocked object state" }] } },
+    { _text: "blocked underscore application text" },
+  ])(
+    "inspects all logical state string shapes without dropping underscore keys: %j",
+    async (state) => {
+      const session = await createJsonSession(
+        { model: "jev-1.13.0", state, questions: {} },
+        "/v1/systemone"
+      );
+
+      expect((await ProxySensitiveWordGuard.ensure(session))?.status).toBe(400);
+    }
+  );
+
+  it.each([
+    { type: "noul", instructions: "blocked instructions" },
+    {
+      type: "choice",
+      instructions: { steps: ["safe", { _detail: "blocked nested instructions" }] },
+    },
+    { type: "score", criteria: "blocked criteria" },
+    { type: "choice", criteria: { ordinary: "blocked choice description" } },
+    { type: "choice", criteria: { "blocked null-description label": null } },
+    { type: "choice", criteria: { _blocked_application_label: null } },
+    { type: "noul", criteria: { true: "blocked positive description", false: "safe negative" } },
+    { type: "noul", criteria: { true: "safe positive", false: "blocked negative description" } },
+    { type: "score", criteria: ["safe score", "blocked score description"] },
+    { type: "score", criteria: [{ score: 0, description: "blocked score array object" }] },
+    { type: "choice", criteria: { option: { _detail: ["blocked nested choice description"] } } },
+  ])("blocks instructions, criteria, and choice option labels: %j", async (question) => {
+    const message = { model: "jev-1.13.0", state: "safe state", questions: { decision: question } };
+    const session = await createJsonSession(message, "/v1/systemone");
+    const questions = session.request.message.questions;
+
+    const response = await ProxySensitiveWordGuard.ensure(session);
+
+    expect(response?.status).toBe(400);
+    expect(session.request.message).toEqual(message);
+    expect(session.request.message.questions).toBe(questions);
+  });
+
+  it.each([
+    { state: { "blocked state field": null } },
+    { state: { records: [{ _blocked_field: false }] } },
+    {
+      questions: {
+        decision: { type: "noul", instructions: { "blocked instruction field": null } },
+      },
+    },
+    {
+      questions: {
+        decision: { type: "choice", criteria: { ordinary: { "blocked criterion field": null } } },
+      },
+    },
+    { state: { "blocked-photo": null }, assets: { "blocked-photo": { part: "image" } } },
+    {
+      questions: { decision: { type: "noul", instructions: { "blocked-photo": null } } },
+      assets: { "blocked-photo": { part: "image" } },
+    },
+  ])("blocks semantic object keys as literal text: %j", async (content) => {
+    const message = { model: "jev-latest", state: "safe", questions: {}, ...content };
+    const session = await createJsonSession(message, "/v1/systemone");
+
+    expect((await ProxySensitiveWordGuard.ensure(session))?.status).toBe(400);
+    expect(session.request.message).toEqual(message);
+  });
+
+  it("ignores asset payloads, metadata, model, and question IDs while preserving the original body", async () => {
+    const message = {
+      model: "blocked-model-name",
+      state: {
+        applicationField: "safe state value",
+        _application: ["safe underscore text", 4, false, null, ""],
+      },
+      questions: {
+        "blocked-question-id": {
+          type: "choice",
+          instructions: "safe choice instructions",
+          criteria: { ordinary: null, "": null, _application: "safe choice description" },
+          metadata: { instructions: "blocked question metadata" },
+          _private: "blocked question private metadata",
+        },
+        boolean: {
+          type: "noul",
+          instructions: "safe noul instructions",
+          criteria: { true: "safe positive description", false: "safe negative description" },
+        },
+        score: { type: "score", criteria: ["safe low score", "safe high score", null, 1] },
+        "blocked-empty-question": null,
+        "blocked-array-question": ["blocked unsupported question"],
+        "blocked-string-question": "blocked unsupported question",
+      },
+      assets: {
+        "blocked-asset-reference": {
+          type: "image",
+          data: "data:image/png;base64,blocked-base64-payload",
+          part: "blocked-image-part",
+          text: "blocked asset text",
+        },
+      },
+      metadata: { state: "blocked top-level metadata", questions: "blocked metadata questions" },
+      _private: { text: "blocked private metadata" },
+    };
+    const original = structuredClone(message);
+    const session = await createJsonSession(message, "/v1/systemone");
+    const logicalMessage = session.request.message;
+    const { state, questions, assets } = logicalMessage;
+
+    const response = await ProxySensitiveWordGuard.ensure(session);
+
+    expect(response).toBeNull();
+    expect(message).toEqual(original);
+    expect(session.request.message).toEqual(original);
+    expect(session.request.message).toBe(logicalMessage);
+    expect(session.request.message.state).toBe(state);
+    expect(session.request.message.questions).toBe(questions);
+    expect(session.request.message.assets).toBe(assets);
+  });
+
+  it("does not reinterpret opaque top-level chat-shaped fields as System One inference text", async () => {
+    const message = {
+      model: "jev-1.13.0",
+      state: "safe inference state",
+      questions: {},
+      prompt: ["blocked opaque prompt"],
+      system: "blocked opaque system",
+      messages: [{ role: "user", content: "blocked opaque chat message" }],
+      input: [{ role: "user", content: [{ type: "input_text", text: "blocked opaque input" }] }],
+    };
+    const session = await createJsonSession(message, "/v1/systemone");
+
+    expect(await ProxySensitiveWordGuard.ensure(session)).toBeNull();
+    expect(session.request.message).toEqual(message);
+  });
+
+  it("uses noul description values rather than treating criteria keys as choice labels", async () => {
+    const session = await createJsonSession(
+      {
+        model: "jev-1.13.0",
+        state: "safe state",
+        questions: {
+          decision: {
+            type: "noul",
+            criteria: { true: "safe positive", false: "safe negative", "blocked opaque key": null },
+          },
+        },
+      },
+      "/v1/systemone"
+    );
+
+    expect(await ProxySensitiveWordGuard.ensure(session)).toBeNull();
+  });
+
+  it.each([
+    { state: "blocked-photo", questions: {} },
+    { state: "Compare blocked-photo and blocked-photo.", questions: {} },
+    { state: "bloimagecked", questions: {} },
+    {
+      state: "safe",
+      questions: { decision: { type: "noul", instructions: "See blocked-photo." } },
+    },
+    {
+      state: "safe",
+      questions: { decision: { type: "choice", criteria: { ordinary: "blocked-photo" } } },
+    },
+    { state: "safe", questions: { decision: { type: "score", criteria: ["blocked-photo"] } } },
+  ])("does not scan image references or join text across images: %j", async (content) => {
+    const message = {
+      model: "jev-latest",
+      ...content,
+      assets: { "blocked-photo": { part: "photo" }, image: { part: "second-photo" } },
+    };
+    const session = await createJsonSession(message, "/v1/systemone");
+    const original = structuredClone(session.request.message);
+
+    expect(await ProxySensitiveWordGuard.ensure(session)).toBeNull();
+    expect(session.request.message).toEqual(original);
+  });
+
+  it.each([
+    { state: "blocked real text next to image" },
+    { state: "image blocked real text" },
+    { state: "blocked-PHOTO" },
+    {
+      state: "blocked-photo",
+      questions: { decision: { type: "choice", criteria: { "blocked-photo": null } } },
+    },
+  ])(
+    "still blocks surrounding text, case mismatches, and literal choice names: %j",
+    async (content) => {
+      const session = await createJsonSession(
+        {
+          model: "jev-latest",
+          questions: {},
+          ...content,
+          assets: { "blocked-photo": { part: "photo" }, image: { part: "second-photo" } },
+        },
+        "/v1/systemone"
+      );
+
+      expect((await ProxySensitiveWordGuard.ensure(session))?.status).toBe(400);
+    }
+  );
+
+  it("matches literal references with punctuation and prefers complete overlapping references", async () => {
+    const session = await createJsonSession(
+      {
+        model: "jev-latest",
+        state: ["photo-blocked", "photo-blocked next to [blocked].*"],
+        questions: {},
+        assets: {
+          photo: { part: "short" },
+          "photo-blocked": { part: "long" },
+          "[blocked].*": { part: "punctuation" },
+        },
+      },
+      "/v1/systemone"
+    );
+
+    expect(await ProxySensitiveWordGuard.ensure(session)).toBeNull();
+  });
+
+  describe.each([
+    { field: "state", questionType: "choice" },
+    { field: "instructions", questionType: "noul" },
+    { field: "criteria", questionType: "choice" },
+    { field: "criteria", questionType: "noul" },
+    { field: "criteria", questionType: "score" },
+  ] as const)("deep $questionType $field", ({ field, questionType }) => {
+    describe.each(["object", "array"] as const)("%s nesting", (shape) => {
+      it.each([64, 65, 20_000])(
+        "blocks sensitive values at depth %s without changing the request",
+        async (depth) => {
+          const session = await createDeepSystemOneSession(
+            field,
+            shape,
+            depth,
+            "blocked deep text beside blocked-photo",
+            questionType
+          );
+          const message = session.request.message;
+          const { state, questions, assets } = message;
+
+          expect((await ProxySensitiveWordGuard.ensure(session))?.status).toBe(400);
+          expect(session.request.message).toBe(message);
+          expect(message.state).toBe(state);
+          expect(message.questions).toBe(questions);
+          expect(message.assets).toBe(assets);
+        }
+      );
+
+      it.each([64, 65, 20_000])(
+        "blocks literal sensitive keys at depth %s even when they match image references",
+        async (depth) => {
+          const session = await createDeepSystemOneSession(
+            field,
+            shape,
+            depth,
+            { "blocked-photo": null },
+            questionType
+          );
+          const message = session.request.message;
+
+          expect((await ProxySensitiveWordGuard.ensure(session))?.status).toBe(400);
+          expect(session.request.message).toBe(message);
+        }
+      );
+
+      it.each([64, 65, 20_000])(
+        "allows benign data and image references at depth %s without changing the request",
+        async (depth) => {
+          const session = await createDeepSystemOneSession(
+            field,
+            shape,
+            depth,
+            {
+              safe: [
+                "safe deep text",
+                "blocked-photo",
+                "Compare blocked-photo and blocked-photo.",
+                "bloimagecked",
+                "photo-blocked next to [blocked].*",
+                "",
+                0,
+                false,
+                null,
+              ],
+            },
+            questionType
+          );
+          const message = session.request.message;
+          const { state, questions, assets } = message;
+
+          expect(await ProxySensitiveWordGuard.ensure(session)).toBeNull();
+          expect(session.request.message).toBe(message);
+          expect(message.state).toBe(state);
+          expect(message.questions).toBe(questions);
+          expect(message.assets).toBe(assets);
+        }
+      );
+    });
+  });
+
+  it.each([
+    "/v1/messages",
+    "/v1/chat/completions",
+    "/v1/responses",
+    "/v1/rerank",
+    "/v1/systemone/extra",
+    "/v1/systemone-archive",
+  ])("does not inspect System One state or questions on other endpoints: %s", async (pathname) => {
+    const session = await createJsonSession(
+      {
+        model: "other-model",
+        state: { _application: ["blocked state metadata"] },
+        questions: {
+          decision: {
+            type: "choice",
+            instructions: "blocked instructions metadata",
+            criteria: { "blocked option metadata": "blocked criteria metadata" },
+          },
+        },
+        messages: [{ role: "user", content: "safe ordinary message" }],
+      },
+      pathname
+    );
+
+    expect(await ProxySensitiveWordGuard.ensure(session)).toBeNull();
+  });
+});
+
+describe("ProxySensitiveWordGuard - System One multipart logical body", () => {
+  it.each(["blocked logical state", "safe logical state"])(
+    "inspects JSON state but never binary image bytes: %s",
+    async (state) => {
+      const message = {
+        model: "jev-1.13.0",
+        state: { context: state },
+        questions: {},
+        assets: { photo: { type: "image", part: "photo" } },
+      };
+      const formData = new FormData();
+      formData.append("request", new Blob([JSON.stringify(message)], { type: "application/json" }));
+      formData.append(
+        "photo",
+        new File([new Uint8Array([0, 255, 128, 0]), "blocked binary image bytes"], "image.png", {
+          type: "image/png",
+        })
+      );
+      const request = new Request("https://proxy.example.com/V1/SystemOne/?trace=1", {
+        method: "POST",
+        body: formData,
+      });
+      const originalBuffer = await request.clone().arrayBuffer();
+      const session = await ProxySession.fromContext(createContext(request));
+      const { buffer, systemOneMultipart, message: logicalMessage } = session.request;
+      const original = structuredClone(logicalMessage);
+
+      const response = await ProxySensitiveWordGuard.ensure(session);
+
+      if (state.includes("blocked")) {
+        expect(response?.status).toBe(400);
+      } else {
+        expect(response).toBeNull();
+      }
+      expect(session.request.message).toEqual(message);
+      expect(session.request.message).toEqual(original);
+      expect(session.request.message).toBe(logicalMessage);
+      expect(systemOneMultipart).toMatchObject({
+        contentType: request.headers.get("content-type"),
+        requestPartBodyStart: expect.any(Number),
+        requestPartBodyEnd: expect.any(Number),
+      });
+      expect(session.request.systemOneMultipart).toBe(systemOneMultipart);
+      expect(session.request.buffer).toBe(buffer);
+      expect(new Uint8Array(session.request.buffer!)).toEqual(new Uint8Array(originalBuffer));
+      expect(session.request.log).toContain(state);
+      expect(session.request.log).not.toContain("blocked binary image bytes");
+      expect(session.request.log).not.toContain("multipart/form-data");
+    }
+  );
 });

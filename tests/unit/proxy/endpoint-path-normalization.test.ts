@@ -53,6 +53,29 @@ describe("endpoint path normalization", () => {
     expect(isStrictStandardEndpointPath(pathname)).toBe(false);
   });
 
+  test.each(["/v1/systemone", "/V1/SystemOne/", "/v1/systemone/?trace=1"])(
+    "System One uses guarded routing at %s",
+    (pathname) => {
+      expect(resolveEndpointFamilyByPath(pathname)?.id).toBe("openai-systemone");
+      expect(isStandardEndpointPath(pathname)).toBe(true);
+      expect(isStrictStandardEndpointPath(pathname)).toBe(true);
+      expect(isRawPassthroughEndpointPath(pathname)).toBe(false);
+    }
+  );
+
+  test.each([
+    "/v1/systemone/jobs",
+    "/v1/systemones",
+    "/v1/systemone-extra",
+    "/v1/systemone//",
+    "/systemone",
+    "/v2/systemone",
+  ])("does not claim unsupported System One path %s", (pathname) => {
+    expect(resolveEndpointFamilyByPath(pathname)).toBeNull();
+    expect(isStandardEndpointPath(pathname)).toBe(false);
+    expect(isStrictStandardEndpointPath(pathname)).toBe(false);
+  });
+
   test.each(countTokensVariants)("count_tokens stays classified for variant %s", (pathname) => {
     expect(isCountTokensEndpointPath(pathname)).toBe(true);
     expect(isRawPassthroughEndpointPath(pathname)).toBe(true);
