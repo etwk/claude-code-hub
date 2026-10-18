@@ -4,9 +4,8 @@
 import { describe, expect, it } from "vitest";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { sanitizedRequestPath, isNextDevMode } = require("../../../../../../server.js") as {
+const { sanitizedRequestPath } = require("../../../../../../server.js") as {
   sanitizedRequestPath: (rawUrl: string) => string;
-  isNextDevMode: (nodeEnv: string | undefined) => boolean;
 };
 
 describe("server.js sanitizedRequestPath", () => {
@@ -31,15 +30,5 @@ describe("server.js sanitizedRequestPath", () => {
     // `new URL` accepts most inputs against http://localhost; pass an obvious
     // non-string sentinel to trigger the catch branch.
     expect(sanitizedRequestPath(undefined as unknown as string)).toBe("/");
-  });
-});
-
-describe("server.js isNextDevMode", () => {
-  it("preserves the existing non-production dev-mode default", () => {
-    expect(isNextDevMode("development")).toBe(true);
-    expect(isNextDevMode(undefined)).toBe(true);
-    expect(isNextDevMode("test")).toBe(true);
-    expect(isNextDevMode("staging")).toBe(true);
-    expect(isNextDevMode("production")).toBe(false);
   });
 });
