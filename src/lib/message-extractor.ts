@@ -242,7 +242,9 @@ function collectSystemOneText(
   } else if (Array.isArray(value)) {
     for (const item of value) collectSystemOneText(item, texts, assetPattern, depth + 1);
   } else if (value !== null && typeof value === "object") {
-    for (const nested of Object.values(value)) {
+    for (const [name, nested] of Object.entries(value)) {
+      // Object keys stay model-visible text even when they equal an image reference.
+      if (name.length > 0) texts.push(name);
       collectSystemOneText(nested, texts, assetPattern, depth + 1);
     }
   }

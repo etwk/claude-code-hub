@@ -179,9 +179,10 @@ authentication, model allowlists, provider groups, rate limits, spending checks,
 model redirects, and configured request filters apply. Nested `state`, question,
 and asset fields (including underscore-prefixed keys) are preserved; private
 top-level parameters are removed. Sensitive-word checks inspect nested state,
-instructions, criteria, and choice labels, not asset bytes or transport metadata.
-Image-reference spans are excluded without joining the surrounding text; Choice
-option names remain literal text, matching [TypeSafe's reference rules](https://docs.typesafe.ai/images#references).
+instructions, criteria, their literal object keys, and choice labels, not asset
+bytes or transport metadata. Image-reference spans in values are excluded without
+joining the surrounding text; object keys remain literal text, matching
+[TypeSafe's reference rules](https://docs.typesafe.ai/images#references).
 The endpoint bypasses fake streaming even for whitelisted models. Accepted path
 variants are forwarded canonically; successful JSON answers and TypeSafe response
 headers are preserved. CCH's existing model-list endpoint keeps its existing format;

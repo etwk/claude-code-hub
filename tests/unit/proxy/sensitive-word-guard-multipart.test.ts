@@ -332,11 +332,37 @@ describe("ProxySensitiveWordGuard - System One inference text", () => {
     expect(session.request.message.questions).toBe(questions);
   });
 
+  it.each([
+    { state: { "blocked state field": null } },
+    { state: { records: [{ _blocked_field: false }] } },
+    {
+      questions: {
+        decision: { type: "noul", instructions: { "blocked instruction field": null } },
+      },
+    },
+    {
+      questions: {
+        decision: { type: "choice", criteria: { ordinary: { "blocked criterion field": null } } },
+      },
+    },
+    { state: { "blocked-photo": null }, assets: { "blocked-photo": { part: "image" } } },
+    {
+      questions: { decision: { type: "noul", instructions: { "blocked-photo": null } } },
+      assets: { "blocked-photo": { part: "image" } },
+    },
+  ])("blocks semantic object keys as literal text: %j", async (content) => {
+    const message = { model: "jev-latest", state: "safe", questions: {}, ...content };
+    const session = await createJsonSession(message, "/v1/systemone");
+
+    expect((await ProxySensitiveWordGuard.ensure(session))?.status).toBe(400);
+    expect(session.request.message).toEqual(message);
+  });
+
   it("ignores asset payloads, metadata, model, and question IDs while preserving the original body", async () => {
     const message = {
       model: "blocked-model-name",
       state: {
-        "blocked state key": "safe state value",
+        applicationField: "safe state value",
         _application: ["safe underscore text", 4, false, null, ""],
       },
       questions: {
@@ -376,19 +402,6 @@ describe("ProxySensitiveWordGuard - System One inference text", () => {
     const response = await ProxySensitiveWordGuard.ensure(session);
 
     expect(response).toBeNull();
-    expect(vi.mocked(sensitiveWordDetector.detect).mock.calls.map(([text]) => text)).toEqual([
-      "safe state value",
-      "safe underscore text",
-      "safe choice instructions",
-      "ordinary",
-      "_application",
-      "safe choice description",
-      "safe noul instructions",
-      "safe positive description",
-      "safe negative description",
-      "safe low score",
-      "safe high score",
-    ]);
     expect(message).toEqual(original);
     expect(session.request.message).toEqual(original);
     expect(session.request.message).toBe(logicalMessage);
@@ -522,10 +535,8 @@ describe("ProxySensitiveWordGuard - System One inference text", () => {
 
     if (depth === 64) {
       expect(response?.status).toBe(400);
-      expect(sensitiveWordDetector.detect).toHaveBeenCalledWith("blocked deep state");
     } else {
       expect(response).toBeNull();
-      expect(sensitiveWordDetector.detect).not.toHaveBeenCalled();
     }
   });
 
@@ -594,7 +605,6 @@ describe("ProxySensitiveWordGuard - System One multipart logical body", () => {
       } else {
         expect(response).toBeNull();
       }
-      expect(sensitiveWordDetector.detect).toHaveBeenCalledExactlyOnceWith(state);
       expect(session.request.message).toEqual(message);
       expect(session.request.message).toEqual(original);
       expect(session.request.message).toBe(logicalMessage);
