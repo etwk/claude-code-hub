@@ -77,7 +77,7 @@ describe("ThinkingEffortDisplay", () => {
     (effort) => {
       const { trigger, requested } = renderThinking([nativeSetting("gemini", { effort })]);
       expect(trigger?.textContent).toBe(effort);
-      expect(requested?.textContent).toBe(`Effort / level: ${effort}`);
+      expect(requested?.textContent).toBe(`Effort: ${effort}`);
       expect(trigger?.getAttribute("aria-label")).toContain(effort);
     }
   );
@@ -89,7 +89,7 @@ describe("ThinkingEffortDisplay", () => {
   ] as const)("shows Gemini budget %s without inventing a level", (budgetTokens, label) => {
     const { trigger, requested } = renderThinking([nativeSetting("gemini", { budgetTokens })]);
     expect(trigger?.textContent).toBe(label);
-    expect(requested?.textContent).toContain("Token budget:");
+    expect(requested?.textContent).toContain("Budget:");
     expect(requested?.textContent).toContain(budgetTokens === 0 ? "Disabled (0)" : label);
     expect(trigger?.textContent).not.toMatch(/low|medium|high/);
   });
@@ -122,9 +122,7 @@ describe("ThinkingEffortDisplay", () => {
       nativeSetting("anthropic", { mode: "disabled", effort: "high", budgetTokens: 4096 }),
     ]);
     expect(trigger?.textContent).toBe("Disabled");
-    expect(requested?.textContent).toBe(
-      "Mode: Disabled · Effort / level: high · Token budget: 4096 tokens"
-    );
+    expect(requested?.textContent).toBe("Mode: Disabled · Effort: high · Budget: 4096 tokens");
     expect(trigger?.getAttribute("aria-label")).toContain(requested?.textContent);
   });
 
@@ -154,8 +152,8 @@ describe("ThinkingEffortDisplay", () => {
       },
     ]);
     expect(trigger?.textContent).toBe("lowmax");
-    expect(requested?.textContent).toBe("Effort / level: low");
-    expect(effective?.textContent).toBe("Effort / level: max");
+    expect(requested?.textContent).toBe("Effort: low");
+    expect(effective?.textContent).toBe("Effort: max");
   });
 
   test("renders provider-only Claude configuration instead of an empty badge", () => {
@@ -167,7 +165,7 @@ describe("ThinkingEffortDisplay", () => {
     ]);
     expect(trigger?.textContent).toBe("Not specifiedhigh");
     expect(requested?.textContent).toBe("Not specified");
-    expect(effective?.textContent).toBe("Mode: Adaptive · Effort / level: high");
+    expect(effective?.textContent).toBe("Mode: Adaptive · Effort: high");
   });
 
   test("marks removed configuration instead of presenting the original as forwarded", () => {
@@ -178,7 +176,7 @@ describe("ThinkingEffortDisplay", () => {
       ]),
     ]);
     expect(trigger?.textContent).toBe("mediumRemoved");
-    expect(requested?.textContent).toBe("Effort / level: medium");
+    expect(requested?.textContent).toBe("Effort: medium");
     expect(effective?.textContent).toBe("Removed");
     expect(trigger?.getAttribute("aria-label")).toContain("Forwarded: Removed");
   });
@@ -192,9 +190,7 @@ describe("ThinkingEffortDisplay", () => {
     ]);
     expect(trigger?.textContent).toBe("highDisabled");
     expect(requested?.textContent).toContain("Mode: Enabled");
-    expect(effective?.textContent).toBe(
-      "Mode: Disabled · Effort / level: high · Token budget: 4096 tokens"
-    );
+    expect(effective?.textContent).toBe("Mode: Disabled · Effort: high · Budget: 4096 tokens");
   });
 
   test("exposes exact requested and forwarded budgets", () => {
@@ -204,8 +200,8 @@ describe("ThinkingEffortDisplay", () => {
         { path: "thinking.budget_tokens", before: 4096, after: 2048, changed: true },
       ]),
     ]);
-    expect(requested?.textContent).toBe("Mode: Enabled · Token budget: 4096 tokens");
-    expect(effective?.textContent).toBe("Mode: Enabled · Token budget: 2048 tokens");
+    expect(requested?.textContent).toBe("Mode: Enabled · Budget: 4096 tokens");
+    expect(effective?.textContent).toBe("Mode: Enabled · Budget: 2048 tokens");
   });
 
   test("keeps Codex precedence over other recorded reasoning sources", () => {
@@ -233,7 +229,7 @@ describe("ThinkingEffortDisplay", () => {
     expect(trigger?.getAttribute("aria-label")).toContain("FUTURE_VERY_LONG_LEVEL");
     expect(trigger?.getAttribute("aria-label")).toContain("Dynamic (-1)");
     expect(container.querySelector('[role="tooltip"]')?.textContent).toContain(
-      "Token budget: Dynamic (-1)"
+      "Budget: Dynamic (-1)"
     );
   });
 });

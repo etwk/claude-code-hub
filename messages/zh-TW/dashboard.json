@@ -138,7 +138,7 @@
       "provider": "供應商",
       "model": "計費模型",
       "reasoningEffort": "思考設定",
-      "reasoningEffortTooltip": "已記錄的思考模式、強度/等級與權杖預算；變更時顯示請求值和轉送值",
+      "reasoningEffortTooltip": "請求的思考設定",
       "endpoint": "端點",
       "inputTokens": "輸入",
       "outputTokens": "輸出",
@@ -552,11 +552,10 @@
         "effective": "轉送值",
         "notSpecified": "未指定",
         "removed": "已移除",
-        "overridden": "轉送前已變更",
-        "effort": "強度/等級",
+        "effort": "強度",
         "mode": "模式",
-        "budget": "權杖預算",
-        "budgetTokens": "{count} 權杖",
+        "budget": "預算",
+        "budgetTokens": "{count} tokens",
         "dynamic": "動態",
         "modes": {
           "enabled": "已啟用",
@@ -564,10 +563,10 @@
           "disabled": "已停用"
         },
         "tooltips": {
-          "codex": "已記錄的 Codex reasoning.effort，按原值顯示。缺失值不代表模型預設值。",
-          "openai": "已記錄的 OpenAI reasoning_effort / reasoning.effort，按原值顯示。缺失值不代表模型預設值。",
-          "anthropic": "已記錄的 Claude thinking.type、thinking.budget_tokens 和 output_config.effort。停用模式優先於殘留的強度或預算；缺失值不代表模型預設值。",
-          "gemini": "已記錄的 Gemini thinkingLevel 和 thinkingBudget。等級按原值顯示；-1 表示動態預算，0 表示停用思考。缺失值不代表模型預設值。"
+          "codex": "Codex reasoning.effort",
+          "openai": "OpenAI reasoning_effort",
+          "anthropic": "Claude 思考模式、強度與預算",
+          "gemini": "Gemini 思考等級與預算（-1 動態，0 停用）"
         }
       },
       "logicTrace": {

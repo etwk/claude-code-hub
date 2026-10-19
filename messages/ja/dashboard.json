@@ -138,7 +138,7 @@
       "provider": "プロバイダー",
       "model": "課金モデル",
       "reasoningEffort": "思考設定",
-      "reasoningEffortTooltip": "記録された思考モード、強度/レベル、トークン予算。変更時は要求値と転送値を表示",
+      "reasoningEffortTooltip": "リクエストの思考設定",
       "endpoint": "エンドポイント",
       "inputTokens": "入力",
       "outputTokens": "出力",
@@ -552,10 +552,9 @@
         "effective": "転送値",
         "notSpecified": "未指定",
         "removed": "削除済み",
-        "overridden": "転送前に変更",
-        "effort": "強度/レベル",
+        "effort": "強度",
         "mode": "モード",
-        "budget": "トークン予算",
+        "budget": "予算",
         "budgetTokens": "{count} トークン",
         "dynamic": "動的",
         "modes": {
@@ -564,10 +563,10 @@
           "disabled": "無効"
         },
         "tooltips": {
-          "codex": "記録された Codex reasoning.effort をそのまま表示します。値がない場合、モデルのデフォルト値は推測しません。",
-          "openai": "記録された OpenAI reasoning_effort / reasoning.effort をそのまま表示します。値がない場合、モデルのデフォルト値は推測しません。",
-          "anthropic": "記録された Claude thinking.type、thinking.budget_tokens、output_config.effort。無効モードは残存する強度や予算より優先されます。値がない場合、モデルのデフォルト値は推測しません。",
-          "gemini": "記録された Gemini thinkingLevel と thinkingBudget。レベルはそのまま表示し、-1 は動的予算、0 は思考の無効化を表します。値がない場合、モデルのデフォルト値は推測しません。"
+          "codex": "Codex reasoning.effort",
+          "openai": "OpenAI reasoning_effort",
+          "anthropic": "Claude の思考モード・強度・予算",
+          "gemini": "Gemini の思考レベルと予算 (-1: 動的、0: 無効)"
         }
       },
       "logicTrace": {

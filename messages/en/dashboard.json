@@ -138,7 +138,7 @@
       "provider": "Provider",
       "model": "Billing Model",
       "reasoningEffort": "Thinking",
-      "reasoningEffortTooltip": "Recorded thinking mode, effort / level, and token budget; changes show requested and forwarded values",
+      "reasoningEffortTooltip": "Thinking settings for the request",
       "endpoint": "Endpoint",
       "inputTokens": "Input",
       "outputTokens": "Output",
@@ -547,15 +547,14 @@
         }
       },
       "thinkingConfig": {
-        "label": "Thinking configuration",
+        "label": "Thinking",
         "requested": "Requested",
         "effective": "Forwarded",
         "notSpecified": "Not specified",
         "removed": "Removed",
-        "overridden": "Changed before forwarding",
-        "effort": "Effort / level",
+        "effort": "Effort",
         "mode": "Mode",
-        "budget": "Token budget",
+        "budget": "Budget",
         "budgetTokens": "{count} tokens",
         "dynamic": "Dynamic",
         "modes": {
@@ -564,10 +563,10 @@
           "disabled": "Disabled"
         },
         "tooltips": {
-          "codex": "Recorded Codex reasoning.effort, shown verbatim. Missing values do not imply a model default.",
-          "openai": "Recorded OpenAI reasoning_effort / reasoning.effort, shown verbatim. Missing values do not imply a model default.",
-          "anthropic": "Recorded Claude thinking.type, thinking.budget_tokens, and output_config.effort. Disabled mode takes precedence over any remaining effort or budget; missing values do not imply a model default.",
-          "gemini": "Recorded Gemini thinkingLevel and thinkingBudget. Levels are shown verbatim; -1 is dynamic and 0 disables thinking. Missing values do not imply a model default."
+          "codex": "Codex reasoning.effort",
+          "openai": "OpenAI reasoning_effort",
+          "anthropic": "Claude thinking mode, effort, and budget",
+          "gemini": "Gemini thinking level and budget (-1 dynamic, 0 disabled)"
         }
       },
       "logicTrace": {

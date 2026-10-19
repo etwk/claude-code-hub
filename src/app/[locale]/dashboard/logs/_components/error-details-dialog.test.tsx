@@ -781,31 +781,31 @@ describe("error-details-dialog layout", () => {
     const container = document.createElement("div");
     container.innerHTML = html;
     expect(container.querySelector('[data-slot="thinking-config-requested"] dd')?.textContent).toBe(
-      "Effort / level: low"
+      "Effort: low"
     );
     expect(container.querySelector('[data-slot="thinking-config-effective"] dd')?.textContent).toBe(
-      "Effort / level: high"
+      "Effort: high"
     );
   });
 
   test.each([
-    ["gemini", { effort: "HIGH", mode: null, budgetTokens: null }, "Effort / level: HIGH"],
-    ["gemini", { effort: null, mode: null, budgetTokens: -1 }, "Token budget: Dynamic (-1)"],
-    ["gemini", { effort: null, mode: null, budgetTokens: 0 }, "Token budget: Disabled (0)"],
+    ["gemini", { effort: "HIGH", mode: null, budgetTokens: null }, "Effort: HIGH"],
+    ["gemini", { effort: null, mode: null, budgetTokens: -1 }, "Budget: Dynamic (-1)"],
+    ["gemini", { effort: null, mode: null, budgetTokens: 0 }, "Budget: Disabled (0)"],
     [
       "anthropic",
       { effort: null, mode: "enabled", budgetTokens: 4096 },
-      "Mode: Enabled · Token budget: 4096 tokens",
+      "Mode: Enabled · Budget: 4096 tokens",
     ],
     [
       "anthropic",
       { effort: "high", mode: "adaptive", budgetTokens: null },
-      "Mode: Adaptive · Effort / level: high",
+      "Mode: Adaptive · Effort: high",
     ],
     [
       "anthropic",
       { effort: "high", mode: "disabled", budgetTokens: 4096 },
-      "Mode: Disabled · Effort / level: high · Token budget: 4096 tokens",
+      "Mode: Disabled · Effort: high · Budget: 4096 tokens",
     ],
   ] as const)(
     "renders full native %s configuration in request details",
@@ -862,7 +862,7 @@ describe("error-details-dialog layout", () => {
       "Not specified"
     );
     expect(container.querySelector('[data-slot="thinking-config-effective"] dd')?.textContent).toBe(
-      "Mode: Adaptive · Effort / level: high"
+      "Mode: Adaptive · Effort: high"
     );
   });
 
@@ -898,7 +898,7 @@ describe("error-details-dialog layout", () => {
     const container = document.createElement("div");
     container.innerHTML = html;
     expect(container.querySelector('[data-slot="thinking-config-requested"] dd')?.textContent).toBe(
-      "Effort / level: high"
+      "Effort: high"
     );
     expect(container.querySelector('[data-slot="thinking-config-effective"] dd')?.textContent).toBe(
       "Removed"
@@ -937,10 +937,10 @@ describe("error-details-dialog layout", () => {
     const container = document.createElement("div");
     container.innerHTML = html;
     expect(container.querySelector('[data-slot="thinking-config-requested"] dd')?.textContent).toBe(
-      "Mode: Enabled · Token budget: 4096 tokens"
+      "Mode: Enabled · Budget: 4096 tokens"
     );
     expect(container.querySelector('[data-slot="thinking-config-effective"] dd')?.textContent).toBe(
-      "Mode: Enabled · Token budget: 2048 tokens"
+      "Mode: Enabled · Budget: 2048 tokens"
     );
   });
 
