@@ -927,6 +927,48 @@ describe("F1 stream content gate x ProxyForwarder paths", () => {
       expect(mocks.recordFailure).toHaveBeenCalledTimes(accountedCount);
     });
 
+    test.each([0, 100])(
+      "compaction commits without failover or health penalties (hedge timeout %i)",
+      async (firstByteTimeoutStreamingMs) => {
+        const provider = createProvider({ firstByteTimeoutStreamingMs });
+        const session = createSession();
+        session.setProvider(provider);
+        const frames = [
+          MESSAGE_START_FRAME,
+          sseFrame("content_block_start", {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "compaction", content: "summary", signature: "sig" },
+          }),
+          sseFrame("content_block_stop", { type: "content_block_stop", index: 0 }),
+          sseFrame("message_delta", {
+            type: "message_delta",
+            delta: { stop_reason: "compaction", stop_sequence: null },
+            usage: { output_tokens: 5 },
+          }),
+          MESSAGE_STOP_FRAME,
+        ];
+        const doForward = spyOnDoForward();
+        doForward.mockImplementation(async (attemptSession) => {
+          attachAttemptRuntime(attemptSession, {
+            clearResponseTimeout: vi.fn(),
+            releaseAgent: vi.fn(),
+          });
+          return createSseResponse(frames);
+        });
+
+        const response = await ProxyForwarder.send(session);
+
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe(frames.join(""));
+        expect(doForward).toHaveBeenCalledTimes(1);
+        expect(mocks.pickRandomProviderWithExclusion).not.toHaveBeenCalled();
+        expect(mocks.recordFailure).not.toHaveBeenCalled();
+        expect(mocks.tombstoneAffinityOnFailure).not.toHaveBeenCalled();
+        expect(session.provider?.id).toBe(provider.id);
+      }
+    );
+
     test("无内容块的 refusal 流原样透传：不重试、不切商、不计入熔断（#1491）", async () => {
       const provider1 = createProvider({ id: 1, name: "refusal-p1" });
       const session = createSession();

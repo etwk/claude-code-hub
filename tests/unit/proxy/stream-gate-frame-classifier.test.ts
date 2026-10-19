@@ -108,6 +108,39 @@ describe("classifyFrame: anthropic", () => {
     ).toBe("content");
   });
 
+  it.each([
+    ["content_block_start", "content_block", "compaction", "content"],
+    ["content_block_start", "content_block", "compaction", "encrypted_content"],
+    ["content_block_delta", "delta", "compaction_delta", "content"],
+    ["content_block_delta", "delta", "compaction_delta", "encrypted_content"],
+  ])("content: %s with %s type=%s field=%s", (event, path, type, field) => {
+    const data = JSON.stringify({
+      type: event,
+      index: 0,
+      [path]: { type, [field]: "summary or opaque state" },
+    });
+    expect(classifyFrame("anthropic", event, data)).toBe("content");
+    expect(classifyFrame("anthropic", null, data)).toBe("content");
+  });
+
+  it.each([
+    ["content_block_start", "content_block", "compaction"],
+    ["content_block_delta", "delta", "compaction_delta"],
+  ])("neutral: %s with empty compaction payload", (event, path, type) => {
+    for (const value of [undefined, null, ""]) {
+      const data = JSON.stringify({
+        type: event,
+        [path]: {
+          type,
+          content: value,
+          encrypted_content: value,
+          ...(path === "content_block" ? { signature: "signature-only" } : {}),
+        },
+      });
+      expect(classifyFrame("anthropic", event, data)).toBe("neutral");
+    }
+  });
+
   it("neutral: message_start / ping / message_delta bookkeeping", () => {
     expect(
       classifyFrame("anthropic", "message_start", '{"type":"message_start","message":{"id":"m"}}')

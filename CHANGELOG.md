@@ -31,6 +31,9 @@
 
 ### 修复
 
+- 修复 Anthropic compaction 流被内容门控误判为 `empty_stream`：识别起始块与增量中的
+  `content` / `encrypted_content`，原样透传有效压缩结果，避免无效切商与熔断计数；
+  空载荷、上游错误及损坏帧仍按原有规则拒绝 (#7)
 - 移除自定义服务器测试对不存在的 `isNextDevMode` helper 的陈旧断言，保留路径脱敏与
   开发/生产 WebSocket 行为覆盖；生产服务器的模式选择逻辑保持不变
 - 修复 System One 深层嵌套敏感词绕过；客户端或过滤器设置 `stream: true` 时仍使用
