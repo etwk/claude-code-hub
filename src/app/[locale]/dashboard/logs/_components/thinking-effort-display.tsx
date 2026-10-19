@@ -66,7 +66,6 @@ export function ThinkingEffortDetails({ info }: { info: ThinkingEffortInfo }) {
           </div>
         )}
       </dl>
-      {info.isOverridden && <p className="font-sans">{t("overridden")}</p>}
     </div>
   );
 }

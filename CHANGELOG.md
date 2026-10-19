@@ -25,6 +25,7 @@
 
 ### 优化
 
+- 精简使用记录思考列与详情提示文案：统一五语言字段标签、Token 单位与悬浮说明，去除与请求/转发值重复的冗余提示
 - Langfuse trace 名称改为 `user:shortModel`，去掉供应商前缀
 - 按 Langfuse JS SDK v5 在 `propagateAttributes` 内创建 observation
 - 大请求/响应体 1 MiB 截断，并在异步发送前快照，避免观测路径拖住完整 body
