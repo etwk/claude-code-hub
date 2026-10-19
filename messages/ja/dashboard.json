@@ -137,8 +137,8 @@
       "ip": "IP",
       "provider": "プロバイダー",
       "model": "課金モデル",
-      "reasoningEffort": "推論強度",
-      "reasoningEffortTooltip": "このモデルリクエストの推論強度",
+      "reasoningEffort": "思考設定",
+      "reasoningEffortTooltip": "記録された思考モード、強度/レベル、トークン予算。変更時は要求値と転送値を表示",
       "endpoint": "エンドポイント",
       "inputTokens": "入力",
       "outputTokens": "出力",
@@ -408,11 +408,6 @@
         "technicalTimeline": "技術タイムライン",
         "copyTimeline": "タイムラインをコピー"
       },
-      "effort": {
-        "label": "Effort",
-        "overridden": "プロバイダーにより上書き",
-        "tooltip": "クライアントがリクエストボディで指定した思考強度 (output_config.effort)。プロキシは値をそのまま表示し、レベル名を変換しません。"
-      },
       "routingTrace": {
         "title": "ルーティングモード",
         "modes": {
@@ -551,15 +546,29 @@
           "winner_committed": "別の Provider が勝者として確定しました"
         }
       },
-      "reasoningEffort": {
-        "label": "推論強度",
-        "overridden": "プロバイダーにより上書き",
-        "tooltip": "Codex リクエストの推論強度 (reasoning.effort) をそのまま表示します。"
-      },
-      "reasoningEffortOpenai": {
-        "label": "推論強度",
-        "overridden": "プロバイダーにより上書き",
-        "tooltip": "OpenAI chat/completions リクエストの推論強度 (reasoning_effort / reasoning.effort) をそのまま表示します。"
+      "thinkingConfig": {
+        "label": "思考設定",
+        "requested": "要求値",
+        "effective": "転送値",
+        "notSpecified": "未指定",
+        "removed": "削除済み",
+        "overridden": "転送前に変更",
+        "effort": "強度/レベル",
+        "mode": "モード",
+        "budget": "トークン予算",
+        "budgetTokens": "{count} トークン",
+        "dynamic": "動的",
+        "modes": {
+          "enabled": "有効",
+          "adaptive": "適応型",
+          "disabled": "無効"
+        },
+        "tooltips": {
+          "codex": "記録された Codex reasoning.effort をそのまま表示します。値がない場合、モデルのデフォルト値は推測しません。",
+          "openai": "記録された OpenAI reasoning_effort / reasoning.effort をそのまま表示します。値がない場合、モデルのデフォルト値は推測しません。",
+          "anthropic": "記録された Claude thinking.type、thinking.budget_tokens、output_config.effort。無効モードは残存する強度や予算より優先されます。値がない場合、モデルのデフォルト値は推測しません。",
+          "gemini": "記録された Gemini thinkingLevel と thinkingBudget。レベルはそのまま表示し、-1 は動的予算、0 は思考の無効化を表します。値がない場合、モデルのデフォルト値は推測しません。"
+        }
       },
       "logicTrace": {
         "title": "決定チェーン",

@@ -11,7 +11,10 @@ import { logger } from "@/lib/logger";
 import { extractAfterRequestMessages, isSessionMessages } from "@/lib/session-detail-snapshots";
 import { resolveSessionRequestLocator } from "@/lib/session-request-locator";
 import { normalizeRequestSequence } from "@/lib/utils/request-sequence";
-import { buildUnifiedSpecialSettings } from "@/lib/utils/special-settings";
+import {
+  buildUnifiedSpecialSettings,
+  mergeSpecialSettingSnapshots,
+} from "@/lib/utils/special-settings";
 import {
   type ActiveSessionInfo,
   DEFAULT_SESSION_DETAIL_VIEW_MODE,
@@ -1169,12 +1172,19 @@ export async function getSessionDetails(
       },
     };
 
-    const mergedSpecialSettings: SpecialSetting[] = [
-      ...(Array.isArray(redisSpecialSettings) ? (redisSpecialSettings as SpecialSetting[]) : []),
-      ...(Array.isArray(requestAudit?.specialSettings)
-        ? (requestAudit.specialSettings as SpecialSetting[])
-        : []),
-    ];
+    const redisSettings = Array.isArray(redisSpecialSettings)
+      ? (redisSpecialSettings as SpecialSetting[])
+      : null;
+    const databaseSettings = Array.isArray(requestAudit?.specialSettings)
+      ? (requestAudit.specialSettings as SpecialSetting[])
+      : null;
+    // statusCode is the repository's terminal-write fence: finalized DB state owns the snapshot.
+    const mergedSpecialSettings = mergeSpecialSettingSnapshots([
+      requestAudit?.statusCode != null && redisSettings
+        ? redisSettings.filter((setting) => setting.type !== "native_thinking_forwarded")
+        : redisSettings,
+      databaseSettings,
+    ]);
     const existingSpecialSettings = mergedSpecialSettings.length > 0 ? mergedSpecialSettings : null;
 
     const unifiedSpecialSettings = buildUnifiedSpecialSettings({

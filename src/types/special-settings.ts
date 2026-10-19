@@ -16,6 +16,8 @@ export type SpecialSetting =
   | CodexSessionIdCompletionSpecialSetting
   | ClaudeMetadataUserIdInjectionSpecialSetting
   | AnthropicEffortSpecialSetting
+  | NativeThinkingSpecialSetting
+  | NativeThinkingForwardedSpecialSetting
   | CodexReasoningEffortSpecialSetting
   | OpenAIReasoningEffortSpecialSetting
   | AnthropicCacheTtlHeaderOverrideSpecialSetting
@@ -29,6 +31,33 @@ export type SpecialSetting =
   | ThinkingSignatureModelDetectionSpecialSetting;
 
 export type SpecialSettingChangeValue = string | number | boolean | null;
+
+/** Observed thinking configuration; null fields carry no inferred model defaults. */
+export interface ThinkingConfigValue {
+  effort: string | null;
+  mode: "enabled" | "adaptive" | "disabled" | null;
+  budgetTokens: number | null;
+}
+
+/** Original native Claude/Gemini request configuration, captured before provider overrides. */
+export type NativeThinkingSpecialSetting = {
+  type: "native_thinking";
+  scope: "request";
+  hit: boolean;
+  protocol: "anthropic" | "gemini";
+  config: ThinkingConfigValue;
+};
+
+/** Authoritative native configuration observed in a provider attempt's final outgoing body. */
+export type NativeThinkingForwardedSpecialSetting = {
+  type: "native_thinking_forwarded";
+  scope: "provider";
+  hit: true;
+  protocol: "anthropic" | "gemini";
+  providerId: number;
+  /** Null explicitly records that the outgoing body has no native thinking configuration. */
+  config: ThinkingConfigValue | null;
+};
 
 export type ProviderParameterOverrideSpecialSetting = {
   type: "provider_parameter_override";
@@ -79,10 +108,8 @@ export type GuardInterceptSpecialSetting = {
 };
 
 /**
- * Anthropic effort 请求参数审计
- *
- * 用于记录原始 Anthropic 请求体中的 output_config.effort，
- * 便于在使用记录中以标签形式展示。
+ * Historical Anthropic effort-only audit, retained for persisted usage records.
+ * New requests use NativeThinkingSpecialSetting to capture all observed thinking fields.
  */
 export type AnthropicEffortSpecialSetting = {
   type: "anthropic_effort";

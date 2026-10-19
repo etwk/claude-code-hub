@@ -52,6 +52,8 @@ import {
 import { RateLimitService } from "@/lib/rate-limit/service";
 import type { SessionBindingSnapshot } from "@/lib/redis/session-binding";
 import { SessionManager } from "@/lib/session-manager";
+import { extractNativeThinkingConfigFromRequestBody } from "@/lib/utils/native-thinking";
+import { mergeSpecialSettingSnapshots } from "@/lib/utils/special-settings";
 import {
   detectUpstreamErrorFromSseOrJsonText,
   inferUpstreamErrorStatusCodeFromText,
@@ -60,7 +62,6 @@ import {
   isVendorTypeCircuitOpen,
   recordVendorTypeAllEndpointsTimeout,
 } from "@/lib/vendor-type-circuit-breaker";
-import { updateMessageRequestDetails } from "@/repository/message";
 import type { CacheTtlPreference, CacheTtlResolved } from "@/types/cache";
 import type { ProviderChainItem } from "@/types/message";
 import type { Provider } from "@/types/provider";
@@ -150,6 +151,7 @@ import {
   shouldForceCodexResponsesStreamHandling,
 } from "./response-handler";
 import type { ProxySession } from "./session";
+import { persistSpecialSettings } from "./special-settings-persistence";
 import {
   type DeferredStreamingHedgeBindingAuthority,
   setDeferredStreamingFinalization,
@@ -1010,37 +1012,6 @@ type ClaudeMetadataUserIdInjectionResult = {
   audit: ClaudeMetadataUserIdInjectionSpecialSetting;
 };
 
-async function persistSpecialSettings(session: ProxySession): Promise<void> {
-  const specialSettings = session.getSpecialSettings();
-  if (!specialSettings || specialSettings.length === 0) {
-    return;
-  }
-
-  if (session.sessionId && session.shouldPersistSessionDebugArtifacts()) {
-    await SessionManager.storeSessionSpecialSettings(
-      session.sessionId,
-      specialSettings,
-      session.requestSequence
-    ).catch((err) => {
-      logger.error("[ProxyForwarder] Failed to store special settings", {
-        error: err,
-        sessionId: session.sessionId,
-      });
-    });
-  }
-
-  if (session.messageContext?.id) {
-    await updateMessageRequestDetails(session.messageContext.id, {
-      specialSettings,
-    }).catch((err) => {
-      logger.error("[ProxyForwarder] Failed to persist special settings", {
-        error: err,
-        messageRequestId: session.messageContext?.id,
-      });
-    });
-  }
-}
-
 function addSpecialSettingForPersistence(
   ownerSession: ProxySession,
   persistSession: ProxySession,
@@ -1516,7 +1487,7 @@ async function tryApplyReactiveRectifier(params: {
         retryAttemptNumber,
       })
     );
-    await persistSpecialSettings(persistSession);
+    void persistSpecialSettings(persistSession);
 
     if (!rectified.applied) {
       return {
@@ -3400,30 +3371,7 @@ export class ProxyForwarder {
           bodyToSerialize = overriddenBody;
           session.request.message = overriddenBody;
 
-          // Persist special settings immediately (same pattern as Anthropic overrides)
-          const specialSettings = session.getSpecialSettings();
-          if (session.sessionId && session.shouldPersistSessionDebugArtifacts()) {
-            await SessionManager.storeSessionSpecialSettings(
-              session.sessionId,
-              specialSettings,
-              session.requestSequence
-            ).catch((err) => {
-              logger.error("[ProxyForwarder] Failed to store Gemini special settings", {
-                error: err,
-                sessionId: session.sessionId,
-              });
-            });
-          }
-          if (session.messageContext?.id) {
-            await updateMessageRequestDetails(session.messageContext.id, {
-              specialSettings,
-            }).catch((err) => {
-              logger.error("[ProxyForwarder] Failed to persist Gemini special settings", {
-                error: err,
-                messageRequestId: session.messageContext?.id,
-              });
-            });
-          }
+          void persistSpecialSettings(session);
         }
 
         // 检测流式请求：Gemini 支持两种方式
@@ -3470,9 +3418,16 @@ export class ProxyForwarder {
           bodyToSerialize = bodyForFinal;
         }
 
+        externalAbortSignal?.throwIfAborted();
+        session.recordNativeThinkingForwarded(
+          "gemini",
+          provider.id,
+          extractNativeThinkingConfigFromRequestBody(bodyToSerialize, "gemini")
+        );
         const bodyString = JSON.stringify(bodyToSerialize);
         requestBody = bodyString;
         session.forwardedRequestBody = retainForwardedBody ? bodyString : null;
+        void persistSpecialSettings(session);
       } else {
         // No body: still need streaming detection, auth, URL, headers
         const geminiPathname = session.requestUrl.pathname || "";
@@ -3547,33 +3502,7 @@ export class ProxyForwarder {
 
           if (audit) {
             session.addSpecialSetting(audit);
-            const specialSettings = session.getSpecialSettings();
-
-            if (session.sessionId && session.shouldPersistSessionDebugArtifacts()) {
-              // 这里用 await：避免后续响应侧写入（ResponseFixer 等）先完成后，被本次旧快照覆写
-              await SessionManager.storeSessionSpecialSettings(
-                session.sessionId,
-                specialSettings,
-                session.requestSequence
-              ).catch((err) => {
-                logger.error("[ProxyForwarder] Failed to store special settings", {
-                  error: err,
-                  sessionId: session.sessionId,
-                });
-              });
-            }
-
-            if (session.messageContext?.id) {
-              // 同上：确保 special_settings 的"旧值"不会在并发下覆盖"新值"
-              await updateMessageRequestDetails(session.messageContext.id, {
-                specialSettings,
-              }).catch((err) => {
-                logger.error("[ProxyForwarder] Failed to persist special settings", {
-                  error: err,
-                  messageRequestId: session.messageContext?.id,
-                });
-              });
-            }
+            void persistSpecialSettings(session);
           }
         }
 
@@ -3601,7 +3530,7 @@ export class ProxyForwarder {
                   providerName: provider.name,
                   removedCount: billingResult.removedCount,
                 });
-                await persistSpecialSettings(session);
+                void persistSpecialSettings(session);
               }
             }
           }
@@ -3615,31 +3544,7 @@ export class ProxyForwarder {
 
           if (anthropicAudit) {
             session.addSpecialSetting(anthropicAudit);
-            const specialSettings = session.getSpecialSettings();
-
-            if (session.sessionId && session.shouldPersistSessionDebugArtifacts()) {
-              await SessionManager.storeSessionSpecialSettings(
-                session.sessionId,
-                specialSettings,
-                session.requestSequence
-              ).catch((err) => {
-                logger.error("[ProxyForwarder] Failed to store Anthropic special settings", {
-                  error: err,
-                  sessionId: session.sessionId,
-                });
-              });
-            }
-
-            if (session.messageContext?.id) {
-              await updateMessageRequestDetails(session.messageContext.id, {
-                specialSettings,
-              }).catch((err) => {
-                logger.error("[ProxyForwarder] Failed to persist Anthropic special settings", {
-                  error: err,
-                  messageRequestId: session.messageContext?.id,
-                });
-              });
-            }
+            void persistSpecialSettings(session);
           }
         }
 
@@ -3854,7 +3759,7 @@ export class ProxyForwarder {
             if (injection) {
               messageToSend = injection.message;
               session.addSpecialSetting(injection.audit);
-              await persistSpecialSettings(session);
+              void persistSpecialSettings(session);
             }
           }
 
@@ -3879,6 +3784,14 @@ export class ProxyForwarder {
             throw new ProxyError(validation.message ?? "Invalid request.", 400);
           }
 
+          if (isAnthropicProvider) {
+            externalAbortSignal?.throwIfAborted();
+            session.recordNativeThinkingForwarded(
+              "anthropic",
+              provider.id,
+              extractNativeThinkingConfigFromRequestBody(messageToSend, "anthropic")
+            );
+          }
           const bodyString = JSON.stringify(messageToSend);
           requestBody = systemOneMultipart
             ? serializeSystemOneMultipartBody(
@@ -3889,6 +3802,7 @@ export class ProxyForwarder {
             : bodyString;
           session.forwardedRequestBody = retainForwardedBody ? bodyString : null;
           isStreaming = !isSystemOneEndpointPath(requestPath) && messageToSend.stream === true;
+          if (isAnthropicProvider) void persistSpecialSettings(session);
 
           if (process.env.NODE_ENV === "development") {
             logger.trace("ProxyForwarder: Forwarding request", {
@@ -6101,6 +6015,7 @@ export class ProxyForwarder {
       });
 
       abortAllAttempts(attempt, "hedge_loser");
+      void persistSpecialSettings(session);
 
       // A non-hedged request is finalized through response-handler. Updating
       // here as well would perform a duplicate binding read/CAS before the
@@ -7194,6 +7109,7 @@ export class ProxyForwarder {
       session.recordTtft();
       if (attempt.session !== session)
         ProxyForwarder.syncWinningAttemptSession(session, attempt.session);
+      void persistSpecialSettings(session);
 
       const bindingIntent =
         attempt.kind === "fallback" ||
@@ -9017,7 +8933,7 @@ export class ProxyForwarder {
 
     const sourceState = source as unknown as {
       providerChain: ProviderChainItem[];
-      specialSettings: unknown[];
+      specialSettings: SpecialSetting[];
       originalModelName: string | null;
       originalUrlPathname: string | null;
       currentModelRedirect: {
@@ -9027,7 +8943,7 @@ export class ProxyForwarder {
     };
     const targetState = target as unknown as {
       providerChain: ProviderChainItem[];
-      specialSettings: unknown[];
+      specialSettings: SpecialSetting[];
       originalModelName: string | null;
       originalUrlPathname: string | null;
       currentModelRedirect: {
@@ -9056,15 +8972,11 @@ export class ProxyForwarder {
       }
     }
     targetState.providerChain = mergedProviderChain;
-    // 合并 specialSettings，避免覆盖已有的 rectifier audit 记录
-    const existingKeys = new Set(targetState.specialSettings.map((s) => JSON.stringify(s)));
-    const merged = [...targetState.specialSettings];
-    for (const setting of sourceState.specialSettings) {
-      if (!existingKeys.has(JSON.stringify(setting))) {
-        merged.push(setting);
-      }
-    }
-    targetState.specialSettings = merged;
+    // Preserve diagnostic history, but only the selected attempt's outgoing observation is current.
+    targetState.specialSettings = mergeSpecialSettingSnapshots([
+      targetState.specialSettings.filter((setting) => setting.type !== "native_thinking_forwarded"),
+      sourceState.specialSettings,
+    ]);
     targetState.originalModelName = sourceState.originalModelName;
     targetState.originalUrlPathname = sourceState.originalUrlPathname;
     targetState.currentModelRedirect = sourceState.currentModelRedirect

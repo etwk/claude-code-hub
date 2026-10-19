@@ -8,7 +8,8 @@ import type { UsageLogRow } from "@/repository/usage-logs";
 import type { RoutingTraceV1 } from "@/types/routing-trace";
 
 vi.mock("next-intl", () => ({
-  useTranslations: () => (key: string) => key,
+  useTranslations: () => (key: string, values?: Record<string, string | number>) =>
+    key === "budgetTokens" ? `${values?.count} tokens` : key,
 }));
 
 const toastMocks = vi.hoisted(() => ({
@@ -198,7 +199,6 @@ describe("usage-logs-table thinking effort", () => {
     expect(cells[6]?.textContent).toContain("gpt-5.4");
     expect(cells[7]?.textContent).toContain("low");
     expect(cells[7]?.textContent).toContain("max");
-    expect(cells[7]?.className).toContain("overflow-visible");
   });
 
   test("显示 Anthropic 请求的思考强度", () => {

@@ -22,6 +22,7 @@ import {
 } from "@/lib/session-request-artifact-limit";
 import { clientRequestsContext1m as clientRequestsContext1mHelper } from "@/lib/special-attributes";
 import { ERROR_CODES, getErrorMessageServer } from "@/lib/utils/error-messages";
+import { extractNativeThinkingConfigFromRequestBody } from "@/lib/utils/native-thinking";
 import {
   type ResolvedPricing,
   resolvePricingForModelRecords,
@@ -44,7 +45,7 @@ import {
   type RoutingTraceV1,
 } from "@/types/routing-trace";
 import type { SessionIdentityMetadata } from "@/types/session";
-import type { SpecialSetting } from "@/types/special-settings";
+import type { SpecialSetting, ThinkingConfigValue } from "@/types/special-settings";
 import type { BillingModelSource, CodexPriorityBillingSource } from "@/types/system-config";
 import type { User } from "@/types/user";
 import type { AffinityLookupResult } from "./affinity/affinity-store";
@@ -268,6 +269,10 @@ export class ProxySession {
   // 特殊设置（用于审计/展示，可扩展）
   private specialSettings: SpecialSetting[] = [];
 
+  // Preserve native scalars before guard filters can mutate the parsed request body.
+  private readonly originalAnthropicThinking: ThinkingConfigValue | null;
+  private readonly originalGeminiThinking: ThinkingConfigValue | null;
+
   // Cached price data (lazy loaded: undefined=not loaded, null=no data)
   private cachedPriceData?: ModelPriceData | null;
 
@@ -335,6 +340,14 @@ export class ProxySession {
     this.originalHeaders = new Headers(init.headers); // 原始 headers 的副本，用于检测过滤器修改
     this.headerLog = init.headerLog;
     this.request = init.request;
+    this.originalAnthropicThinking = extractNativeThinkingConfigFromRequestBody(
+      init.request.message,
+      "anthropic"
+    );
+    this.originalGeminiThinking = extractNativeThinkingConfigFromRequestBody(
+      init.request.message,
+      "gemini"
+    );
     this.userAgent = init.userAgent;
     this.context = init.context;
     this.clientAbortSignal = init.clientAbortSignal;
@@ -644,8 +657,33 @@ export class ProxySession {
     return !this.highConcurrencyModeEnabled;
   }
 
+  getOriginalNativeThinkingConfig(
+    protocol: "anthropic" | "gemini"
+  ): Readonly<ThinkingConfigValue> | null {
+    return protocol === "anthropic" ? this.originalAnthropicThinking : this.originalGeminiThinking;
+  }
+
   addSpecialSetting(setting: SpecialSetting): void {
     this.specialSettings.push(setting);
+  }
+
+  /** Replace this attempt's outgoing observation without mutating snapshots shared by hedges. */
+  recordNativeThinkingForwarded(
+    protocol: "anthropic" | "gemini",
+    providerId: number,
+    config: ThinkingConfigValue | null
+  ): void {
+    this.specialSettings = [
+      ...this.specialSettings.filter((setting) => setting.type !== "native_thinking_forwarded"),
+      {
+        type: "native_thinking_forwarded",
+        scope: "provider",
+        hit: true,
+        protocol,
+        providerId,
+        config: config ? { ...config } : null,
+      },
+    ];
   }
 
   getSpecialSettings(): SpecialSetting[] | null {

@@ -137,8 +137,8 @@
       "ip": "IP",
       "provider": "供应商",
       "model": "计费模型",
-      "reasoningEffort": "思考强度",
-      "reasoningEffortTooltip": "该模型请求的思考强度",
+      "reasoningEffort": "思考配置",
+      "reasoningEffortTooltip": "已记录的思考模式、强度/等级与令牌预算；变更时显示请求值和转发值",
       "endpoint": "端点",
       "inputTokens": "输入",
       "outputTokens": "输出",
@@ -408,11 +408,6 @@
         "technicalTimeline": "技术时间线",
         "copyTimeline": "复制时间线"
       },
-      "effort": {
-        "label": "Effort",
-        "overridden": "已被供应商覆写",
-        "tooltip": "客户端在请求体中声明的思考强度（output_config.effort），按原值显示，代理不会重命名或转换等级。"
-      },
       "routingTrace": {
         "title": "路由模式",
         "modes": {
@@ -551,15 +546,29 @@
           "winner_committed": "其他供应商已提交为赢家"
         }
       },
-      "reasoningEffort": {
-        "label": "思考强度",
-        "overridden": "已被供应商覆写",
-        "tooltip": "Codex 请求中的思考强度（reasoning.effort），按原值显示。"
-      },
-      "reasoningEffortOpenai": {
-        "label": "思考强度",
-        "overridden": "已被供应商覆写",
-        "tooltip": "OpenAI chat/completions 请求中的思考强度（reasoning_effort / reasoning.effort），按原值显示。"
+      "thinkingConfig": {
+        "label": "思考配置",
+        "requested": "请求值",
+        "effective": "转发值",
+        "notSpecified": "未指定",
+        "removed": "已移除",
+        "overridden": "转发前已变更",
+        "effort": "强度/等级",
+        "mode": "模式",
+        "budget": "令牌预算",
+        "budgetTokens": "{count} 令牌",
+        "dynamic": "动态",
+        "modes": {
+          "enabled": "已启用",
+          "adaptive": "自适应",
+          "disabled": "已禁用"
+        },
+        "tooltips": {
+          "codex": "已记录的 Codex reasoning.effort，按原值显示。缺失值不代表模型默认值。",
+          "openai": "已记录的 OpenAI reasoning_effort / reasoning.effort，按原值显示。缺失值不代表模型默认值。",
+          "anthropic": "已记录的 Claude thinking.type、thinking.budget_tokens 和 output_config.effort。禁用模式优先于残留的强度或预算；缺失值不代表模型默认值。",
+          "gemini": "已记录的 Gemini thinkingLevel 和 thinkingBudget。等级按原值显示；-1 表示动态预算，0 表示禁用思考。缺失值不代表模型默认值。"
+        }
       },
       "logicTrace": {
         "title": "决策链",

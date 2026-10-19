@@ -1,5 +1,4 @@
 import { normalizeEndpointPath, V1_ENDPOINT_PATHS } from "@/app/v1/_lib/proxy/endpoint-paths";
-import { extractAnthropicEffortFromRequestBody } from "@/lib/utils/anthropic-effort";
 import { extractCodexReasoningEffortFromRequestBody } from "@/lib/utils/codex-reasoning-effort";
 import { extractOpenAIReasoningEffortFromRequestBody } from "@/lib/utils/openai-reasoning-effort";
 import { createMessageRequest } from "@/repository/message";
@@ -42,20 +41,24 @@ export class ProxyMessageService {
       session.setOriginalModel(currentModel);
     }
 
-    const isAnthropicProvider =
-      provider.providerType === "claude" || provider.providerType === "claude-auth";
-    const hasAnthropicEffortAudit = session
-      .getSpecialSettings()
-      ?.some((setting) => setting.type === "anthropic_effort");
-
-    if (isAnthropicProvider && !hasAnthropicEffortAudit) {
-      const anthropicEffort = extractAnthropicEffortFromRequestBody(session.request.message);
-      if (anthropicEffort) {
+    const nativeProtocol =
+      provider.providerType === "claude" || provider.providerType === "claude-auth"
+        ? "anthropic"
+        : provider.providerType === "gemini" || provider.providerType === "gemini-cli"
+          ? "gemini"
+          : null;
+    if (nativeProtocol) {
+      const hasNativeAudit = session
+        .getSpecialSettings()
+        ?.some((setting) => setting.type === "native_thinking");
+      const config = session.getOriginalNativeThinkingConfig(nativeProtocol);
+      if (!hasNativeAudit && config) {
         session.addSpecialSetting({
-          type: "anthropic_effort",
+          type: "native_thinking",
           scope: "request",
           hit: true,
-          effort: anthropicEffort,
+          protocol: nativeProtocol,
+          config: { ...config },
         });
       }
     }

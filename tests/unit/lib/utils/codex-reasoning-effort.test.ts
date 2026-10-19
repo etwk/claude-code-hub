@@ -218,6 +218,77 @@ describe("extractCodexReasoningEffortInfo", () => {
     ).toBeNull();
   });
 
+  test.each([true, false])(
+    "explicit final removal is preserved with request audit=%s",
+    (withRequest) => {
+      const settings: SpecialSetting[] = [];
+      if (withRequest) {
+        settings.push({
+          type: "codex_reasoning_effort",
+          scope: "request",
+          hit: true,
+          effort: "low",
+        });
+      }
+      settings.push({
+        type: "provider_parameter_override",
+        scope: "provider",
+        providerId: 1,
+        providerName: "Codex",
+        providerType: "codex",
+        hit: true,
+        changed: true,
+        changes: [{ path: "reasoning.effort", before: "low", after: null, changed: true }],
+      });
+      expect(extractCodexReasoningEffortInfo(settings)).toEqual({
+        requestedEffort: "low",
+        effectiveEffort: null,
+        isOverridden: true,
+      });
+    }
+  );
+
+  test("the final removal wins over an earlier supplied effort", () => {
+    expect(
+      extractCodexReasoningEffortInfo([
+        { type: "codex_reasoning_effort", scope: "request", hit: true, effort: "low" },
+        {
+          type: "provider_parameter_override",
+          scope: "provider",
+          providerId: 1,
+          providerName: "Codex",
+          providerType: "codex",
+          hit: true,
+          changed: true,
+          changes: [{ path: "reasoning.effort", before: "low", after: "high", changed: true }],
+        },
+        {
+          type: "provider_parameter_override",
+          scope: "provider",
+          providerId: 1,
+          providerName: "Codex",
+          providerType: "codex",
+          hit: true,
+          changed: true,
+          changes: [{ path: "reasoning.effort", before: "high", after: null, changed: true }],
+        },
+      ])
+    ).toEqual({ requestedEffort: "low", effectiveEffort: null, isOverridden: true });
+  });
+
+  test("a partial historical change without after does not remove effort", () => {
+    expect(
+      extractCodexReasoningEffortInfo([
+        { type: "codex_reasoning_effort", scope: "request", hit: true, effort: "high" },
+        {
+          type: "provider_parameter_override",
+          providerType: "codex",
+          changes: [{ path: "reasoning.effort", before: "high" }],
+        } as SpecialSetting,
+      ])
+    ).toEqual({ requestedEffort: "high", effectiveEffort: "high", isOverridden: false });
+  });
+
   test.each([null, undefined, []])("无思考强度审计时返回 null: %#", (settings) => {
     expect(extractCodexReasoningEffortInfo(settings)).toBeNull();
   });

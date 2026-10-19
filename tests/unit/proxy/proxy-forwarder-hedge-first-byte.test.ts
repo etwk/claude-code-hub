@@ -178,6 +178,8 @@ import { peekDeferredStreamingFinalization } from "@/app/v1/_lib/proxy/stream-fi
 import { getStreamGatePrebufferBudget } from "@/app/v1/_lib/proxy/stream-gate/prebuffer-budget";
 import { DbPoolAdmissionError } from "@/drizzle/admitted-client";
 import { logger } from "@/lib/logger";
+import { extractNativeThinkingConfigFromRequestBody } from "@/lib/utils/native-thinking";
+import { extractThinkingEffortInfo } from "@/lib/utils/thinking-effort";
 import type { Provider } from "@/types/provider";
 import type { SystemSettings } from "@/types/system-config";
 
@@ -2890,135 +2892,183 @@ describe("ProxyForwarder - first-byte hedge scheduling", () => {
     }
   });
 
-  test("hedge 路径命中 thinking budget 错误时，应整流后在同供应商重试", async () => {
-    vi.useFakeTimers();
+  test.each([
+    { alternativeDelayMs: 500, winnerId: 1, label: "p1-budget-rectified", budgetTokens: 32000 },
+    { alternativeDelayMs: 60, winnerId: 2, label: "p2", budgetTokens: 500 },
+  ])(
+    "hedge budget rectifier preserves winning provider $winnerId at $budgetTokens tokens",
+    async ({ alternativeDelayMs, winnerId, label, budgetTokens }) => {
+      vi.useFakeTimers();
 
-    try {
-      const provider1 = createProvider({
-        id: 1,
-        name: "p1",
-        firstByteTimeoutStreamingMs: 100,
-      });
-      const provider2 = createProvider({
-        id: 2,
-        name: "p2",
-        firstByteTimeoutStreamingMs: 100,
-      });
-      const session = createSession();
-      session.setProvider(provider1);
-      session.request.message = {
-        model: "claude-test",
-        stream: true,
-        max_tokens: 1000,
-        thinking: { type: "enabled", budget_tokens: 500 },
-        messages: [{ role: "user", content: "hi" }],
-      };
-
-      mocks.pickRandomProviderWithExclusion.mockResolvedValueOnce(provider2);
-      mocks.categorizeErrorAsync.mockResolvedValueOnce(
-        ProxyErrorCategory.NON_RETRYABLE_CLIENT_ERROR
-      );
-
-      const budgetError = new UpstreamProxyError(
-        "thinking.enabled.budget_tokens: Input should be greater than or equal to 1024",
-        400,
-        {
-          body: '{"error":"budget_too_low"}',
-          providerId: provider1.id,
-          providerName: provider1.name,
-        }
-      );
-
-      const doForward = vi.spyOn(
-        ProxyForwarder as unknown as {
-          doForward: (...args: unknown[]) => Promise<Response>;
-        },
-        "doForward"
-      );
-
-      const controller1First = new AbortController();
-      const controller1Retry = new AbortController();
-      const controller2 = new AbortController();
-
-      doForward.mockImplementationOnce(async (attemptSession) => {
-        const runtime = attemptSession as ProxySession & AttemptRuntime;
-        runtime.responseController = controller1First;
-        runtime.clearResponseTimeout = vi.fn();
-        return createDelayedFailure({
-          delayMs: 140,
-          error: budgetError,
-          controller: controller1First,
+      try {
+        const provider1 = createProvider({
+          id: 1,
+          name: "p1",
+          firstByteTimeoutStreamingMs: 100,
         });
-      });
-
-      doForward.mockImplementationOnce(async (attemptSession) => {
-        const runtime = attemptSession as ProxySession & AttemptRuntime;
-        runtime.responseController = controller2;
-        runtime.clearResponseTimeout = vi.fn();
-        return createStreamingResponse({
-          label: "p2",
-          firstChunkDelayMs: 500,
-          controller: controller2,
+        const provider2 = createProvider({
+          id: 2,
+          name: "p2",
+          firstByteTimeoutStreamingMs: 100,
         });
-      });
-
-      doForward.mockImplementationOnce(async (attemptSession) => {
-        const runtime = attemptSession as ProxySession & AttemptRuntime;
-        const body = runtime.request.message as {
-          max_tokens: number;
-          thinking: { type: string; budget_tokens: number };
+        const session = createSession();
+        session.setProvider(provider1);
+        session.request.message = {
+          model: "claude-test",
+          stream: true,
+          max_tokens: 1000,
+          thinking: { type: "enabled", budget_tokens: 500 },
+          messages: [{ role: "user", content: "hi" }],
         };
-
-        expect(body.max_tokens).toBe(64000);
-        expect(body.thinking.type).toBe("enabled");
-        expect(body.thinking.budget_tokens).toBe(32000);
-
-        runtime.responseController = controller1Retry;
-        runtime.clearResponseTimeout = vi.fn();
-        return createStreamingResponse({
-          label: "p1-budget-rectified",
-          firstChunkDelayMs: 40,
-          controller: controller1Retry,
+        session.addSpecialSetting({
+          type: "native_thinking",
+          scope: "request",
+          hit: true,
+          protocol: "anthropic",
+          config: { effort: null, mode: "enabled", budgetTokens: 500 },
         });
-      });
 
-      const responsePromise = ProxyForwarder.send(session);
+        mocks.pickRandomProviderWithExclusion.mockResolvedValueOnce(provider2);
+        mocks.categorizeErrorAsync.mockResolvedValueOnce(
+          ProxyErrorCategory.NON_RETRYABLE_CLIENT_ERROR
+        );
 
-      await vi.advanceTimersByTimeAsync(100);
-      expect(doForward).toHaveBeenCalledTimes(2);
+        const budgetError = new UpstreamProxyError(
+          "thinking.enabled.budget_tokens: Input should be greater than or equal to 1024",
+          400,
+          {
+            body: '{"error":"budget_too_low"}',
+            providerId: provider1.id,
+            providerName: provider1.name,
+          }
+        );
 
-      await vi.advanceTimersByTimeAsync(45);
-      expect(doForward).toHaveBeenCalledTimes(3);
+        const doForward = vi.spyOn(
+          ProxyForwarder as unknown as {
+            doForward: (...args: unknown[]) => Promise<Response>;
+          },
+          "doForward"
+        );
 
-      await vi.advanceTimersByTimeAsync(50);
-      const response = await responsePromise;
+        const controller1First = new AbortController();
+        const controller1Retry = new AbortController();
+        const controller2 = new AbortController();
 
-      expect(await response.text()).toContain('"provider":"p1-budget-rectified"');
-      expect(session.provider?.id).toBe(1);
-      expect(mocks.pickRandomProviderWithExclusion).toHaveBeenCalledTimes(1);
-      expect(session.getSpecialSettings()).toEqual(
-        expect.arrayContaining([
+        doForward.mockImplementationOnce(async (attemptSession) => {
+          const runtime = attemptSession as ProxySession & AttemptRuntime;
+          runtime.recordNativeThinkingForwarded(
+            "anthropic",
+            provider1.id,
+            extractNativeThinkingConfigFromRequestBody(runtime.request.message, "anthropic")
+          );
+          runtime.responseController = controller1First;
+          runtime.clearResponseTimeout = vi.fn();
+          return createDelayedFailure({
+            delayMs: 140,
+            error: budgetError,
+            controller: controller1First,
+          });
+        });
+
+        doForward.mockImplementationOnce(async (attemptSession) => {
+          const runtime = attemptSession as ProxySession & AttemptRuntime;
+          runtime.recordNativeThinkingForwarded(
+            "anthropic",
+            provider2.id,
+            extractNativeThinkingConfigFromRequestBody(runtime.request.message, "anthropic")
+          );
+          runtime.responseController = controller2;
+          runtime.clearResponseTimeout = vi.fn();
+          return createStreamingResponse({
+            label: "p2",
+            firstChunkDelayMs: alternativeDelayMs,
+            controller: controller2,
+          });
+        });
+
+        doForward.mockImplementationOnce(async (attemptSession) => {
+          const runtime = attemptSession as ProxySession & AttemptRuntime;
+          runtime.recordNativeThinkingForwarded(
+            "anthropic",
+            provider1.id,
+            extractNativeThinkingConfigFromRequestBody(runtime.request.message, "anthropic")
+          );
+          const body = runtime.request.message as {
+            max_tokens: number;
+            thinking: { type: string; budget_tokens: number };
+          };
+
+          expect(body.max_tokens).toBe(64000);
+          expect(body.thinking.type).toBe("enabled");
+          expect(body.thinking.budget_tokens).toBe(32000);
+
+          runtime.responseController = controller1Retry;
+          runtime.clearResponseTimeout = vi.fn();
+          return createStreamingResponse({
+            label: "p1-budget-rectified",
+            firstChunkDelayMs: 40,
+            controller: controller1Retry,
+          });
+        });
+
+        const responsePromise = ProxyForwarder.send(session);
+
+        await vi.advanceTimersByTimeAsync(100);
+        expect(doForward).toHaveBeenCalledTimes(2);
+
+        await vi.advanceTimersByTimeAsync(45);
+        expect(doForward).toHaveBeenCalledTimes(3);
+
+        await vi.advanceTimersByTimeAsync(50);
+        const response = await responsePromise;
+
+        expect(await response.text()).toContain(`"provider":"${label}"`);
+        expect(session.provider?.id).toBe(winnerId);
+        expect(mocks.pickRandomProviderWithExclusion).toHaveBeenCalledTimes(1);
+        expect(session.getSpecialSettings()).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "thinking_budget_rectifier",
+              hit: true,
+              providerId: 1,
+            }),
+          ])
+        );
+        const outgoing = session
+          .getSpecialSettings()
+          ?.filter((setting) => setting.type === "native_thinking_forwarded");
+        expect(outgoing).toEqual([
           expect.objectContaining({
-            type: "thinking_budget_rectifier",
-            hit: true,
-            providerId: 1,
+            providerId: winnerId,
+            config: { effort: null, mode: "enabled", budgetTokens },
           }),
-        ])
-      );
-      expect(
-        session
-          .getProviderChain()
-          .filter((item) => item.id === provider1.id && item.routingAttemptId)
-          .map((item) => [item.reason, item.routingAttemptId, item.routingRound])
-      ).toEqual([
-        ["hedge_triggered", "legacy-hedge-1-1", 1],
-        ["retry_failed", "legacy-hedge-1-1", 1],
-        ["hedge_winner", "legacy-hedge-1-2", 1],
-      ]);
-    } finally {
-      vi.useRealTimers();
+        ]);
+        expect(extractThinkingEffortInfo(session.getSpecialSettings())).toEqual({
+          source: "anthropic",
+          requested: { effort: null, mode: "enabled", budgetTokens: 500 },
+          effective: { effort: null, mode: "enabled", budgetTokens },
+          isOverridden: budgetTokens !== 500,
+        });
+        expect(mocks.storeSessionSpecialSettings).toHaveBeenLastCalledWith(
+          "sess-hedge",
+          session.getSpecialSettings(),
+          session.requestSequence
+        );
+        expect(
+          session
+            .getProviderChain()
+            .filter((item) => item.id === provider1.id && item.routingAttemptId)
+            .map((item) => [item.reason, item.routingAttemptId, item.routingRound])
+        ).toEqual([
+          ["hedge_triggered", "legacy-hedge-1-1", 1],
+          ["retry_failed", "legacy-hedge-1-1", 1],
+          [winnerId === 1 ? "hedge_winner" : "hedge_loser_cancelled", "legacy-hedge-1-2", 1],
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
     }
-  });
+  );
 
   test("keeps the terminal failure of a rectified hedge retry in the decision chain", async () => {
     vi.useFakeTimers();
@@ -6715,6 +6765,73 @@ describe("ProxyForwarder - first-byte hedge scheduling", () => {
     expect(failedEntry?.routingAttemptId).toBe(finished?.attemptId);
     expect(failedEntry?.routingRound).toBe(finished?.round);
   });
+
+  test.each([false, true])(
+    "hands off a committed stream despite stalled audit storage with discoveryEnabled=%s",
+    async (discoveryEnabled) => {
+      vi.useFakeTimers();
+      const clientAbort = new AbortController();
+      const provider = createProvider({ id: 1 });
+      const session = createSession(clientAbort.signal);
+      session.authState = {
+        success: true,
+        user: null,
+        key: { id: 11 },
+        apiKey: null,
+      } as typeof session.authState;
+      setProviderWithSessionRef(session, provider);
+      session.recordNativeThinkingForwarded("anthropic", provider.id, {
+        effort: null,
+        mode: "enabled",
+        budgetTokens: 8192,
+      });
+      mocks.getCachedSystemSettings.mockResolvedValue({
+        discoveryEnabled,
+        discoveryConcurrency: 2,
+        maxDiscoveryRounds: 1,
+        discoverySlaMs: 100,
+        stickySlaMs: 100,
+        racingTotalTimeoutMs: 500,
+      });
+      mocks.pickDiscoveryProviders.mockResolvedValueOnce([]);
+      const auditWrite = Promise.withResolvers<void>();
+      mocks.storeSessionSpecialSettings.mockImplementationOnce(() => auditWrite.promise);
+      const upstream = createManualStreamingResponse();
+      upstream.enqueue("winner");
+      vi.spyOn(
+        ProxyForwarder as unknown as {
+          doForward: (...args: unknown[]) => Promise<Response>;
+        },
+        "doForward"
+      ).mockResolvedValueOnce(upstream.response);
+      let handedOff: Response | undefined;
+      const pending = ProxyForwarder.send(session).then((response) => {
+        handedOff = response;
+        return response;
+      });
+
+      try {
+        await vi.advanceTimersByTimeAsync(1);
+        clientAbort.abort(new Error("client disconnected"));
+        await vi.advanceTimersByTimeAsync(1);
+        if (!handedOff) throw new Error("Committed response is blocked by audit storage");
+        const reader = handedOff.body!.getReader();
+        try {
+          const prefix = await reader.read();
+          expect(new TextDecoder().decode(prefix.value)).toContain('"text":"winner"');
+        } finally {
+          await reader.cancel();
+          reader.releaseLock();
+        }
+        expect(upstream.cancel).toHaveBeenCalledOnce();
+      } finally {
+        auditWrite.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+        const response = await pending;
+        if (!response.bodyUsed) await response.body?.cancel();
+      }
+    }
+  );
 
   test("removes streaming hedge client abort listener after winner response is returned", async () => {
     const clientAbortController = new AbortController();
