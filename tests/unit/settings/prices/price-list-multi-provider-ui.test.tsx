@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { NextIntlClientProvider } from "next-intl";
-import { describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { PriceList } from "@/app/[locale]/settings/prices/_components/price-list";
 import type { ModelPrice } from "@/types/model-price";
 import { loadMessages } from "./test-messages";
@@ -29,6 +29,18 @@ function render(node: ReactNode) {
 }
 
 describe("PriceList multi-provider pricing", () => {
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    globalThis.fetch = vi.fn(async () => ({
+      json: async () => ({ ok: true, data: { vendors: [], version: "test" } }),
+    })) as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
   test("renders a multi-source badge and official pricing info for cloud rows", () => {
     const messages = loadMessages();
     const now = new Date("2026-03-06T00:00:00.000Z");
