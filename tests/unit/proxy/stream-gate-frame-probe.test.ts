@@ -27,6 +27,13 @@ const samples = [
     "]".repeat(1000) +
     ',"choices":[{"delta":{"content":"ok"}}]}',
   '{"type":"content_block_delta","delta":{"text":"你好\\nworld"}}',
+  '{"type":"content_block_start","content_block":{"type":"compaction","content":"总结\\nsummary","signature":"sig"}}',
+  '{"type":"content_block_start","content_block":{"type":"compaction","content":null,"encrypted_content":"opaque"}}',
+  '{"type":"content_block_start","content_block":{"type":"compaction","content":"","encrypted_content":null,"signature":"sig"}}',
+  '{"type":"content_block_delta","delta":{"type":"compaction_delta","content":"summary"}}',
+  '{"type":"content_block_delta","delta":{"type":"compaction_delta","content":null,"encrypted_content":"opaque"}}',
+  '{"type":"content_block_delta","delta":{"type":"compaction_delta","content":"","encrypted_content":""}}',
+  '{"type":"content_block_delta","delta":{"type":"compaction_delta","content":"summary"},"error":{"message":"boom"}}',
   '{"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"type":"refusal"}}}',
   '{"type":"message_delta","delta":{"stop_reason":"end_turn"}}',
   '{"type":"message_delta","delta":{"stop_reason":["refusal"]}}',

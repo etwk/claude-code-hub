@@ -48,7 +48,7 @@ export const STREAM_SIGNALS: Record<ProtocolFamily, StreamSignal> = {
   anthropic: {
     contentRules: [
       {
-        // text_delta / input_json_delta / thinking_delta / signature_delta / citations_delta
+        // text / input_json / thinking / signature / citations / compaction deltas
         eventTypes: ["content_block_delta"],
         anyPaths: [
           "delta.text",
@@ -56,6 +56,8 @@ export const STREAM_SIGNALS: Record<ProtocolFamily, StreamSignal> = {
           "delta.thinking",
           "delta.signature",
           "delta.citation",
+          "delta.content",
+          "delta.encrypted_content",
         ],
       },
       {
@@ -65,6 +67,7 @@ export const STREAM_SIGNALS: Record<ProtocolFamily, StreamSignal> = {
         anyPaths: [
           "content_block.data",
           "content_block.content",
+          "content_block.encrypted_content",
           "content_block.file_id",
           "content_block.fileId",
           "content_block.url",
@@ -75,6 +78,7 @@ export const STREAM_SIGNALS: Record<ProtocolFamily, StreamSignal> = {
             path: "content_block.type",
             values: [
               "redacted_thinking",
+              "compaction",
               "web_search_tool_result",
               "web_fetch_tool_result",
               "code_execution_tool_result",

@@ -198,6 +198,77 @@ describe("runStreamContentGate", () => {
     expect(new TextDecoder().decode(rest.value)).toBe(MESSAGE_STOP);
   });
 
+  it.each([
+    ["start", "content"],
+    ["start", "encrypted_content"],
+    ["delta", "content"],
+    ["delta", "encrypted_content"],
+  ])("commits on compaction %s %s and preserves the full stream", async (mode, field) => {
+    const start = `event: content_block_start\ndata: ${JSON.stringify({
+      type: "content_block_start",
+      index: 0,
+      content_block: {
+        type: "compaction",
+        content: null,
+        ...(mode === "start" ? { [field]: "总结 summary", signature: "sig" } : {}),
+      },
+    })}\n\n`;
+    const delta = `event: content_block_delta\ndata: ${JSON.stringify({
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "compaction_delta", content: null, [field]: "总结 summary" },
+    })}\n\n`;
+    const frames = [
+      MESSAGE_START,
+      start,
+      ...(mode === "delta" ? [delta] : []),
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"compaction"},"usage":{"output_tokens":5}}\n\n',
+      MESSAGE_STOP,
+    ];
+    const wire = encoder.encode(frames.join(""));
+    for (const size of [1, 7, wire.length]) {
+      const chunks: Uint8Array[] = [];
+      for (let i = 0; i < wire.length; i += size) chunks.push(wire.subarray(i, i + size));
+      const reader = readerFromChunks(chunks);
+      const result = await runStreamContentGate(reader, {
+        ...GATE_OPTIONS,
+        captureCommitMarker: true,
+      });
+      expect(result.committed).toBe(true);
+      if (!result.committed) continue;
+      expect(result.commitMarker?.frameIndex).toBe(mode === "start" ? 2 : 3);
+      const delivered = [...result.prefixChunks];
+      while (true) {
+        const next = await reader.read();
+        if (next.done) break;
+        delivered.push(next.value);
+      }
+      expect(await drainPrefix(delivered)).toBe(frames.join(""));
+    }
+  });
+
+  it("rejects compaction metadata without a payload even with stop_reason=compaction", async () => {
+    const result = await runStreamContentGate(
+      readerFromChunks([
+        MESSAGE_START,
+        'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"compaction","content":null,"signature":"sig"}}\n\n',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"compaction_delta","content":"","encrypted_content":null}}\n\n',
+        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"compaction"}}\n\n',
+        MESSAGE_STOP,
+      ]),
+      GATE_OPTIONS
+    );
+    expect(result.committed).toBe(false);
+    if (!result.committed) {
+      expect(result.error).toMatchObject({
+        gateReason: "empty_stream",
+        terminalBeforeContent: true,
+      });
+      expect(isRequestScopedGateFailure(result.error)).toBe(false);
+    }
+  });
+
   it("fails over on error frame before content with upstream error body preserved", async () => {
     const reader = readerFromChunks([PING, ERROR_FRAME, TEXT_DELTA]);
     const result = await runStreamContentGate(reader, GATE_OPTIONS);
