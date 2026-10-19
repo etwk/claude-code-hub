@@ -113,7 +113,7 @@ vi.mock("@/lib/endpoint-circuit-breaker", () => ({
 
 vi.mock("@/repository/message", () => ({
   updateMessageRequestCost: vi.fn(),
-  updateMessageRequestDetails: vi.fn(),
+  updateMessageRequestDetails: vi.fn(async () => undefined),
   updateMessageRequestDetailsDurably: vi.fn(),
   updateMessageRequestDuration: vi.fn(),
 }));

@@ -1,12 +1,16 @@
 import { normalizeEndpointPath, V1_ENDPOINT_PATHS } from "@/app/v1/_lib/proxy/endpoint-paths";
-import { extractAnthropicEffortFromRequestBody } from "@/lib/utils/anthropic-effort";
 import { extractCodexReasoningEffortFromRequestBody } from "@/lib/utils/codex-reasoning-effort";
+import { extractNativeThinkingConfigFromRequestBody } from "@/lib/utils/native-thinking";
 import { extractOpenAIReasoningEffortFromRequestBody } from "@/lib/utils/openai-reasoning-effort";
 import { createMessageRequest } from "@/repository/message";
 import type { ProxySession } from "./session";
 
 /** 在供应商确定后创建请求使用记录，并补齐需要随记录持久化的请求审计。 */
 export class ProxyMessageService {
+  // Missing configuration is also captured once: retries must not relabel provider-added values
+  // as the original request. Weak references keep this state bounded by the request lifetime.
+  private static readonly nativeThinkingCaptured = new WeakSet<ProxySession>();
+
   /**
    * 为当前代理请求创建持久化上下文。
    *
@@ -42,21 +46,31 @@ export class ProxyMessageService {
       session.setOriginalModel(currentModel);
     }
 
-    const isAnthropicProvider =
-      provider.providerType === "claude" || provider.providerType === "claude-auth";
-    const hasAnthropicEffortAudit = session
-      .getSpecialSettings()
-      ?.some((setting) => setting.type === "anthropic_effort");
-
-    if (isAnthropicProvider && !hasAnthropicEffortAudit) {
-      const anthropicEffort = extractAnthropicEffortFromRequestBody(session.request.message);
-      if (anthropicEffort) {
-        session.addSpecialSetting({
-          type: "anthropic_effort",
-          scope: "request",
-          hit: true,
-          effort: anthropicEffort,
-        });
+    const nativeProtocol =
+      provider.providerType === "claude" || provider.providerType === "claude-auth"
+        ? "anthropic"
+        : provider.providerType === "gemini" || provider.providerType === "gemini-cli"
+          ? "gemini"
+          : null;
+    if (nativeProtocol && !ProxyMessageService.nativeThinkingCaptured.has(session)) {
+      ProxyMessageService.nativeThinkingCaptured.add(session);
+      const hasNativeAudit = session
+        .getSpecialSettings()
+        ?.some((setting) => setting.type === "native_thinking");
+      if (!hasNativeAudit) {
+        const config = extractNativeThinkingConfigFromRequestBody(
+          session.request.message,
+          nativeProtocol
+        );
+        if (config) {
+          session.addSpecialSetting({
+            type: "native_thinking",
+            scope: "request",
+            hit: true,
+            protocol: nativeProtocol,
+            config,
+          });
+        }
       }
     }
 

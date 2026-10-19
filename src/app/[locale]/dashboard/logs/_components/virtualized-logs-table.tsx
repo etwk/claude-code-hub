@@ -1094,7 +1094,7 @@ export function VirtualizedLogsTable({
 
                     {/* Thinking Effort */}
                     {hideReasoningEffortColumn ? null : (
-                      <div className="relative z-20 flex-[0.6] min-w-[64px] overflow-visible px-1.5 font-mono text-xs">
+                      <div className="flex-[0.6] min-w-[64px] overflow-hidden px-1.5 font-mono text-xs">
                         <ThinkingEffortDisplay specialSettings={log.specialSettings} />
                       </div>
                     )}

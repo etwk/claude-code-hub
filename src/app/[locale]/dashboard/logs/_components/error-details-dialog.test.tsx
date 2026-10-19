@@ -310,11 +310,6 @@ const messages = {
           technicalTimeline: "Technical Timeline",
           copyTimeline: "Copy Timeline",
         },
-        reasoningEffort: {
-          label: "Reasoning effort",
-          overridden: "Overridden by provider",
-          tooltip: "Thinking effort in the Codex request (reasoning.effort), shown verbatim.",
-        },
         logicTrace: {
           ...dashboardMessages.logs.details.logicTrace,
           title: "Decision Chain",
@@ -783,16 +778,169 @@ describe("error-details-dialog layout", () => {
       />
     );
 
-    expect(html).toContain("Reasoning effort");
-    expect(html).toContain("Thinking effort in the Codex request");
-    expect(html).toContain("Overridden by provider");
-    expect(html).toContain("low");
-    expect(html).toContain("high");
-
     const container = document.createElement("div");
     container.innerHTML = html;
-    expect(container.querySelector("svg.lucide-arrow-right")?.getAttribute("aria-hidden")).toBe(
-      "true"
+    expect(container.querySelector('[data-slot="thinking-config-requested"] dd')?.textContent).toBe(
+      "Effort / level: low"
+    );
+    expect(container.querySelector('[data-slot="thinking-config-effective"] dd')?.textContent).toBe(
+      "Effort / level: high"
+    );
+  });
+
+  test.each([
+    ["gemini", { effort: "HIGH", mode: null, budgetTokens: null }, "Effort / level: HIGH"],
+    ["gemini", { effort: null, mode: null, budgetTokens: -1 }, "Token budget: Dynamic (-1)"],
+    ["gemini", { effort: null, mode: null, budgetTokens: 0 }, "Token budget: Disabled (0)"],
+    [
+      "anthropic",
+      { effort: null, mode: "enabled", budgetTokens: 4096 },
+      "Mode: Enabled · Token budget: 4096 tokens",
+    ],
+    [
+      "anthropic",
+      { effort: "high", mode: "adaptive", budgetTokens: null },
+      "Mode: Adaptive · Effort / level: high",
+    ],
+    [
+      "anthropic",
+      { effort: "high", mode: "disabled", budgetTokens: 4096 },
+      "Mode: Disabled · Effort / level: high · Token budget: 4096 tokens",
+    ],
+  ] as const)(
+    "renders full native %s configuration in request details",
+    (protocol, config, expected) => {
+      const html = renderWithIntl(
+        <ErrorDetailsDialog
+          externalOpen
+          statusCode={200}
+          errorMessage={null}
+          providerChain={null}
+          sessionId={null}
+          specialSettings={[
+            { type: "native_thinking", scope: "request", hit: true, protocol, config },
+          ]}
+        />
+      );
+      const container = document.createElement("div");
+      container.innerHTML = html;
+      expect(
+        container.querySelector('[data-slot="thinking-config-requested"] dd')?.textContent
+      ).toBe(expected);
+      expect(container.querySelector('[data-slot="thinking-config-effective"]')).toBeNull();
+    }
+  );
+
+  test("renders provider-only Claude thinking without inventing a requested configuration", () => {
+    const html = renderWithIntl(
+      <ErrorDetailsDialog
+        externalOpen
+        statusCode={200}
+        errorMessage={null}
+        providerChain={null}
+        sessionId={null}
+        specialSettings={[
+          {
+            type: "provider_parameter_override",
+            scope: "provider",
+            providerId: 1,
+            providerName: "Claude",
+            providerType: "claude",
+            hit: true,
+            changed: true,
+            changes: [
+              { path: "thinking.type", before: null, after: "adaptive", changed: true },
+              { path: "output_config.effort", before: null, after: "high", changed: true },
+            ],
+          },
+        ]}
+      />
+    );
+    const container = document.createElement("div");
+    container.innerHTML = html;
+    expect(container.querySelector('[data-slot="thinking-config-requested"] dd')?.textContent).toBe(
+      "Not specified"
+    );
+    expect(container.querySelector('[data-slot="thinking-config-effective"] dd')?.textContent).toBe(
+      "Mode: Adaptive · Effort / level: high"
+    );
+  });
+
+  test("renders removed Claude thinking separately from the original request", () => {
+    const html = renderWithIntl(
+      <ErrorDetailsDialog
+        externalOpen
+        statusCode={200}
+        errorMessage={null}
+        providerChain={null}
+        sessionId={null}
+        specialSettings={[
+          {
+            type: "native_thinking",
+            scope: "request",
+            hit: true,
+            protocol: "anthropic",
+            config: { effort: "high", mode: null, budgetTokens: null },
+          },
+          {
+            type: "provider_parameter_override",
+            scope: "provider",
+            providerId: 1,
+            providerName: "Claude",
+            providerType: "claude",
+            hit: true,
+            changed: true,
+            changes: [{ path: "output_config.effort", before: "high", after: null, changed: true }],
+          },
+        ]}
+      />
+    );
+    const container = document.createElement("div");
+    container.innerHTML = html;
+    expect(container.querySelector('[data-slot="thinking-config-requested"] dd')?.textContent).toBe(
+      "Effort / level: high"
+    );
+    expect(container.querySelector('[data-slot="thinking-config-effective"] dd')?.textContent).toBe(
+      "Removed"
+    );
+  });
+
+  test("keeps exact original and forwarded Claude budgets in request details", () => {
+    const html = renderWithIntl(
+      <ErrorDetailsDialog
+        externalOpen
+        statusCode={200}
+        errorMessage={null}
+        providerChain={null}
+        sessionId={null}
+        specialSettings={[
+          {
+            type: "native_thinking",
+            scope: "request",
+            hit: true,
+            protocol: "anthropic",
+            config: { effort: null, mode: "enabled", budgetTokens: 4096 },
+          },
+          {
+            type: "provider_parameter_override",
+            scope: "provider",
+            providerId: 1,
+            providerName: "Claude",
+            providerType: "claude",
+            hit: true,
+            changed: true,
+            changes: [{ path: "thinking.budget_tokens", before: 4096, after: 2048, changed: true }],
+          },
+        ]}
+      />
+    );
+    const container = document.createElement("div");
+    container.innerHTML = html;
+    expect(container.querySelector('[data-slot="thinking-config-requested"] dd')?.textContent).toBe(
+      "Mode: Enabled · Token budget: 4096 tokens"
+    );
+    expect(container.querySelector('[data-slot="thinking-config-effective"] dd')?.textContent).toBe(
+      "Mode: Enabled · Token budget: 2048 tokens"
     );
   });
 

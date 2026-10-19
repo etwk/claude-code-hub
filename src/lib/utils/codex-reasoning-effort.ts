@@ -3,7 +3,7 @@ import type { SpecialSetting } from "@/types/special-settings";
 /** Codex 使用记录中用于呈现请求值和实际转发值的思考强度信息。 */
 export interface CodexReasoningEffortInfo {
   requestedEffort: string | null;
-  effectiveEffort: string;
+  effectiveEffort: string | null;
   isOverridden: boolean;
 }
 
@@ -71,6 +71,7 @@ export function extractCodexReasoningEffortInfo(
   let initialOverrideBefore: string | null = null;
   let finalOverrideAfter: string | null = null;
 
+  let hasEffectiveOverrideValue = false;
   for (const setting of specialSettings) {
     if (setting.type !== "provider_parameter_override" || setting.providerType !== "codex") {
       continue;
@@ -86,13 +87,16 @@ export function extractCodexReasoningEffortInfo(
     if (!hasEffortOverrideAudit) {
       initialOverrideBefore = normalizeCodexReasoningEffort(effortChange.before);
     }
-    finalOverrideAfter = normalizeCodexReasoningEffort(effortChange.after);
+    if (Object.hasOwn(effortChange, "after")) {
+      finalOverrideAfter = normalizeCodexReasoningEffort(effortChange.after);
+      hasEffectiveOverrideValue = true;
+    }
     hasEffortOverrideAudit = true;
   }
 
   const originalEffort = requestedEffort ?? initialOverrideBefore;
-  const effectiveEffort = finalOverrideAfter ?? originalEffort;
-  if (!effectiveEffort) {
+  const effectiveEffort = hasEffectiveOverrideValue ? finalOverrideAfter : originalEffort;
+  if (!originalEffort && !effectiveEffort) {
     return null;
   }
 

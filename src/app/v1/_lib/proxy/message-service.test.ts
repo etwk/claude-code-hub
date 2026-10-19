@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
+import { applyAnthropicProviderOverridesWithAudit } from "@/lib/anthropic/provider-overrides";
+import { extractThinkingEffortInfo } from "@/lib/utils/thinking-effort";
 import type { ProxySession } from "./session";
 
 const createMessageRequestMock = vi.hoisted(() => vi.fn());
@@ -262,4 +264,265 @@ describe("ProxyMessageService Codex reasoning effort audit", () => {
 
     expect(specialSettings).toHaveLength(1);
   });
+});
+
+describe("ProxyMessageService native reasoning audit", () => {
+  beforeEach(() => {
+    createMessageRequestMock.mockReset();
+    createMessageRequestMock.mockResolvedValue({ id: 101, createdAt: new Date("2026-07-10") });
+  });
+
+  test.each([
+    {
+      provider: "claude",
+      message: { thinking: { type: "enabled", budget_tokens: 8192 } },
+      protocol: "anthropic",
+      config: { effort: null, mode: "enabled", budgetTokens: 8192 },
+    },
+    {
+      provider: "claude-auth",
+      message: { thinking: { type: "adaptive" }, output_config: { effort: "high" } },
+      protocol: "anthropic",
+      config: { effort: "high", mode: "adaptive", budgetTokens: null },
+    },
+    {
+      provider: "claude",
+      message: { output_config: { effort: "custom-effort" } },
+      protocol: "anthropic",
+      config: { effort: "custom-effort", mode: null, budgetTokens: null },
+    },
+    {
+      provider: "claude",
+      message: {
+        thinking: { type: "disabled", budget_tokens: 4096 },
+        output_config: { effort: "high" },
+      },
+      protocol: "anthropic",
+      config: { effort: "high", mode: "disabled", budgetTokens: 4096 },
+    },
+    {
+      provider: "claude-auth",
+      message: { thinking: { budget_tokens: 0 } },
+      protocol: "anthropic",
+      config: { effort: null, mode: null, budgetTokens: 0 },
+    },
+    {
+      provider: "gemini",
+      message: {
+        generationConfig: {
+          thinkingConfig: { thinkingLevel: "experimental-level", thinkingBudget: 65536 },
+        },
+      },
+      protocol: "gemini",
+      config: { effort: "experimental-level", mode: null, budgetTokens: 65536 },
+    },
+    {
+      provider: "gemini",
+      message: {
+        generation_config: { thinking_config: { thinking_level: "LOW", thinking_budget: 2048 } },
+      },
+      protocol: "gemini",
+      config: { effort: "LOW", mode: null, budgetTokens: 2048 },
+    },
+    {
+      provider: "gemini-cli",
+      message: {
+        request: {
+          generation_config: { thinkingConfig: { thinking_level: "MINIMAL", thinking_budget: 0 } },
+        },
+      },
+      protocol: "gemini",
+      config: { effort: "MINIMAL", mode: null, budgetTokens: 0 },
+    },
+    {
+      provider: "gemini",
+      message: { generationConfig: { thinkingConfig: { thinkingLevel: "HIGH" } } },
+      protocol: "gemini",
+      config: { effort: "HIGH", mode: null, budgetTokens: null },
+    },
+    {
+      provider: "gemini",
+      message: { generationConfig: { thinkingConfig: { thinkingBudget: 0 } } },
+      protocol: "gemini",
+      config: { effort: null, mode: null, budgetTokens: 0 },
+    },
+    {
+      provider: "gemini-cli",
+      message: { request: { generationConfig: { thinkingConfig: { thinkingBudget: -1 } } } },
+      protocol: "gemini",
+      config: { effort: null, mode: null, budgetTokens: -1 },
+    },
+  ])(
+    "persists $provider native reasoning $config",
+    async ({ provider, message, protocol, config }) => {
+      const { session, specialSettings } = createSession(provider, message);
+      const originalMessage = JSON.stringify(message);
+
+      await ProxyMessageService.ensureContext(session);
+
+      expect(specialSettings).toContainEqual({
+        type: "native_thinking",
+        scope: "request",
+        hit: true,
+        protocol,
+        config,
+      });
+      expect(specialSettings).toHaveLength(1);
+      expect(JSON.stringify(session.request.message)).toBe(originalMessage);
+      // Exercise the same serialized audit payload that createMessageRequest persists as JSONB.
+      const persisted = JSON.parse(
+        JSON.stringify(createMessageRequestMock.mock.calls[0][0].special_settings)
+      );
+      expect(extractThinkingEffortInfo(persisted)).toEqual({
+        source: protocol,
+        requested: config,
+        effective: config,
+        isOverridden: false,
+      });
+      await ProxyMessageService.ensureContext(session);
+      expect(specialSettings).toHaveLength(1);
+      expect(JSON.stringify(session.request.message)).toBe(originalMessage);
+    }
+  );
+
+  test.each<{ provider: string; message: Record<string, unknown> }>([
+    { provider: "claude", message: { model: "claude-opus-4-6" } },
+    { provider: "claude", message: { thinking: null, output_config: { effort: " " } } },
+    { provider: "claude-auth", message: { thinking: { type: "unknown", budget_tokens: "8192" } } },
+    {
+      provider: "gemini",
+      message: {
+        model: "gemini-3-pro",
+        generationConfig: { thinkingConfig: { includeThoughts: true } },
+      },
+    },
+    {
+      provider: "gemini",
+      message: {
+        generationConfig: { thinkingConfig: { thinkingBudget: -2, thinkingLevel: null } },
+      },
+    },
+    {
+      provider: "gemini-cli",
+      message: { request: { generationConfig: { thinkingConfig: { thinkingBudget: 1.5 } } } },
+    },
+    {
+      provider: "openai-compatible",
+      message: { thinking: { type: "enabled", budget_tokens: 8192 } },
+    },
+  ])(
+    "does not infer native configuration for $provider from $message",
+    async ({ provider, message }) => {
+      const { session, specialSettings } = createSession(provider, message);
+      const originalMessage = JSON.stringify(message);
+
+      await ProxyMessageService.ensureContext(session);
+
+      expect(specialSettings).toEqual([]);
+      expect(createMessageRequestMock.mock.calls[0][0].special_settings).toBeNull();
+      expect(
+        extractThinkingEffortInfo(createMessageRequestMock.mock.calls[0][0].special_settings)
+      ).toBeNull();
+      expect(JSON.stringify(session.request.message)).toBe(originalMessage);
+    }
+  );
+
+  test("repeated capture retains the original configuration after provider mutations", async () => {
+    const { session, specialSettings } = createSession("claude", {
+      thinking: { type: "enabled", budget_tokens: 8192 },
+    });
+    await ProxyMessageService.ensureContext(session);
+    session.request.message.thinking = { type: "adaptive" };
+    session.request.message.output_config = { effort: "max" };
+
+    await ProxyMessageService.ensureContext(session);
+
+    expect(specialSettings).toEqual([
+      {
+        type: "native_thinking",
+        scope: "request",
+        hit: true,
+        protocol: "anthropic",
+        config: { effort: null, mode: "enabled", budgetTokens: 8192 },
+      },
+    ]);
+  });
+
+  test("a missing original config stays missing when a provider later supplies thinking", async () => {
+    const { session, specialSettings } = createSession("claude", { model: "claude-opus-4-6" });
+    await ProxyMessageService.ensureContext(session);
+    session.request.message.thinking = { type: "adaptive" };
+
+    await ProxyMessageService.ensureContext(session);
+
+    expect(specialSettings).toEqual([]);
+  });
+
+  test("an existing original audit is never rewritten from a changed request", async () => {
+    const { session, specialSettings } = createSession("gemini-cli", {
+      request: { generationConfig: { thinkingConfig: { thinkingBudget: 8192 } } },
+    });
+    specialSettings.push({
+      type: "native_thinking",
+      scope: "request",
+      hit: true,
+      protocol: "gemini",
+      config: { effort: null, mode: null, budgetTokens: 0 },
+    });
+
+    await ProxyMessageService.ensureContext(session);
+
+    expect(specialSettings).toHaveLength(1);
+    expect(extractThinkingEffortInfo(specialSettings)?.requested?.budgetTokens).toBe(0);
+  });
+
+  test.each([
+    { original: { effort: "low", mode: "enabled", budgetTokens: 8192 } },
+    { original: null },
+  ])(
+    "normalizes persisted original and actual provider-added config: $original",
+    async ({ original }) => {
+      const message: Record<string, unknown> = { model: "claude-opus-4-6", max_tokens: 64000 };
+      if (original) {
+        message.thinking = { type: original.mode, budget_tokens: original.budgetTokens };
+        message.output_config = { effort: original.effort };
+      }
+      const before = JSON.stringify(message);
+      let initialPersisted = "null";
+      createMessageRequestMock.mockImplementationOnce(async (data) => {
+        initialPersisted = JSON.stringify(data.special_settings);
+        return { id: 101, createdAt: new Date("2026-07-10") };
+      });
+      const { session, specialSettings } = createSession("claude", message);
+      await ProxyMessageService.ensureContext(session);
+      expect(extractThinkingEffortInfo(JSON.parse(initialPersisted))?.requested ?? null).toEqual(
+        original
+      );
+
+      const { request, audit } = applyAnthropicProviderOverridesWithAudit(
+        {
+          id: 9,
+          providerType: "claude",
+          anthropicAdaptiveThinking: {
+            effort: "high",
+            modelMatchMode: "all",
+            models: [],
+          },
+        },
+        message
+      );
+      expect(audit).not.toBeNull();
+      if (audit) session.addSpecialSetting(audit);
+      expect(request.thinking).toEqual({ type: "adaptive" });
+      expect(JSON.stringify(session.request.message)).toBe(before);
+
+      const persisted = JSON.parse(JSON.stringify(specialSettings));
+      expect(extractThinkingEffortInfo(persisted)).toEqual({
+        source: "anthropic",
+        requested: original,
+        effective: { effort: "high", mode: "adaptive", budgetTokens: null },
+        isOverridden: true,
+      });
+    }
+  );
 });

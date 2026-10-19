@@ -17,8 +17,12 @@ let mockIsFetchingNextPage = false;
 const useInfiniteQuerySpy = vi.hoisted(() => vi.fn());
 
 vi.mock("next-intl", () => ({
-  useTranslations: () => (key: string, values?: Record<string, string>) =>
-    key === "logs.billingDetails.unitPricePer1M" && values?.price ? `@ ${values.price} / 1M` : key,
+  useTranslations: () => (key: string, values?: Record<string, string | number>) =>
+    key === "budgetTokens"
+      ? `${values?.count} tokens`
+      : key === "logs.billingDetails.unitPricePer1M" && values?.price
+        ? `@ ${values.price} / 1M`
+        : key,
 }));
 
 vi.mock("@tanstack/react-query", () => ({
@@ -334,7 +338,6 @@ describe("virtualized-logs-table thinking effort", () => {
     const effortDisplay = container.querySelector('[data-slot="thinking-effort"]');
     expect(effortDisplay?.textContent).toContain("low");
     expect(effortDisplay?.textContent).toContain("max");
-    expect(effortDisplay?.closest(".overflow-visible")).not.toBeNull();
   });
 
   test("显示 Anthropic 请求的思考强度", () => {

@@ -36,8 +36,17 @@ function buildSettingKey(setting: SpecialSetting): string {
         setting.providerType ?? null,
         setting.hit,
         setting.changed,
-        [...setting.changes]
-          .map((change) => [change.path, change.before, change.after, change.changed] as const)
+        (Array.isArray(setting.changes) ? setting.changes : [])
+          .map(
+            (change) =>
+              [
+                change.path,
+                change.before,
+                change.after,
+                change.changed,
+                Object.hasOwn(change, "after"),
+              ] as const
+          )
           .sort((a, b) => a[0].localeCompare(b[0])),
       ]);
     case "response_fixer":
@@ -52,6 +61,29 @@ function buildSettingKey(setting: SpecialSetting): string {
       return JSON.stringify([setting.type, setting.guard, setting.action, setting.statusCode]);
     case "anthropic_effort":
       return JSON.stringify([setting.type, setting.hit, setting.effort]);
+    case "native_thinking":
+      return JSON.stringify([
+        setting.type,
+        setting.hit,
+        setting.protocol,
+        setting.config?.effort ?? null,
+        setting.config?.mode ?? null,
+        setting.config?.budgetTokens ?? null,
+      ]);
+    case "native_thinking_forwarded":
+      return JSON.stringify([
+        setting.type,
+        setting.hit,
+        setting.protocol,
+        setting.providerId,
+        setting.config == null
+          ? null
+          : [
+              setting.config.effort ?? null,
+              setting.config.mode ?? null,
+              setting.config.budgetTokens ?? null,
+            ],
+      ]);
     case "codex_reasoning_effort":
       return JSON.stringify([setting.type, setting.hit, setting.effort]);
     case "openai_reasoning_effort":
@@ -117,10 +149,14 @@ function buildSettingKey(setting: SpecialSetting): string {
         setting.trigger,
         setting.attemptNumber,
         setting.retryAttemptNumber,
-        setting.before.maxTokens,
-        setting.before.thinkingBudgetTokens,
-        setting.after.maxTokens,
-        setting.after.thinkingBudgetTokens,
+        setting.before?.maxTokens,
+        setting.before?.thinkingType,
+        setting.before?.thinkingBudgetTokens,
+        setting.after?.maxTokens,
+        setting.after?.thinkingType,
+        setting.after?.thinkingBudgetTokens,
+        setting.after != null && Object.hasOwn(setting.after, "thinkingType"),
+        setting.after != null && Object.hasOwn(setting.after, "thinkingBudgetTokens"),
       ]);
     case "billing_header_rectifier":
       return JSON.stringify([setting.type, setting.hit, setting.removedCount]);
@@ -183,6 +219,103 @@ function buildSettingKey(setting: SpecialSetting): string {
 }
 
 /**
+ * Reconcile independent snapshots of the same audit history before display deduplication.
+ * A shortest common supersequence aligns shared events while retaining their observed order,
+ * including repeated transitions within either snapshot (for example A-B-A).
+ * Earlier snapshots take precedence when the relative order of new events is unknown.
+ * The first snapshot with a forwarded observation owns that current state; later snapshots
+ * contribute diagnostic history but cannot resurrect a stale forwarded configuration.
+ */
+export function mergeSpecialSettingSnapshots(
+  snapshots: ReadonlyArray<readonly SpecialSetting[] | null | undefined>
+): SpecialSetting[] {
+  let merged: SpecialSetting[] = [];
+  let mergedKeys: string[] = [];
+  let hasForwardedObservation = false;
+
+  for (const source of snapshots) {
+    if (!source?.length) continue;
+    const containsForwarded = source.some(
+      (setting) => setting.type === "native_thinking_forwarded" && setting.hit
+    );
+    const snapshot =
+      hasForwardedObservation && containsForwarded
+        ? source.filter((setting) => setting.type !== "native_thinking_forwarded")
+        : source;
+    hasForwardedObservation ||= containsForwarded;
+    const snapshotKeys = snapshot.map(buildSettingKey);
+    if (merged.length === 0) {
+      merged = [...snapshot];
+      mergedKeys = snapshotKeys;
+      continue;
+    }
+    let commonPrefix = 0;
+    while (
+      commonPrefix < merged.length &&
+      commonPrefix < snapshot.length &&
+      mergedKeys[commonPrefix] === snapshotKeys[commonPrefix]
+    ) {
+      commonPrefix++;
+    }
+    if (commonPrefix === snapshot.length) continue;
+    if (commonPrefix === merged.length) {
+      for (let index = commonPrefix; index < snapshot.length; index++) {
+        merged.push(snapshot[index]);
+      }
+      mergedKeys = snapshotKeys;
+      continue;
+    }
+
+    const width = snapshot.length + 1;
+    const commonLengths = new Uint32Array((merged.length + 1) * width);
+    for (let left = merged.length - 1; left >= 0; left--) {
+      for (let right = snapshot.length - 1; right >= 0; right--) {
+        commonLengths[left * width + right] =
+          mergedKeys[left] === snapshotKeys[right]
+            ? 1 + commonLengths[(left + 1) * width + right + 1]
+            : Math.max(
+                commonLengths[(left + 1) * width + right],
+                commonLengths[left * width + right + 1]
+              );
+      }
+    }
+
+    const combined: SpecialSetting[] = [];
+    const combinedKeys: string[] = [];
+    let left = 0;
+    let right = 0;
+    while (left < merged.length || right < snapshot.length) {
+      if (
+        left < merged.length &&
+        right < snapshot.length &&
+        mergedKeys[left] === snapshotKeys[right]
+      ) {
+        combined.push(merged[left]);
+        combinedKeys.push(mergedKeys[left]);
+        left++;
+        right++;
+      } else if (
+        left < merged.length &&
+        (right === snapshot.length ||
+          commonLengths[(left + 1) * width + right] >= commonLengths[left * width + right + 1])
+      ) {
+        combined.push(merged[left]);
+        combinedKeys.push(mergedKeys[left]);
+        left++;
+      } else {
+        combined.push(snapshot[right]);
+        combinedKeys.push(snapshotKeys[right]);
+        right++;
+      }
+    }
+    merged = combined;
+    mergedKeys = combinedKeys;
+  }
+
+  return merged;
+}
+
+/**
  * 构建“统一特殊设置”展示数据
  *
  * 目标：把 DB 字段（blockedBy/cacheTtlApplied/context1mApplied）与既有 special_settings 合并，
@@ -224,9 +357,15 @@ export function buildUnifiedSpecialSettings(
 
   const seen = new Set<string>();
   const result: SpecialSetting[] = [];
+  let previousKey: string | null = null;
   for (const item of [...base, ...derived]) {
     const key = buildSettingKey(item);
-    if (seen.has(key)) continue;
+    const isOrderedTransition =
+      item.type === "provider_parameter_override" ||
+      item.type === "thinking_budget_rectifier" ||
+      item.type === "thinking_effort_conflict_rectifier";
+    if (isOrderedTransition ? previousKey === key : seen.has(key)) continue;
+    previousKey = key;
     seen.add(key);
     result.push(item);
   }

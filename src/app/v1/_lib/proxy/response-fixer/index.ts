@@ -1,11 +1,10 @@
 import { getCachedSystemSettings } from "@/lib/config";
 import { logger } from "@/lib/logger";
-import { SessionManager } from "@/lib/session-manager";
-import { updateMessageRequestDetails } from "@/repository/message";
 import type { ResponseFixerSpecialSetting } from "@/types/special-settings";
 import type { ResponseFixerConfig } from "@/types/system-config";
 import { normalizeResponseOutput } from "../response-output-normalizer";
 import type { ProxySession } from "../session";
+import { persistSpecialSettings } from "../special-settings-persistence";
 import { EncodingFixer } from "./encoding-fixer";
 import { JsonFixer } from "./json-fixer";
 import { SseFixer } from "./sse-fixer";
@@ -226,33 +225,13 @@ class ChunkBuffer {
   }
 }
 
-function persistSpecialSettings(session: ProxySession): void {
-  const specialSettings = session.getSpecialSettings();
-  if (!specialSettings || specialSettings.length === 0) return;
-
-  if (session.sessionId && session.shouldPersistSessionDebugArtifacts()) {
-    void SessionManager.storeSessionSpecialSettings(
-      session.sessionId,
-      specialSettings,
-      session.requestSequence
-    ).catch((err) => {
-      logger.error("[ResponseFixer] Failed to store special settings", {
-        error: err,
-        sessionId: session.sessionId,
-      });
+function persistResponseFixerSpecialSettings(session: ProxySession): void {
+  void persistSpecialSettings(session).catch((error) => {
+    logger.error("[ResponseFixer] Failed to persist special settings", {
+      error,
+      messageRequestId: session.messageContext?.id,
     });
-  }
-
-  if (session.messageContext?.id) {
-    void updateMessageRequestDetails(session.messageContext.id, {
-      specialSettings,
-    }).catch((err) => {
-      logger.error("[ResponseFixer] Failed to persist special settings", {
-        error: err,
-        messageRequestId: session.messageContext?.id,
-      });
-    });
-  }
+  });
 }
 
 export class ResponseFixer {
@@ -328,7 +307,7 @@ export class ResponseFixer {
 
     if (audit.hit) {
       session.addSpecialSetting(audit);
-      persistSpecialSettings(session);
+      persistResponseFixerSpecialSettings(session);
     }
 
     const headers = cleanResponseHeaders(response.headers);
@@ -454,7 +433,7 @@ export class ResponseFixer {
 
         if (audit.hit) {
           session.addSpecialSetting(audit);
-          persistSpecialSettings(session);
+          persistResponseFixerSpecialSettings(session);
         }
       },
     });

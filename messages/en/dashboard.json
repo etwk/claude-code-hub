@@ -137,8 +137,8 @@
       "ip": "IP",
       "provider": "Provider",
       "model": "Billing Model",
-      "reasoningEffort": "Reasoning Effort",
-      "reasoningEffortTooltip": "Thinking effort of the model request",
+      "reasoningEffort": "Thinking",
+      "reasoningEffortTooltip": "Recorded thinking mode, effort / level, and token budget; changes show requested and forwarded values",
       "endpoint": "Endpoint",
       "inputTokens": "Input",
       "outputTokens": "Output",
@@ -408,11 +408,6 @@
         "technicalTimeline": "Technical Timeline",
         "copyTimeline": "Copy Timeline"
       },
-      "effort": {
-        "label": "Effort",
-        "overridden": "Overridden by provider",
-        "tooltip": "Thinking effort requested by the client (output_config.effort), shown verbatim. The proxy does not rename or convert levels."
-      },
       "routingTrace": {
         "title": "Routing mode",
         "modes": {
@@ -551,15 +546,29 @@
           "winner_committed": "Another provider was committed"
         }
       },
-      "reasoningEffort": {
-        "label": "Reasoning effort",
-        "overridden": "Overridden by provider",
-        "tooltip": "Thinking effort in the Codex request (reasoning.effort), shown verbatim."
-      },
-      "reasoningEffortOpenai": {
-        "label": "Reasoning effort",
-        "overridden": "Overridden by provider",
-        "tooltip": "Thinking effort in the OpenAI chat/completions request (reasoning_effort / reasoning.effort), shown verbatim."
+      "thinkingConfig": {
+        "label": "Thinking configuration",
+        "requested": "Requested",
+        "effective": "Forwarded",
+        "notSpecified": "Not specified",
+        "removed": "Removed",
+        "overridden": "Changed before forwarding",
+        "effort": "Effort / level",
+        "mode": "Mode",
+        "budget": "Token budget",
+        "budgetTokens": "{count} tokens",
+        "dynamic": "Dynamic",
+        "modes": {
+          "enabled": "Enabled",
+          "adaptive": "Adaptive",
+          "disabled": "Disabled"
+        },
+        "tooltips": {
+          "codex": "Recorded Codex reasoning.effort, shown verbatim. Missing values do not imply a model default.",
+          "openai": "Recorded OpenAI reasoning_effort / reasoning.effort, shown verbatim. Missing values do not imply a model default.",
+          "anthropic": "Recorded Claude thinking.type, thinking.budget_tokens, and output_config.effort. Disabled mode takes precedence over any remaining effort or budget; missing values do not imply a model default.",
+          "gemini": "Recorded Gemini thinkingLevel and thinkingBudget. Levels are shown verbatim; -1 is dynamic and 0 disables thinking. Missing values do not imply a model default."
+        }
       },
       "logicTrace": {
         "title": "Decision Chain",

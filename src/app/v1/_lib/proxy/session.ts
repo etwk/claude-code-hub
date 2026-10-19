@@ -44,7 +44,7 @@ import {
   type RoutingTraceV1,
 } from "@/types/routing-trace";
 import type { SessionIdentityMetadata } from "@/types/session";
-import type { SpecialSetting } from "@/types/special-settings";
+import type { SpecialSetting, ThinkingConfigValue } from "@/types/special-settings";
 import type { BillingModelSource, CodexPriorityBillingSource } from "@/types/system-config";
 import type { User } from "@/types/user";
 import type { AffinityLookupResult } from "./affinity/affinity-store";
@@ -646,6 +646,25 @@ export class ProxySession {
 
   addSpecialSetting(setting: SpecialSetting): void {
     this.specialSettings.push(setting);
+  }
+
+  /** Replace this attempt's outgoing observation without mutating snapshots shared by hedges. */
+  recordNativeThinkingForwarded(
+    protocol: "anthropic" | "gemini",
+    providerId: number,
+    config: ThinkingConfigValue | null
+  ): void {
+    this.specialSettings = [
+      ...this.specialSettings.filter((setting) => setting.type !== "native_thinking_forwarded"),
+      {
+        type: "native_thinking_forwarded",
+        scope: "provider",
+        hit: true,
+        protocol,
+        providerId,
+        config: config ? { ...config } : null,
+      },
+    ];
   }
 
   getSpecialSettings(): SpecialSetting[] | null {

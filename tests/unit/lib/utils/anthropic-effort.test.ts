@@ -1,197 +1,123 @@
 import { describe, expect, test } from "vitest";
+import { extractAnthropicEffortFromSpecialSettings } from "@/lib/utils/anthropic-effort";
 import type { SpecialSetting } from "@/types/special-settings";
-import {
-  extractAnthropicEffortInfo,
-  type AnthropicEffortOverrideInfo,
-} from "@/lib/utils/anthropic-effort";
 
-describe("extractAnthropicEffortInfo", () => {
-  const cases: Array<{
-    name: string;
-    input: SpecialSetting[] | null | undefined;
-    expected: AnthropicEffortOverrideInfo | null;
-  }> = [
-    {
-      name: "null specialSettings returns null",
-      input: null,
-      expected: null,
-    },
-    {
-      name: "undefined specialSettings returns null",
-      input: undefined,
-      expected: null,
-    },
-    {
-      name: "empty array returns null",
-      input: [],
-      expected: null,
-    },
-    {
-      name: "no effort-related settings returns null",
-      input: [
-        {
-          type: "response_fixer",
-          scope: "response",
-          hit: true,
-          fixersApplied: [],
-          totalBytesProcessed: 0,
-          processingTimeMs: 0,
-        },
-      ],
-      expected: null,
-    },
-    {
-      name: "anthropic_effort only (no override) returns original effort",
-      input: [
-        {
-          type: "anthropic_effort",
-          scope: "request",
-          hit: true,
-          effort: "medium",
-        },
-      ],
-      expected: {
-        originalEffort: "medium",
-        overriddenEffort: null,
-        isOverridden: false,
+describe("extractAnthropicEffortFromSpecialSettings", () => {
+  test.each([null, undefined, []])("returns null for absent history %j", (settings) => {
+    expect(extractAnthropicEffortFromSpecialSettings(settings)).toBeNull();
+  });
+
+  test.each(["medium", "auto", "experimental-effort"])(
+    "preserves historical effort %s",
+    (effort) => {
+      expect(
+        extractAnthropicEffortFromSpecialSettings([
+          {
+            type: "anthropic_effort",
+            scope: "request",
+            hit: true,
+            effort,
+          },
+        ])
+      ).toBe(effort);
+    }
+  );
+
+  test("retains the historical whitespace normalization and skips blank values", () => {
+    expect(
+      extractAnthropicEffortFromSpecialSettings([
+        { type: "anthropic_effort", scope: "request", hit: true, effort: " " },
+        { type: "anthropic_effort", scope: "request", hit: true, effort: "  high  " },
+      ])
+    ).toBe("high");
+  });
+
+  test("canonical native Claude effort supplies the repository's public effort field", () => {
+    const settings: SpecialSetting[] = [
+      {
+        type: "native_thinking",
+        scope: "request",
+        hit: true,
+        protocol: "anthropic",
+        config: { effort: "  MAX  ", mode: "adaptive", budgetTokens: null },
       },
-    },
-    {
-      name: "anthropic_effort + override with changed:true returns overridden info",
-      input: [
+    ];
+    expect(extractAnthropicEffortFromSpecialSettings(JSON.parse(JSON.stringify(settings)))).toBe(
+      "  MAX  "
+    );
+  });
+
+  test("canonical absence is not overwritten by obsolete duplicated effort facts", () => {
+    expect(
+      extractAnthropicEffortFromSpecialSettings([
+        { type: "anthropic_effort", scope: "request", hit: true, effort: "high" },
         {
-          type: "anthropic_effort",
+          type: "native_thinking",
           scope: "request",
           hit: true,
-          effort: "medium",
+          protocol: "anthropic",
+          config: { effort: null, mode: "disabled", budgetTokens: null },
+        },
+      ])
+    ).toBeNull();
+  });
+
+  test("Gemini levels and unapplied native audits do not populate Anthropic effort", () => {
+    expect(
+      extractAnthropicEffortFromSpecialSettings([
+        {
+          type: "native_thinking",
+          scope: "request",
+          hit: true,
+          protocol: "gemini",
+          config: { effort: "HIGH", mode: null, budgetTokens: null },
+        },
+        {
+          type: "native_thinking",
+          scope: "request",
+          hit: false,
+          protocol: "anthropic",
+          config: { effort: "max", mode: "adaptive", budgetTokens: null },
+        },
+      ])
+    ).toBeNull();
+  });
+
+  test("provider override audits do not rewrite the original public effort field", () => {
+    expect(
+      extractAnthropicEffortFromSpecialSettings([
+        {
+          type: "native_thinking",
+          scope: "request",
+          hit: true,
+          protocol: "anthropic",
+          config: { effort: "low", mode: "adaptive", budgetTokens: null },
         },
         {
           type: "provider_parameter_override",
           scope: "provider",
-          providerId: 1,
-          providerName: "test",
-          providerType: "claude",
           hit: true,
           changed: true,
-          changes: [
-            { path: "max_tokens", before: 1024, after: 1024, changed: false },
-            { path: "output_config.effort", before: "medium", after: "high", changed: true },
-          ],
-        },
-      ],
-      expected: {
-        originalEffort: "medium",
-        overriddenEffort: "high",
-        isOverridden: true,
-      },
-    },
-    {
-      name: "override with changed:false returns non-overridden info",
-      input: [
-        {
-          type: "anthropic_effort",
-          scope: "request",
-          hit: true,
-          effort: "high",
-        },
-        {
-          type: "provider_parameter_override",
-          scope: "provider",
           providerId: 1,
-          providerName: "test",
+          providerName: "provider",
           providerType: "claude",
-          hit: true,
-          changed: false,
-          changes: [
-            { path: "output_config.effort", before: "high", after: "high", changed: false },
-          ],
-        },
-      ],
-      expected: {
-        originalEffort: "high",
-        overriddenEffort: null,
-        isOverridden: false,
-      },
-    },
-    {
-      name: "fallback: no anthropic_effort but override exists uses before as original",
-      input: [
-        {
-          type: "provider_parameter_override",
-          scope: "provider",
-          providerId: 1,
-          providerName: "test",
-          providerType: "claude",
-          hit: true,
-          changed: true,
           changes: [{ path: "output_config.effort", before: "low", after: "max", changed: true }],
         },
-      ],
-      expected: {
-        originalEffort: "low",
-        overriddenEffort: "max",
-        isOverridden: true,
-      },
-    },
-    {
-      name: "override with no effort path returns effort from anthropic_effort only",
-      input: [
-        {
-          type: "anthropic_effort",
-          scope: "request",
-          hit: true,
-          effort: "auto",
-        },
-        {
-          type: "provider_parameter_override",
-          scope: "provider",
-          providerId: 1,
-          providerName: "test",
-          providerType: "claude",
-          hit: true,
-          changed: true,
-          changes: [{ path: "max_tokens", before: 1024, after: 2048, changed: true }],
-        },
-      ],
-      expected: {
-        originalEffort: "auto",
-        overriddenEffort: null,
-        isOverridden: false,
-      },
-    },
-    {
-      name: "anthropic_effort with whitespace-only effort is ignored",
-      input: [
-        {
-          type: "anthropic_effort",
-          scope: "request",
-          hit: true,
-          effort: "   ",
-        },
-      ],
-      expected: null,
-    },
-    {
-      name: "override changed:true but both originalEffort and overrideBefore are null returns null",
-      input: [
-        {
-          type: "provider_parameter_override",
-          scope: "provider",
-          providerId: 1,
-          providerName: "test",
-          providerType: "claude",
-          hit: true,
-          changed: true,
-          changes: [{ path: "output_config.effort", before: null, after: "high", changed: true }],
-        },
-      ],
-      expected: null,
-    },
-  ];
+      ])
+    ).toBe("low");
+  });
 
-  for (const { name, input, expected } of cases) {
-    test(name, () => {
-      expect(extractAnthropicEffortInfo(input)).toEqual(expected);
-    });
-  }
+  test("malformed historical/native effort never supplies a fabricated string", () => {
+    expect(
+      extractAnthropicEffortFromSpecialSettings([
+        { type: "anthropic_effort", effort: 5 },
+        { type: "native_thinking", protocol: "gemini", config: { effort: "high" } },
+      ] as SpecialSetting[])
+    ).toBeNull();
+    expect(
+      extractAnthropicEffortFromSpecialSettings([
+        { type: "native_thinking", protocol: "anthropic" },
+      ] as SpecialSetting[])
+    ).toBeNull();
+  });
 });
