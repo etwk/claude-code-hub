@@ -1487,7 +1487,7 @@ async function tryApplyReactiveRectifier(params: {
         retryAttemptNumber,
       })
     );
-    await persistSpecialSettings(persistSession);
+    void persistSpecialSettings(persistSession);
 
     if (!rectified.applied) {
       return {
@@ -3371,7 +3371,7 @@ export class ProxyForwarder {
           bodyToSerialize = overriddenBody;
           session.request.message = overriddenBody;
 
-          await persistSpecialSettings(session);
+          void persistSpecialSettings(session);
         }
 
         // 检测流式请求：Gemini 支持两种方式
@@ -3427,7 +3427,7 @@ export class ProxyForwarder {
         const bodyString = JSON.stringify(bodyToSerialize);
         requestBody = bodyString;
         session.forwardedRequestBody = retainForwardedBody ? bodyString : null;
-        await persistSpecialSettings(session);
+        void persistSpecialSettings(session);
       } else {
         // No body: still need streaming detection, auth, URL, headers
         const geminiPathname = session.requestUrl.pathname || "";
@@ -3502,7 +3502,7 @@ export class ProxyForwarder {
 
           if (audit) {
             session.addSpecialSetting(audit);
-            await persistSpecialSettings(session);
+            void persistSpecialSettings(session);
           }
         }
 
@@ -3530,7 +3530,7 @@ export class ProxyForwarder {
                   providerName: provider.name,
                   removedCount: billingResult.removedCount,
                 });
-                await persistSpecialSettings(session);
+                void persistSpecialSettings(session);
               }
             }
           }
@@ -3544,7 +3544,7 @@ export class ProxyForwarder {
 
           if (anthropicAudit) {
             session.addSpecialSetting(anthropicAudit);
-            await persistSpecialSettings(session);
+            void persistSpecialSettings(session);
           }
         }
 
@@ -3759,7 +3759,7 @@ export class ProxyForwarder {
             if (injection) {
               messageToSend = injection.message;
               session.addSpecialSetting(injection.audit);
-              await persistSpecialSettings(session);
+              void persistSpecialSettings(session);
             }
           }
 
@@ -3802,7 +3802,7 @@ export class ProxyForwarder {
             : bodyString;
           session.forwardedRequestBody = retainForwardedBody ? bodyString : null;
           isStreaming = !isSystemOneEndpointPath(requestPath) && messageToSend.stream === true;
-          if (isAnthropicProvider) await persistSpecialSettings(session);
+          if (isAnthropicProvider) void persistSpecialSettings(session);
 
           if (process.env.NODE_ENV === "development") {
             logger.trace("ProxyForwarder: Forwarding request", {

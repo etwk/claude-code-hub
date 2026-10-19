@@ -526,6 +526,59 @@ describe("ProxyForwarder final native thinking observations", () => {
     }
   );
 
+  test.each(
+    (["claude", "claude-auth", "gemini", "gemini-cli"] as const).flatMap((providerType) =>
+      [false, true].map((hasThinking) => ({ providerType, hasThinking }))
+    )
+  )(
+    "dispatches $providerType with hasThinking=$hasThinking while audit storage is stalled",
+    async ({ providerType, hasThinking }) => {
+      vi.useFakeTimers();
+      const provider = createProvider(providerType);
+      provider.requestTimeoutNonStreamingMs = 20;
+      const anthropic = providerType.startsWith("claude");
+      const nativeBody = hasThinking
+        ? anthropic
+          ? { thinking: { type: "enabled", budget_tokens: 8192 } }
+          : { generationConfig: { thinkingConfig: { thinkingBudget: 8192 } } }
+        : {};
+      const session = createSession(
+        providerType === "gemini-cli" ? { request: nativeBody } : nativeBody,
+        provider
+      );
+      const auditWrite = Promise.withResolvers<void>();
+      mocks.updateMessageRequestDetails.mockImplementationOnce(() => auditWrite.promise);
+      vi.spyOn(internals, "fetchWithoutAutoDecode").mockResolvedValueOnce(okResponse());
+      let dispatched: Response | undefined;
+      const pending = internals.doForward(session, provider, provider.url).then((response) => {
+        dispatched = response;
+        return response;
+      });
+
+      try {
+        await vi.advanceTimersByTimeAsync(1);
+        if (!dispatched) throw new Error("Audit storage blocked upstream dispatch");
+        expect(await dispatched.text()).toContain('"text":"ok"');
+        expect(outgoingSettings(session)[0].config).toEqual(
+          !hasThinking
+            ? null
+            : {
+                effort: null,
+                mode: anthropic ? "enabled" : null,
+                budgetTokens: 8192,
+              }
+        );
+      } finally {
+        auditWrite.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+        const response = await pending;
+        if (!response.bodyUsed) await response.body?.cancel();
+        release(session);
+        vi.useRealTimers();
+      }
+    }
+  );
+
   test.each(["commit", "fail", "override"] as const)(
     "a pending loser's %s finishes before the selected provider's audit is persisted",
     async (firstWriteOutcome) => {
@@ -566,12 +619,24 @@ describe("ProxyForwarder final native thinking observations", () => {
           outgoing.thinking = { type: "disabled" };
         }
       });
-      vi.spyOn(internals, "fetchWithoutAutoDecode").mockResolvedValue(
-        new Response(
-          'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n\n',
+      vi.spyOn(internals, "fetchWithoutAutoDecode").mockImplementation(async (_url, init) => {
+        const wins = JSON.parse(String(init.body)).thinking.type === "disabled";
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              if (wins) {
+                controller.enqueue(
+                  new TextEncoder().encode(
+                    'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n\n'
+                  )
+                );
+                controller.close();
+              }
+            },
+          }),
           { headers: { "content-type": "text/event-stream" } }
-        )
-      );
+        );
+      });
       const outcome = ProxyForwarder.send(session).then(
         (response) => ({ response, error: null }),
         (error: unknown) => ({ response: null, error })
@@ -581,6 +646,7 @@ describe("ProxyForwarder final native thinking observations", () => {
         await vi.advanceTimersByTimeAsync(25);
         expect(session.provider?.id).toBe(alternative.id);
         resumeFirstWrite();
+        await vi.advanceTimersByTimeAsync(0);
         const result = await outcome;
         if (!result.response) throw result.error;
         expect(await result.response.text()).toContain("ok");
