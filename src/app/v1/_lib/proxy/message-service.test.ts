@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { applyAnthropicProviderOverridesWithAudit } from "@/lib/anthropic/provider-overrides";
 import { extractThinkingEffortInfo } from "@/lib/utils/thinking-effort";
-import type { ProxySession } from "./session";
+import { ProxySession } from "./session";
 
 const createMessageRequestMock = vi.hoisted(() => vi.fn());
 
@@ -18,7 +18,20 @@ function createSession(
 ) {
   const specialSettings: NonNullable<ReturnType<ProxySession["getSpecialSettings"]>> = [];
   const setMessageContext = vi.fn();
-  const session = {
+  const session = Reflect.construct(ProxySession, [
+    {
+      startTime: Date.now(),
+      method: "POST",
+      requestUrl: new URL(`https://proxy.example.com${endpoint}`),
+      headers: new Headers(),
+      headerLog: "",
+      request: { model: "gpt-5", message, log: JSON.stringify(message) },
+      userAgent: null,
+      context: null,
+      clientAbortSignal: null,
+    },
+  ]) as ProxySession;
+  Object.assign(session, {
     authState: {
       success: true,
       user: { id: 7 },
@@ -51,7 +64,7 @@ function createSession(
       fingerprints: ["fp-deep", "fp-mid"],
     }),
     setMessageContext,
-  } as unknown as ProxySession;
+  });
 
   return { session, specialSettings, setMessageContext };
 }
@@ -265,6 +278,50 @@ describe("ProxyMessageService Codex reasoning effort audit", () => {
     expect(specialSettings).toHaveLength(1);
   });
 });
+
+test.each(
+  (["claude", "claude-auth", "gemini", "gemini-cli"] as const).flatMap((providerType) =>
+    (["rewrite", "remove", "add"] as const).map((operation) => ({ providerType, operation }))
+  )
+)(
+  "preserves requested $providerType thinking when guard filters $operation its fields",
+  async ({ providerType, operation }) => {
+    createMessageRequestMock.mockResolvedValue({ id: 101, createdAt: new Date("2026-07-10") });
+    const anthropic = providerType.startsWith("claude");
+    const native: Record<string, unknown> =
+      operation === "add"
+        ? {}
+        : anthropic
+          ? { thinking: { type: "enabled", budget_tokens: 8192 } }
+          : { generationConfig: { thinkingConfig: { thinkingBudget: 8192 } } };
+    const message = providerType === "gemini-cli" ? { request: native } : native;
+    const { session, specialSettings } = createSession(providerType, message);
+
+    if (operation === "remove") {
+      delete native.thinking;
+      delete native.generationConfig;
+    } else if (anthropic) {
+      native.thinking = { type: "disabled", budget_tokens: 0 };
+    } else {
+      native.generationConfig = { thinkingConfig: { thinkingBudget: 0 } };
+    }
+    await ProxyMessageService.ensureContext(session);
+
+    expect(specialSettings.filter((setting) => setting.type === "native_thinking")).toEqual(
+      operation === "add"
+        ? []
+        : [
+            {
+              type: "native_thinking",
+              scope: "request",
+              hit: true,
+              protocol: anthropic ? "anthropic" : "gemini",
+              config: { effort: null, mode: anthropic ? "enabled" : null, budgetTokens: 8192 },
+            },
+          ]
+    );
+  }
+);
 
 describe("ProxyMessageService native reasoning audit", () => {
   beforeEach(() => {

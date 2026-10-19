@@ -1,16 +1,11 @@
 import { normalizeEndpointPath, V1_ENDPOINT_PATHS } from "@/app/v1/_lib/proxy/endpoint-paths";
 import { extractCodexReasoningEffortFromRequestBody } from "@/lib/utils/codex-reasoning-effort";
-import { extractNativeThinkingConfigFromRequestBody } from "@/lib/utils/native-thinking";
 import { extractOpenAIReasoningEffortFromRequestBody } from "@/lib/utils/openai-reasoning-effort";
 import { createMessageRequest } from "@/repository/message";
 import type { ProxySession } from "./session";
 
 /** 在供应商确定后创建请求使用记录，并补齐需要随记录持久化的请求审计。 */
 export class ProxyMessageService {
-  // Missing configuration is also captured once: retries must not relabel provider-added values
-  // as the original request. Weak references keep this state bounded by the request lifetime.
-  private static readonly nativeThinkingCaptured = new WeakSet<ProxySession>();
-
   /**
    * 为当前代理请求创建持久化上下文。
    *
@@ -52,25 +47,19 @@ export class ProxyMessageService {
         : provider.providerType === "gemini" || provider.providerType === "gemini-cli"
           ? "gemini"
           : null;
-    if (nativeProtocol && !ProxyMessageService.nativeThinkingCaptured.has(session)) {
-      ProxyMessageService.nativeThinkingCaptured.add(session);
+    if (nativeProtocol) {
       const hasNativeAudit = session
         .getSpecialSettings()
         ?.some((setting) => setting.type === "native_thinking");
-      if (!hasNativeAudit) {
-        const config = extractNativeThinkingConfigFromRequestBody(
-          session.request.message,
-          nativeProtocol
-        );
-        if (config) {
-          session.addSpecialSetting({
-            type: "native_thinking",
-            scope: "request",
-            hit: true,
-            protocol: nativeProtocol,
-            config,
-          });
-        }
+      const config = session.getOriginalNativeThinkingConfig(nativeProtocol);
+      if (!hasNativeAudit && config) {
+        session.addSpecialSetting({
+          type: "native_thinking",
+          scope: "request",
+          hit: true,
+          protocol: nativeProtocol,
+          config: { ...config },
+        });
       }
     }
 
