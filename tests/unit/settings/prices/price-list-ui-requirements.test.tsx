@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { NextIntlClientProvider } from "next-intl";
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { PriceList } from "@/app/[locale]/settings/prices/_components/price-list";
 import type { ModelPrice } from "@/types/model-price";
 import { loadMessages } from "./test-messages";
@@ -43,9 +43,18 @@ function render(node: ReactNode) {
 }
 
 describe("PriceList: UI 需求覆盖", () => {
+  const originalFetch = globalThis.fetch;
+
   beforeEach(() => {
     vi.clearAllMocks();
     document.body.innerHTML = "";
+    globalThis.fetch = vi.fn(async () => ({
+      json: async () => ({ ok: true, data: { vendors: [], version: "test" } }),
+    })) as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
   });
 
   test("应移除提供商列，并新增合并价格列与缓存列", () => {

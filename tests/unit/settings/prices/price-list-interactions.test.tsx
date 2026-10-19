@@ -402,4 +402,51 @@ describe("PriceList: 交互与数据刷新", () => {
 
     unmount();
   });
+
+  test("卸载时应中止未完成的 vendor 请求且不输出错误日志", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let capturedSignal: AbortSignal | undefined;
+    const { promise: pendingVendors, reject: rejectVendors } = Promise.withResolvers<Response>();
+
+    const fetchMock = vi.fn((_input: unknown, init?: RequestInit) => {
+      capturedSignal = init?.signal ?? undefined;
+      return pendingVendors;
+    });
+    // Vitest mock signature is structurally compatible with global fetch in this test.
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const { unmount } = render(
+      <NextIntlClientProvider locale="en" messages={messages}>
+        <PriceList
+          initialPrices={[baseModel]}
+          initialTotal={1}
+          initialPage={1}
+          initialPageSize={50}
+          initialSearchTerm=""
+          initialSourceFilter=""
+          initialVendorFilter=""
+        />
+      </NextIntlClientProvider>
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/prices/vendors",
+      expect.objectContaining({
+        cache: "no-store",
+        signal: expect.any(AbortSignal),
+      })
+    );
+    expect(capturedSignal?.aborted).toBe(false);
+
+    unmount();
+    expect(capturedSignal?.aborted).toBe(true);
+
+    await act(async () => {
+      rejectVendors(new DOMException("The operation was aborted.", "AbortError"));
+      await flushPromises();
+    });
+
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
 });
