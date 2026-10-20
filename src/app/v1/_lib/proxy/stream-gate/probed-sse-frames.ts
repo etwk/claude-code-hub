@@ -24,6 +24,8 @@ export class ProbedSseFrames {
   private trailingBytes = 0;
   private preview = "";
   private inferencePreview = "";
+  /** 同一流已出现工具调用打开帧；与 createStreamFrameClassifier 的流级语义一致。 */
+  private toolCallOpen = false;
   lastFrame: {
     verdict: FrameVerdict;
     acceptTerminal: boolean;
@@ -190,8 +192,14 @@ export class ProbedSseFrames {
   private flush(visitor: SseFrameVisitor): boolean {
     let keepGoing = true;
     if (this.dataLines > 0) {
+      const frame = this.probe.finish(this.event, this.preview, this.dataLength);
+      this.toolCallOpen ||= frame.toolCallOpen;
       this.lastFrame = {
-        ...this.probe.finish(this.event, this.preview, this.dataLength),
+        verdict:
+          frame.verdict === "neutral" && this.toolCallOpen && frame.toolCallClose
+            ? "content"
+            : frame.verdict,
+        acceptTerminal: frame.acceptTerminal,
         dataBytes: this.dataBytes,
         echo: isRequestEchoFrame(this.family, this.event, this.preview),
         inferenceText: this.inferencePreview,

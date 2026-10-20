@@ -11,6 +11,8 @@
  * 判定优先级：doneSentinel(terminal) > malformed(非 JSON) > error > content > terminalRules > neutral。
  * error 先于 content：fake-200 上游可能在 error 帧里附带残缺内容字段。
  * 未知事件一律中性（provider 新增 lifecycle 事件前向兼容）。
+ * 单帧分类无状态；无参数工具调用的完成帧需要同一流此前的工具块，由
+ * createStreamFrameClassifier（及增量探针的 ProbedSseFrames）在流级累积。
  *
  * 规则数据移植自 CCHP generated/content_signals.json（团队拥有版权），
  * 求值语义与 CCHP pkg/protocol/sdkcatalog/content_gate.go 对齐：
@@ -38,6 +40,11 @@ interface FrameRule {
 
 interface StreamSignal {
   contentRules: FrameRule[];
+  /**
+   * 无参数工具调用：open 帧（工具块/调用的 id、name 元数据）本身中性；close 帧
+   * （stop_reason=tool_use 等完成原因）只有在同一流此前或同帧命中过 open 时才算内容。
+   */
+  toolCallRules?: { open: FrameRule[]; close: FrameRule[] };
   errorRules: FrameRule[];
   terminalRules?: FrameRule[];
   terminalEvents?: string[];
@@ -48,12 +55,15 @@ export const STREAM_SIGNALS: Record<ProtocolFamily, StreamSignal> = {
   anthropic: {
     contentRules: [
       {
-        // text / input_json / thinking / signature / citations / compaction deltas
+        // text / input_json / thinking / estimated_tokens / signature / citations / compaction deltas。
+        // adaptive/omitted thinking 的进度帧 thinking 为空串，但数值 estimated_tokens 已表示
+        // 模型正在产出思考；null 占位帧保持中性。
         eventTypes: ["content_block_delta"],
         anyPaths: [
           "delta.text",
           "delta.partial_json",
           "delta.thinking",
+          "delta.estimated_tokens",
           "delta.signature",
           "delta.citation",
           "delta.content",
@@ -61,8 +71,9 @@ export const STREAM_SIGNALS: Record<ProtocolFamily, StreamSignal> = {
         ],
       },
       {
-        // start 帧即携带完整实体 payload 的内容块。tool_use 系列只提供 id/name，
-        // Anthropic SDK 需要后续 input_json_delta 才能得到可执行 input，不能在这里提交。
+        // start 帧即携带完整实体 payload 的内容块。tool_use 系列通常只带 id/name 与空
+        // input:{}，需等待后续 input_json_delta 或无参数调用的完成原因（见 toolCallRules）；
+        // 上游若在 start 帧内联非空 input 则已是可执行调用，可直接提交。
         eventTypes: ["content_block_start"],
         anyPaths: [
           "content_block.data",
@@ -72,11 +83,15 @@ export const STREAM_SIGNALS: Record<ProtocolFamily, StreamSignal> = {
           "content_block.fileId",
           "content_block.url",
           "content_block.result",
+          "content_block.input",
         ],
         valueMatches: [
           {
             path: "content_block.type",
             values: [
+              "tool_use",
+              "server_tool_use",
+              "mcp_tool_use",
               "redacted_thinking",
               "compaction",
               "web_search_tool_result",
@@ -99,6 +114,29 @@ export const STREAM_SIGNALS: Record<ProtocolFamily, StreamSignal> = {
         valueMatches: [{ path: "delta.stop_reason", values: ["refusal"] }],
       },
     ],
+    toolCallRules: {
+      // 工具块 start 只带 id/name 与空 input:{}；无参数调用此后只有空 partial_json，直到
+      // stop_reason=tool_use / pause_turn 才宣告调用完成。没有任何工具块就只给出该终止
+      // 原因的畸形流不可交付，仍按空流拒绝。
+      open: [
+        {
+          eventTypes: ["content_block_start"],
+          anyPaths: ["content_block.name"],
+          valueMatches: [
+            {
+              path: "content_block.type",
+              values: ["tool_use", "server_tool_use", "mcp_tool_use"],
+            },
+          ],
+        },
+      ],
+      close: [
+        {
+          eventTypes: ["message_delta"],
+          valueMatches: [{ path: "delta.stop_reason", values: ["tool_use", "pause_turn"] }],
+        },
+      ],
+    },
     errorRules: [
       // SSE event: error + data {"type":"error","error":{...}}
       { eventTypes: ["error", "response.error"] },
@@ -122,6 +160,25 @@ export const STREAM_SIGNALS: Record<ProtocolFamily, StreamSignal> = {
         ],
       },
     ],
+    toolCallRules: {
+      // 无参数调用的 delta 只带 name 与 arguments:""，直到 finish_reason=tool_calls /
+      // function_call 才宣告调用完成；两者可能出现在同一 chunk。
+      open: [
+        {
+          anyPaths: [
+            "choices.#.delta.tool_calls.#.function.name",
+            "choices.#.delta.function_call.name",
+          ],
+        },
+      ],
+      close: [
+        {
+          valueMatches: [
+            { path: "choices.#.finish_reason", values: ["tool_calls", "function_call"] },
+          ],
+        },
+      ],
+    },
     errorRules: [
       // data: {"error":{...}} 可出现在流中任意位置
       { anyPaths: ["error"] },
@@ -198,6 +255,30 @@ export const STREAM_SIGNALS: Record<ProtocolFamily, StreamSignal> = {
           "item.operation",
         ],
       },
+      {
+        // 服务端工具（image_generation / file_search / mcp / code_interpreter）在 done 中携带结果；
+        // 失败的调用同样可能带结果字段，随后才是 response.failed，只有明确成功完成才可提交。
+        eventTypes: ["response.output_item.done"],
+        anyPaths: ["item.result", "item.results", "item.output", "item.outputs"],
+        valueMatches: [{ path: "item.status", values: ["completed"] }],
+      },
+      {
+        // 无参数工具调用的 arguments/input 为空串：added 阶段仍保持中性，
+        // output_item.done 表示客户端执行的调用项已完整收尾，是可交付结果。
+        eventTypes: ["response.output_item.done"],
+        anyPaths: ["item.name"],
+        valueMatches: [{ path: "item.type", values: ["function_call", "custom_tool_call"] }],
+      },
+      {
+        // 服务端执行的 mcp_call 失败时同样带 name，但以 status=failed + item.error 收尾，
+        // 随后才是 response.failed；只有明确成功完成的无参数调用才可提交。
+        eventTypes: ["response.output_item.done"],
+        anyPaths: ["item.name"],
+        valueMatches: [
+          { path: "item.type", values: ["mcp_call"] },
+          { path: "item.status", values: ["completed"] },
+        ],
+      },
     ],
     errorRules: [
       // 顶层 error 事件（code/message/param）
@@ -216,6 +297,7 @@ export const STREAM_SIGNALS: Record<ProtocolFamily, StreamSignal> = {
         // candidates[].content.parts[] 任一实体载荷字段非空
         anyPaths: [
           "candidates.#.content.parts.#.text",
+          "candidates.#.content.parts.#.thoughtSignature",
           "candidates.#.content.parts.#.inlineData.data",
           "candidates.#.content.parts.#.fileData.fileUri",
           "candidates.#.content.parts.#.functionCall.name",
@@ -330,10 +412,51 @@ export function classifyFrame(
   data: string
 ): FrameVerdict {
   try {
-    return classifyFrameInner(family, STREAM_SIGNALS[family], eventName, data);
+    const parsed = parseFrameData(STREAM_SIGNALS[family], data);
+    return typeof parsed === "string" ? parsed : classifyStructuredFrame(family, eventName, parsed);
   } catch {
     return "neutral";
   }
+}
+
+export interface StreamFrameClassifier {
+  readonly family: ProtocolFamily;
+  classify(eventName: string | null, data: string): FrameVerdict;
+  classifyStructured(eventName: string | null, parsed: object): FrameVerdict;
+}
+
+/**
+ * 单条流的帧分类：在无状态分类之上记住已打开的工具调用，使无参数调用的完成帧
+ * 成为内容。只有完成原因而没有任何工具块/调用的畸形流保持中性，按空流拒绝。
+ * 每条上游流必须使用独立实例。
+ */
+export function createStreamFrameClassifier(family: ProtocolFamily): StreamFrameClassifier {
+  const signal = STREAM_SIGNALS[family];
+  const toolCallRules = signal.toolCallRules;
+  let toolCallOpen = false;
+  const classifyStructured = (eventName: string | null, parsed: object): FrameVerdict => {
+    const verdict = classifyStructuredFrame(family, eventName, parsed);
+    if (!toolCallRules) return verdict;
+    const eventType = effectiveEventType(eventName, parsed);
+    toolCallOpen ||= toolCallRules.open.some((rule) => frameRuleMatches(rule, eventType, parsed));
+    return verdict === "neutral" &&
+      toolCallOpen &&
+      toolCallRules.close.some((rule) => frameRuleMatches(rule, eventType, parsed))
+      ? "content"
+      : verdict;
+  };
+  return {
+    family,
+    classify(eventName, data) {
+      try {
+        const parsed = parseFrameData(signal, data);
+        return typeof parsed === "string" ? parsed : classifyStructured(eventName, parsed);
+      } catch {
+        return "neutral";
+      }
+    },
+    classifyStructured,
+  };
 }
 
 /** OpenAI Responses 明确以 incomplete 状态结束；这是可透传终态，但不是成功完成。 */
@@ -357,12 +480,11 @@ export function isResponsesIncompleteCompletion(eventName: string | null, data: 
   return (response as Record<string, unknown>).status === "incomplete";
 }
 
-function classifyFrameInner(
-  family: ProtocolFamily,
-  signal: StreamSignal,
-  eventName: string | null,
-  data: string
-): FrameVerdict {
+/**
+ * 帧数据的协议前置判定：命中 doneSentinel -> terminal；空 data -> neutral；
+ * 损坏或非对象/数组 JSON -> malformed；其余返回解析结果供结构分类。
+ */
+function parseFrameData(signal: StreamSignal, data: string): FrameVerdict | object {
   const trimmed = data.trim();
   if (trimmed.length > 0 && signal.doneSentinel && trimmed === signal.doneSentinel) {
     return "terminal";
@@ -383,8 +505,7 @@ function classifyFrameInner(
   if (parsed === null || typeof parsed !== "object") {
     return "malformed";
   }
-
-  return classifyStructuredFrame(family, eventName, parsed);
+  return parsed;
 }
 
 /**
@@ -462,13 +583,7 @@ function classifyParsedFrame(
   eventName: string | null,
   parsed: object
 ): FrameVerdict {
-  let effective = (eventName ?? "").trim();
-  if (effective === "" && !Array.isArray(parsed)) {
-    const typeField = (parsed as Record<string, unknown>).type;
-    if (typeof typeField === "string") {
-      effective = typeField;
-    }
-  }
+  const effective = effectiveEventType(eventName, parsed);
 
   for (const rule of signal.errorRules) {
     if (frameRuleMatches(rule, effective, parsed)) return "error";
@@ -486,6 +601,13 @@ function classifyParsedFrame(
     return "terminal";
   }
   return "neutral";
+}
+
+/** SSE 事件名缺失时取 data 顶层 type 字段作为事件判别值。 */
+function effectiveEventType(eventName: string | null, parsed: object): string {
+  const event = (eventName ?? "").trim();
+  if (event !== "" || Array.isArray(parsed) || !("type" in parsed)) return event;
+  return typeof parsed.type === "string" ? parsed.type : "";
 }
 
 /**
@@ -631,7 +753,7 @@ export function isNonEmptyValue(value: unknown): boolean {
 }
 
 /**
- * 干净完成帧判定：`response.completed` 且 `response.status === "completed"`。
+ * 干净完成帧判定：`response.completed` / `response.done` 且 `response.status === "completed"`。
  *
  * 这类帧在 classifyFrame 中仍是 `terminal`（StreamProtocolObserver 依赖该判定来确认流
  * 正常收尾），但对门控而言它是协议层面的成功响应：即使可见内容为空也应当透传，而不是
@@ -642,7 +764,9 @@ export function isNonEmptyValue(value: unknown): boolean {
  */
 export function isCleanResponsesCompletion(eventName: string | null, data: string): boolean {
   const effective = (eventName ?? "").trim();
-  if (effective !== "" && effective !== "response.completed") return false;
+  if (effective !== "" && effective !== "response.completed" && effective !== "response.done") {
+    return false;
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(data);
@@ -651,7 +775,8 @@ export function isCleanResponsesCompletion(eventName: string | null, data: strin
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return false;
   const record = parsed as Record<string, unknown>;
-  if (record.type !== "response.completed") return false;
+  if (record.type !== "response.completed" && record.type !== "response.done") return false;
+  if (effective !== "" && effective !== record.type) return false;
   const response = record.response;
   if (response === null || typeof response !== "object" || Array.isArray(response)) return false;
   const inner = response as Record<string, unknown>;

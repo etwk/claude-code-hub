@@ -3,6 +3,9 @@ import { type FrameVerdict, type ProtocolFamily, STREAM_SIGNALS } from "./frame-
 
 type Rule = (typeof STREAM_SIGNALS)[ProtocolFamily]["contentRules"][number];
 
+/** 未进入结构分类的帧（哨兵、空 data、损坏 JSON）不携带终态或工具调用事实。 */
+const NOT_STRUCTURED = { acceptTerminal: false, toolCallOpen: false, toolCallClose: false };
+
 function compile(family: ProtocolFamily) {
   const spec = probeSpec();
   let count = BigInt(0);
@@ -32,11 +35,14 @@ function compile(family: ProtocolFamily) {
       !stringOnly && !path.split(".").includes("#")
     );
   const signal = STREAM_SIGNALS[family];
+  const toolCallRules = signal.toolCallRules ?? { open: [], close: [] };
   const events = new Set<string>(signal.terminalEvents);
   for (const rule of [
     ...signal.contentRules,
     ...signal.errorRules,
     ...(signal.terminalRules ?? []),
+    ...toolCallRules.open,
+    ...toolCallRules.close,
   ]) {
     for (const name of rule.eventTypes ?? []) events.add(name);
   }
@@ -66,6 +72,9 @@ function compile(family: ProtocolFamily) {
   });
   const rules = buildRules("");
   const wrappedRules = family === "gemini" ? buildRules("response.") : null;
+  // 工具调用打开/完成只是流级事实；是否提升为 content 由 ProbedSseFrames 按整条流决定。
+  const toolCallOpen = toolCallRules.open.map((rule) => ruleTest(rule, ""));
+  const toolCallClose = toolCallRules.close.map((rule) => ruleTest(rule, ""));
   const compaction = (path: string) => {
     const type = equal(`${path}.type`, "compaction", true);
     const content = query(
@@ -87,6 +96,7 @@ function compile(family: ProtocolFamily) {
   const outputCompaction =
     family === "openai-responses" ? compaction("response.output.#") : BigInt(0);
   const completedType = equal("type", "response.completed", true);
+  const doneType = equal("type", "response.done", true);
   const incompleteType = equal("type", "response.incomplete", true);
   const completedStatus = equal("response.status", "completed", true);
   const incompleteStatus = equal("response.status", "incomplete", true);
@@ -113,11 +123,11 @@ function compile(family: ProtocolFamily) {
     evaluate(parser: JsonProbe, eventName: string | null, head: string, length: number) {
       const trimmed = head.trim();
       if (length <= head.length && signal.doneSentinel && trimmed === signal.doneSentinel)
-        return { verdict: "terminal" as const, acceptTerminal: false };
+        return { ...NOT_STRUCTURED, verdict: "terminal" as const };
       if (length <= head.length && trimmed === "")
-        return { verdict: "neutral" as const, acceptTerminal: false };
+        return { ...NOT_STRUCTURED, verdict: "neutral" as const };
       if (!parser.finish() || (parser.rootKind !== "object" && parser.rootKind !== "array"))
-        return { verdict: "malformed" as const, acceptTerminal: false };
+        return { ...NOT_STRUCTURED, verdict: "malformed" as const };
       const facts = parser.facts;
       const event = (eventName ?? "").trim();
       const effective =
@@ -128,16 +138,23 @@ function compile(family: ProtocolFamily) {
           event || wrapEventQueries.find(([, bit]) => (facts & bit) !== BigInt(0))?.[0] || "";
         verdict = classifyRules(facts, wrappedEvent, wrappedRules);
       }
+      const cleanType =
+        ((!event || event === "response.completed") && (facts & completedType) !== BigInt(0)) ||
+        ((!event || event === "response.done") && (facts & doneType) !== BigInt(0));
       const clean =
-        (!event || event === "response.completed") &&
-        (facts & completedType) !== BigInt(0) &&
+        cleanType &&
         (facts & completedStatus) !== BigInt(0) &&
         (facts & responseError) === BigInt(0);
       const incomplete =
         (!event || event === "response.incomplete") &&
         (facts & incompleteType) !== BigInt(0) &&
         (facts & incompleteStatus) !== BigInt(0);
-      return { verdict, acceptTerminal: family === "openai-responses" && (clean || incomplete) };
+      return {
+        verdict,
+        acceptTerminal: family === "openai-responses" && (clean || incomplete),
+        toolCallOpen: toolCallOpen.some((test) => test(facts, effective)),
+        toolCallClose: toolCallClose.some((test) => test(facts, effective)),
+      };
     },
   };
 }
@@ -170,9 +187,9 @@ export function createFrameProbe(family: ProtocolFamily, reserveDepth?: (bytes: 
       parser.feed(text);
     },
     finish: (event: string | null, head: string, length: number) => {
-      if (empty) return { verdict: "neutral" as const, acceptTerminal: false };
+      if (empty) return { ...NOT_STRUCTURED, verdict: "neutral" as const };
       if (sentinelValid && sentinelIndex === sentinel?.length)
-        return { verdict: "terminal" as const, acceptTerminal: false };
+        return { ...NOT_STRUCTURED, verdict: "terminal" as const };
       return program.evaluate(parser, event, head, length);
     },
   };

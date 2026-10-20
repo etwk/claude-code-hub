@@ -1,8 +1,8 @@
 import { detectUpstreamErrorFromSseEvent } from "@/lib/utils/upstream-error-detection";
 import type { ClientFormat } from "./format-mapper";
 import {
-  classifyStructuredFrame,
   classifyTerminalKind,
+  createStreamFrameClassifier,
   isNonEmptyValue,
   type ProtocolFamily,
 } from "./stream-gate/frame-classifier";
@@ -529,6 +529,7 @@ export function createClientAbortMeteringObserver(
   let incompleteSeen = false;
   let protocolFailure: ClientAbortMeteringSnapshot["protocolFailure"] = null;
   let finished = false;
+  const classifier = createStreamFrameClassifier(mapClientFormatToProtocolFamily(format));
 
   const setEvidence = (slot: EvidenceSlot, value: string): void => {
     const previous = evidence.get(slot);
@@ -607,10 +608,11 @@ export function createClientAbortMeteringObserver(
       return;
     }
 
-    const family = mapClientFormatToProtocolFamily(format);
-    const verdict = classifyStructuredFrame(family, frame.eventName, parsed);
+    const verdict = classifier.classifyStructured(frame.eventName, parsed);
     const terminalKind =
-      verdict === "terminal" ? classifyTerminalKind(family, frame.eventName, parsed) : null;
+      verdict === "terminal"
+        ? classifyTerminalKind(classifier.family, frame.eventName, parsed)
+        : null;
     if (verdict === "content") sawContent = true;
     if (verdict === "error" || verdict === "malformed") {
       recordProtocolFailure(verdict, frame.eventName);

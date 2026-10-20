@@ -1,8 +1,7 @@
 import {
-  classifyFrame,
-  classifyStructuredFrame,
   classifyStructuredTerminalKind,
   classifyTerminalKind,
+  createStreamFrameClassifier,
   type FrameVerdict,
   isRequestEchoFrame,
   type ProtocolFamily,
@@ -60,6 +59,7 @@ export function createStreamProtocolObserver(family: ProtocolFamily): StreamProt
   };
   let finished = false;
   let disabled = false;
+  const classifier = createStreamFrameClassifier(family);
 
   const disableIncompleteObservation = (): void => {
     disabled = true;
@@ -71,15 +71,15 @@ export function createStreamProtocolObserver(family: ProtocolFamily): StreamProt
     let parsed: object | null = null;
     let verdict: FrameVerdict;
     if (trimmed === "[DONE]") {
-      verdict = classifyFrame(family, eventName, data);
+      verdict = classifier.classify(eventName, data);
     } else if (trimmed[0] === "{" || trimmed[0] === "[") {
       try {
         const value = JSON.parse(trimmed) as unknown;
         if (value !== null && typeof value === "object") {
           parsed = value;
-          verdict = classifyStructuredFrame(family, eventName, value);
+          verdict = classifier.classifyStructured(eventName, value);
         } else {
-          verdict = classifyFrame(family, eventName, data);
+          verdict = classifier.classify(eventName, data);
         }
       } catch {
         // 以 {/[ 开头但无法解析的载荷，和 classifyFrame 的结果一致；
@@ -88,7 +88,7 @@ export function createStreamProtocolObserver(family: ProtocolFamily): StreamProt
       }
     } else {
       // [DONE]、空数据和非 JSON 数据沿用分类器的协议前置判定。
-      verdict = classifyFrame(family, eventName, data);
+      verdict = classifier.classify(eventName, data);
     }
     if (verdict === "content") observation.sawContent = true;
 

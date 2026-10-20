@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyFrame,
+  createStreamFrameClassifier,
+  isCleanResponsesCompletion,
+  isResponsesIncompleteCompletion,
   type ProtocolFamily,
 } from "@/app/v1/_lib/proxy/stream-gate/frame-classifier";
 import { createFrameProbe } from "@/app/v1/_lib/proxy/stream-gate/frame-probe";
@@ -36,6 +39,13 @@ const samples = [
   '{"type":"content_block_delta","delta":{"type":"compaction_delta","content":"summary"},"error":{"message":"boom"}}',
   '{"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"type":"refusal"}}}',
   '{"type":"message_delta","delta":{"stop_reason":"end_turn"}}',
+  // 早于任何工具块的完成原因：流级状态尚未打开，必须保持中性
+  '{"type":"message_delta","delta":{"stop_reason":"tool_use"}}',
+  '{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+  '{"type":"content_block_start","content_block":{"type":"tool_use","id":"t","name":"","input":{}}}',
+  '{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"","arguments":""}}]}}]}',
+  '{"type":"message_delta","delta":{"stop_reason":"pause_turn"}}',
+  '{"choices":[{"delta":{},"finish_reason":"function_call"}]}',
   '{"type":"message_delta","delta":{"stop_reason":["refusal"]}}',
   '{"type":"message_delta","delta":{"stop_reason":"refusal"},"error":{"message":"boom"}}',
   '{"type":"response.output_text.delta","delta":"ok","error":{"message":"failed"}}',
@@ -53,10 +63,36 @@ const samples = [
   '{"error":1.}',
   '{"error":1e}',
   '{"error":true,}',
+  '{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"","estimated_tokens":50}}',
+  '{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"","estimated_tokens":0}}',
+  '{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"","estimated_tokens":null}}',
+  '{"type":"content_block_start","content_block":{"type":"tool_use","id":"t","name":"f","input":{}}}',
+  '{"type":"content_block_start","content_block":{"type":"mcp_tool_use","input":{"a":1}}}',
+  '{"type":"content_block_start","content_block":{"type":["server_tool_use"],"input":{"a":null}}}',
+  '{"type":"content_block_start","content_block":{"type":"text","text":"","input":{"a":1}}}',
+  '{"type":"message_delta","delta":{"stop_reason":"tool_use"}}',
+  '{"type":"message_delta","delta":{"stop_reason":"pause_turn"},"error":{"message":"boom"}}',
+  '{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"f","arguments":""}}]},"finish_reason":null}]}',
+  '{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+  '{"choices":[{"delta":{},"finish_reason":["function_call"]}]}',
+  '{"type":"response.output_item.done","item":{"type":"function_call","name":"f","arguments":""}}',
+  '{"type":"response.output_item.done","item":{"type":"mcp_call","name":"f","arguments":"","status":"completed"}}',
+  '{"type":"response.output_item.done","item":{"type":"mcp_call","name":"f","arguments":"","status":"failed","error":"x"}}',
+  '{"type":"response.output_item.done","item":{"type":"mcp_call","name":"f","arguments":""}}',
+  '{"type":"response.output_item.added","item":{"type":"function_call","name":"f","arguments":""}}',
+  '{"type":"response.output_item.done","item":{"type":"image_generation_call","result":"b64"}}',
+  '{"type":"response.output_item.done","item":{"type":"image_generation_call","status":"completed","result":"b64"}}',
+  '{"type":"response.output_item.done","item":{"type":"mcp_call","status":"failed","output":"partial","error":"x"}}',
+  '{"type":"response.output_item.done","item":{"type":"code_interpreter_call","status":["completed"],"outputs":[{"logs":"ok"}]}}',
+  '{"type":"response.output_item.done","item":{"type":"file_search_call","results":[]}}',
+  '{"type":"response.done","response":{"status":"completed","error":null}}',
+  '{"type":"response.done","response":{"status":"completed","error":{"message":"x"}}}',
+  '{"candidates":[{"content":{"parts":[{"thought":true,"text":"","thoughtSignature":"sig"}]}}]}',
+  '{"response":{"candidates":[{"content":{"parts":[{"thoughtSignature":""}]}}]}}',
 ];
 
 describe("增量分类与既有分类器差分", () => {
-  it.each(families)("%s 保留裸 JSON、SSE 混合帧和任意网络分块语义", (family) => {
+  it.each(families)("%s 保留裸 JSON、SSE 混合帧、流级工具调用状态和任意网络分块语义", (family) => {
     const wires = [
       samples.map((sample) => `  ${sample} \t`).join("\r\n"),
       '  {"candidates":[{"content":{"parts":[{"text":"你好"}]}}]}  \n[{}]\n',
@@ -71,13 +107,14 @@ describe("增量分类与既有分类器差分", () => {
       const bytes = new TextEncoder().encode(wire);
       for (const size of [1, 2, 7, bytes.length]) {
         const old = new SseFrameParser();
+        const classifier = createStreamFrameClassifier(family);
         const parser = new ProbedSseFrames(family, 10 * 1024 * 1024);
         const expected: unknown[] = [];
         const actual: unknown[] = [];
         const before = (event: string | null, data: string) => {
           expected.push({
             event,
-            verdict: classifyFrame(family, event, data),
+            verdict: classifier.classify(event, data),
             dataBytes: Buffer.byteLength(data),
           });
         };
@@ -110,6 +147,34 @@ describe("增量分类与既有分类器差分", () => {
             probe.finish(event, data.slice(0, 2000), data.length).verdict,
             `${event}: ${data}`
           ).toBe(classifyFrame(family, event, data));
+        }
+      }
+    }
+  });
+
+  it.each(families)("%s 的 acceptTerminal 与 Responses 干净/incomplete 终态判定一致", (family) => {
+    const terminals = [
+      '{"type":"response.completed","response":{"status":"completed","error":null}}',
+      '{"type":"response.done","response":{"status":"completed"}}',
+      '{"type":"response.done","response":{"status":"failed"}}',
+      '{"type":"response.done","response":{"status":"completed","error":{"message":"x"}}}',
+      '{"type":"response.done","type":"response.completed","response":{"status":"completed"}}',
+      '{"type":"response.done","response":[{"status":"completed"}]}',
+      '{"type":"response.incomplete","response":{"status":"incomplete"}}',
+      '{"type":"response.done"}',
+    ];
+    for (const data of terminals) {
+      for (const event of [null, "response.completed", "response.done", "response.incomplete"]) {
+        const expected =
+          family === "openai-responses" &&
+          (isCleanResponsesCompletion(event, data) || isResponsesIncompleteCompletion(event, data));
+        for (const size of [1, 7, 128]) {
+          const probe = createFrameProbe(family);
+          for (let i = 0; i < data.length; i += size) probe.feed(data.slice(i, i + size));
+          expect(
+            probe.finish(event, data.slice(0, 2000), data.length).acceptTerminal,
+            `${event}: ${data}`
+          ).toBe(expected);
         }
       }
     }
