@@ -1063,7 +1063,8 @@ export class SessionManager {
   /**
    * 刷新 session TTL（滑动窗口）
    *
-   * contentHashKey：内容哈希降级命中时一并续期 hash → session 映射，避免活跃会话在首个 TTL 到期后被拆分。
+   * contentHashKey：内容哈希降级命中时先 EXPIRE 续期 hash → session 映射，再以 SET NX 恢复
+   * 读取后恰好过期的映射；并发请求已写入的新映射不会被覆盖。
    */
   private static async refreshSessionTTL(
     sessionId: string,
@@ -1096,6 +1097,7 @@ export class SessionManager {
       }
       if (contentHashKey) {
         pipeline.expire(contentHashKey, SessionManager.SESSION_TTL);
+        pipeline.set(contentHashKey, sessionId, "EX", SessionManager.SESSION_TTL, "NX");
       }
       pipeline.setex(
         `session:${sessionId}:last_seen`,
