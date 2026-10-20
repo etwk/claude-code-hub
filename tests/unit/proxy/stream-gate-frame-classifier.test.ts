@@ -596,18 +596,37 @@ describe("classifyFrame: openai-responses", () => {
     // 省略 name，单独验证 output 字段
     ["mcp_call", "output", "tool output", ""],
     ["code_interpreter_call", "outputs", [{ type: "logs", logs: "ok" }], []],
-  ])("output_item.done %s commits on non-empty %s", (type, field, value, empty) => {
-    for (const [payload, verdict] of [
-      [value, "content"],
-      [empty, "neutral"],
-    ] as const) {
-      const data = JSON.stringify({
-        type: "response.output_item.done",
-        item: { id: "item_1", type, status: "completed", [field]: payload },
-      });
-      expect(classifyFrame("openai-responses", "response.output_item.done", data)).toBe(verdict);
+  ])(
+    "output_item.done %s commits on non-empty %s only when completed",
+    (type, field, value, empty) => {
+      const done = (status: string | undefined, payload: unknown) =>
+        JSON.stringify({
+          type: "response.output_item.done",
+          item: { id: "item_1", type, ...(status ? { status } : {}), [field]: payload },
+        });
+      for (const [status, payload, verdict] of [
+        ["completed", value, "content"],
+        ["completed", empty, "neutral"],
+        // 失败调用也可能带结果字段，随后才是 response.failed
+        ["failed", value, "neutral"],
+        ["incomplete", value, "neutral"],
+        [undefined, value, "neutral"],
+      ] as const) {
+        expect(
+          classifyFrame("openai-responses", "response.output_item.done", done(status, payload)),
+          `${status}: ${JSON.stringify(payload)}`
+        ).toBe(verdict);
+      }
+      // added 阶段的结果字段同样不提交
+      expect(
+        classifyFrame(
+          "openai-responses",
+          "response.output_item.added",
+          done("completed", value).replace("output_item.done", "output_item.added")
+        )
+      ).toBe("neutral");
     }
-  });
+  );
 
   it("content: compaction output item with opaque encrypted content", () => {
     expect(

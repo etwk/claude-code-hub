@@ -240,8 +240,7 @@ export const STREAM_SIGNALS: Record<ProtocolFamily, StreamSignal> = {
       {
         // output_item.added 的 name/id/status 只是结构元数据；真实 payload 到达前不能提交，
         // 否则紧随其后的 response.failed / 断流将失去透明 fallback 机会。
-        // fake-streaming 的完整 item 会在 added/done 中携带 arguments/input/action，仍可提交；
-        // 服务端工具（image_generation / mcp / file_search / code_interpreter）在 done 中携带结果。
+        // fake-streaming 的完整 item 会在 added/done 中携带 arguments/input/action，仍可提交。
         eventTypes: ["response.output_item.added", "response.output_item.done"],
         anyPaths: [
           "item.content.#.text",
@@ -254,11 +253,14 @@ export const STREAM_SIGNALS: Record<ProtocolFamily, StreamSignal> = {
           "item.code",
           "item.command",
           "item.operation",
-          "item.result",
-          "item.results",
-          "item.output",
-          "item.outputs",
         ],
+      },
+      {
+        // 服务端工具（image_generation / file_search / mcp / code_interpreter）在 done 中携带结果；
+        // 失败的调用同样可能带结果字段，随后才是 response.failed，只有明确成功完成才可提交。
+        eventTypes: ["response.output_item.done"],
+        anyPaths: ["item.result", "item.results", "item.output", "item.outputs"],
+        valueMatches: [{ path: "item.status", values: ["completed"] }],
       },
       {
         // 无参数工具调用的 arguments/input 为空串：added 阶段仍保持中性，

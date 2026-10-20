@@ -48,8 +48,9 @@
   `pause_turn` 时提交，不再判为 `empty_stream`；adaptive/omitted thinking 的 `estimated_tokens`
   进度帧直接提交，不再缓冲到 `prebuffer_overflow`；起始块内联非空 `input` 的工具调用立即提交。
   同类修复：OpenAI Chat 无参数工具调用在具名调用之后的 `finish_reason=tool_calls` /
-  `function_call` 时提交；Responses 识别已完成的无参数工具调用项（`mcp_call` 须明确成功）、
-  工具结果字段及成功的空 `response.done`；Gemini 识别仅含 `thoughtSignature` 的思考分片。
+  `function_call` 时提交；Responses 识别已完成的无参数工具调用项与服务端工具结果字段
+  （`mcp_call` 及服务端工具结果须 `status=completed`）、成功的空 `response.done`；
+  Gemini 识别仅含 `thoughtSignature` 的思考分片。
   没有任何工具调用的完成原因、空流、仅元数据流及上游错误仍按原规则拒绝 (#12)
 - 移除自定义服务器测试对不存在的 `isNextDevMode` helper 的陈旧断言，保留路径脱敏与
   开发/生产 WebSocket 行为覆盖；生产服务器的模式选择逻辑保持不变

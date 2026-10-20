@@ -1038,4 +1038,41 @@ describe("OpenAI Responses 空输出完成", () => {
 
     expect(result.committed).toBe(false);
   });
+
+  it.each([
+    { status: "failed", output: "partial tool output", error: "tool crashed" },
+    { status: "failed", output: null, error: "tool crashed" },
+  ])(
+    "失败的 mcp_call 项（output=$output）不提交，随后的 response.failed 仍触发 failover",
+    async (item) => {
+      const frames = [
+        `event: response.output_item.done\ndata: ${JSON.stringify({
+          type: "response.output_item.done",
+          output_index: 0,
+          item: {
+            id: "mcp_1",
+            type: "mcp_call",
+            name: "ping",
+            server_label: "srv",
+            arguments: "",
+            ...item,
+          },
+        })}\n\n`,
+        `event: response.failed\ndata: ${JSON.stringify({
+          type: "response.failed",
+          response: {
+            id: "resp_mcp",
+            status: "failed",
+            error: { code: "server_error", message: "boom" },
+          },
+        })}\n\n`,
+      ];
+
+      const result = await runStreamContentGate(readerFromChunks(frames), options);
+
+      expect(result.committed).toBe(false);
+      if (result.committed) return;
+      expect((result.error as StreamPrecommitError).gateReason).toBe("gate_error");
+    }
+  );
 });
