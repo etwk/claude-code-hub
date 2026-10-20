@@ -3,10 +3,18 @@ import {
   buildClaudeMetadataDeviceId,
   buildClaudeMetadataUserId,
   CLAUDE_CODE_METADATA_USER_ID_JSON_SWITCH_VERSION,
+  hasUsableClaudeMetadataUserId,
   injectClaudeMetadataUserIdWithContext,
   parseClaudeMetadataUserId,
   resolveClaudeMetadataUserIdFormat,
 } from "@/lib/claude-code/metadata-user-id";
+
+const EMPTY_PARSE_RESULT = {
+  sessionId: null,
+  format: null,
+  deviceId: null,
+  accountUuid: null,
+};
 
 describe("Claude metadata.user_id helper", () => {
   test("解析旧格式 user_id 时应提取 sessionId 和 deviceId", () => {
@@ -63,12 +71,48 @@ describe("Claude metadata.user_id helper", () => {
     });
   });
 
-  test("无法解析的 user_id 应返回空结果", () => {
-    expect(parseClaudeMetadataUserId("not-a-valid-user-id")).toEqual({
-      sessionId: null,
-      format: null,
+  test.each([
+    ["UUID", "550e8400-e29b-41d4-a716-446655440000"],
+    ["opaque token", "client.session:abc_123"],
+    ["64-char token", "a".repeat(64)],
+  ])("纯 %s user_id 应作为 sessionId 解析并视为可用", (_label, userId) => {
+    expect(parseClaudeMetadataUserId(`  ${userId}  `)).toEqual({
+      sessionId: userId,
+      format: "plain",
       deviceId: null,
       accountUuid: null,
+    });
+    expect(hasUsableClaudeMetadataUserId(userId)).toBe(true);
+  });
+
+  test.each<[string, unknown]>([
+    ["JSON without session_id", '{"device_id":"only"}'],
+    ["JSON with blank session_id", '{"device_id":"only","session_id":"   "}'],
+    ["malformed JSON", "{invalid-json"],
+    ["JSON array", '["sess_in_array"]'],
+    ["legacy with blank session", "user_abc_account__session_   "],
+    ["legacy without device", "user__account__session_abc"],
+    ["text with spaces", "invalid user id"],
+    ["65-char token", "a".repeat(65)],
+    ["JSON with 65-char session_id", JSON.stringify({ session_id: "a".repeat(65) })],
+    ["number", 123],
+    ["object", { session_id: "sess_object" }],
+  ])("不可用的 user_id（%s）应返回空结果并允许补全", (_label, userId) => {
+    expect(parseClaudeMetadataUserId(userId)).toEqual(EMPTY_PARSE_RESULT);
+    expect(hasUsableClaudeMetadataUserId(userId)).toBe(false);
+
+    const userAgent = "claude-cli/2.1.78 (external, cli)";
+    const message = { metadata: { user_id: userId, source: "client" } };
+    const result = injectClaudeMetadataUserIdWithContext(message, {
+      keyId: 1,
+      sessionId: "sess_completed",
+      userAgent,
+    });
+
+    expect(result).not.toBe(message);
+    expect(result.metadata).toEqual({
+      source: "client",
+      user_id: buildClaudeMetadataUserId({ keyId: 1, sessionId: "sess_completed", userAgent }),
     });
   });
 

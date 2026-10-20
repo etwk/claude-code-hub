@@ -169,6 +169,17 @@ async function getOrCreateSessionIdFromFingerprint(
   try {
     const existing = normalizeCodexSessionId(await redis.get(redisKey));
     if (existing) {
+      // Sliding window: EXPIRE renews whatever is cached; SET NX restores an entry that expired
+      // right after the GET without overwriting a replacement written by a concurrent request.
+      // A failed refresh must not discard the session id that was just read.
+      try {
+        await redis.expire(redisKey, ttlSeconds);
+        await redis.set(redisKey, existing, "EX", ttlSeconds, "NX");
+      } catch (error) {
+        logger.warn("[CodexSessionCompleter] Failed to refresh fingerprint cache TTL", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
       return {
         sessionId: existing,
         source: "fingerprint_cache",

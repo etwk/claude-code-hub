@@ -17,7 +17,10 @@ export interface LiveChainSnapshot {
   routingTrace?: RoutingTraceV1 | null;
 }
 
-const SESSION_TTL = Number.parseInt(process.env.SESSION_TTL || "300", 10);
+const SESSION_TTL = (() => {
+  const parsed = Number.parseInt(process.env.SESSION_TTL ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 300;
+})();
 
 const store = new RedisKVStore<LiveChainSnapshot>({
   prefix: "cch:live-chain:",

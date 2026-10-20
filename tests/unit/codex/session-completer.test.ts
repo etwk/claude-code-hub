@@ -37,6 +37,7 @@ function makeCodexRequestBody(overrides?: Record<string, unknown>): Record<strin
 
 function makeFakeRedis() {
   const store = new Map<string, string>();
+  const ttls = new Map<string, number>();
 
   const client = {
     status: "ready",
@@ -52,12 +53,18 @@ function makeFakeRedis() {
         }
 
         store.set(key, value);
+        ttls.set(key, ttlSeconds);
         return "OK";
       }
     ),
+    expire: vi.fn(async (key: string, ttlSeconds: number) => {
+      if (!store.has(key)) return 0;
+      ttls.set(key, ttlSeconds);
+      return 1;
+    }),
   };
 
-  return { client, store };
+  return { client, store, ttls };
 }
 
 function trustedResponsesWsHeaders(sessionId = "ee388dba-142b-4fb9-bd71-91e36278e4d0") {
@@ -271,6 +278,85 @@ describe("Codex session completer", () => {
     expect(second.action).toBe("reused_fingerprint_cache");
     expect(first.sessionId).toBe(second.sessionId);
     expect(first.sessionId).toMatch(UUID_V7_PATTERN);
+  });
+
+  test("restores the fingerprint cache with a full TTL even if it expires right after being read", async () => {
+    process.env.SESSION_TTL = "600";
+    const { client: fakeRedis, store, ttls } = makeFakeRedis();
+    redisClientRef = fakeRedis;
+    const completeTurn = () =>
+      completeCodexSessionIdentifiers({
+        keyId: 7,
+        headers: new Headers({ "x-forwarded-for": "203.0.113.20" }),
+        requestBody: makeCodexRequestBody(),
+        userAgent: "codex_cli_rs/0.50.0",
+      });
+
+    const first = await completeTurn();
+    const [cacheKey] = [...store.keys()];
+    fakeRedis.get.mockImplementationOnce(async (key: string) => {
+      const value = store.get(key) ?? null;
+      store.delete(key);
+      ttls.delete(key);
+      return value;
+    });
+
+    const second = await completeTurn();
+
+    expect(second).toMatchObject({
+      action: "reused_fingerprint_cache",
+      sessionId: first.sessionId,
+    });
+    expect(store.get(cacheKey)).toBe(first.sessionId);
+    expect(ttls.get(cacheKey)).toBe(600);
+  });
+
+  test("does not overwrite a fingerprint cache entry replaced by a concurrent request", async () => {
+    process.env.SESSION_TTL = "600";
+    const { client: fakeRedis, store, ttls } = makeFakeRedis();
+    redisClientRef = fakeRedis;
+    const completeTurn = () =>
+      completeCodexSessionIdentifiers({
+        keyId: 7,
+        headers: new Headers({ "x-forwarded-for": "203.0.113.22" }),
+        requestBody: makeCodexRequestBody(),
+        userAgent: "codex_cli_rs/0.50.0",
+      });
+
+    const first = await completeTurn();
+    const [cacheKey] = [...store.keys()];
+    const replacement = "019a0000-0000-7000-8000-000000000002";
+    fakeRedis.get.mockImplementationOnce(async (key: string) => {
+      const value = store.get(key) ?? null;
+      store.set(key, replacement);
+      ttls.set(key, 1);
+      return value;
+    });
+
+    const second = await completeTurn();
+
+    expect(second.sessionId).toBe(first.sessionId);
+    expect(store.get(cacheKey)).toBe(replacement);
+    expect(ttls.get(cacheKey)).toBe(600);
+  });
+
+  test("keeps the cached session id when the fingerprint TTL refresh fails", async () => {
+    const { client: fakeRedis } = makeFakeRedis();
+    redisClientRef = fakeRedis;
+    const completeTurn = () =>
+      completeCodexSessionIdentifiers({
+        keyId: 7,
+        headers: new Headers({ "x-forwarded-for": "203.0.113.21" }),
+        requestBody: makeCodexRequestBody(),
+        userAgent: "codex_cli_rs/0.50.0",
+      });
+
+    const first = await completeTurn();
+    fakeRedis.expire.mockRejectedValueOnce(new Error("READONLY"));
+    const second = await completeTurn();
+
+    expect(second.action).toBe("reused_fingerprint_cache");
+    expect(second.sessionId).toBe(first.sessionId);
   });
 
   test("completes header session_id when only x-session-id is provided", async () => {

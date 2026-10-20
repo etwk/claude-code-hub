@@ -7,6 +7,7 @@ let redisClientRef: {
   pipeline: ReturnType<typeof vi.fn>;
 };
 let values: Map<string, string>;
+let ttls: Map<string, number>;
 
 const bindingMocks = vi.hoisted(() => ({
   mutateLegacySessionBindingSafely: vi.fn(),
@@ -61,12 +62,30 @@ function legacyHashKey(): string {
 beforeEach(() => {
   vi.clearAllMocks();
   values = new Map<string, string>();
+  ttls = new Map<string, number>();
 
   const createPipeline = () => {
     const operations: Array<() => void> = [];
     const pipeline = {
-      setex: vi.fn((key: string, _ttlSeconds: number, value: string) => {
-        operations.push(() => values.set(key, value));
+      setex: vi.fn((key: string, ttlSeconds: number, value: string) => {
+        operations.push(() => {
+          values.set(key, value);
+          ttls.set(key, ttlSeconds);
+        });
+        return pipeline;
+      }),
+      expire: vi.fn((key: string, ttlSeconds: number) => {
+        operations.push(() => {
+          if (values.has(key)) ttls.set(key, ttlSeconds);
+        });
+        return pipeline;
+      }),
+      set: vi.fn((key: string, value: string, _ex: "EX", ttlSeconds: number, _nx: "NX") => {
+        operations.push(() => {
+          if (values.has(key)) return;
+          values.set(key, value);
+          ttls.set(key, ttlSeconds);
+        });
         return pipeline;
       }),
       exec: vi.fn(async () => {
@@ -136,6 +155,44 @@ describe("SessionManager content-hash mapping tenant isolation", () => {
     expect(bindingMocks.readOrReconcileSessionBinding).toHaveBeenCalledWith(
       expect.objectContaining({ sessionId: first, keyId: 101 })
     );
+  });
+
+  it("restores the mapping with a full TTL even if it expires right after being read", async () => {
+    const first = await SessionManager.getOrCreateSessionId(101, MESSAGES, null);
+    await vi.waitFor(() => expect(values.get(tenantHashKey(101))).toBe(first));
+
+    redisClientRef.get.mockImplementation(async (key: string) => {
+      const value = values.get(key) ?? null;
+      if (key === tenantHashKey(101)) {
+        values.delete(key);
+        ttls.delete(key);
+      }
+      return value;
+    });
+
+    await expect(SessionManager.getOrCreateSessionId(101, MESSAGES, null)).resolves.toBe(first);
+
+    expect(values.get(tenantHashKey(101))).toBe(first);
+    expect(ttls.get(tenantHashKey(101))).toBe(300);
+  });
+
+  it("does not overwrite a mapping replaced by a concurrent request while renewing", async () => {
+    const first = await SessionManager.getOrCreateSessionId(101, MESSAGES, null);
+    await vi.waitFor(() => expect(values.get(tenantHashKey(101))).toBe(first));
+
+    redisClientRef.get.mockImplementation(async (key: string) => {
+      const value = values.get(key) ?? null;
+      if (key === tenantHashKey(101)) {
+        values.set(key, "sess_concurrent_replacement");
+        ttls.set(key, 1);
+      }
+      return value;
+    });
+
+    await expect(SessionManager.getOrCreateSessionId(101, MESSAGES, null)).resolves.toBe(first);
+
+    expect(values.get(tenantHashKey(101))).toBe("sess_concurrent_replacement");
+    expect(ttls.get(tenantHashKey(101))).toBe(300);
   });
 
   it.each([

@@ -182,4 +182,65 @@ describe("SessionManager 辅助函数", () => {
       })
     ).toBe("sess_fallback_123");
   });
+
+  test.each(["x-claude-code-session-id", "x-session-id", "session_id"])(
+    "extractClientSessionId：非 Codex 请求应从 %s 请求头提取",
+    async (headerName) => {
+      const { extractClientSessionId } = await loadHelpers();
+      const sessionId = "550e8400-e29b-41d4-a716-446655440000";
+      const headers = new Headers({ [headerName]: sessionId });
+
+      expect(extractClientSessionId({ messages: [] }, headers)).toBe(sessionId);
+      expect(
+        extractClientSessionId({ metadata: { user_id: "user@example.com" }, messages: [] }, headers)
+      ).toBe(sessionId);
+    }
+  );
+
+  test("extractClientSessionId：无其他来源时应使用纯 metadata.user_id", async () => {
+    const { extractClientSessionId } = await loadHelpers();
+    const sessionId = "550e8400-e29b-41d4-a716-446655440000";
+
+    expect(extractClientSessionId({ metadata: { user_id: sessionId } }, new Headers())).toBe(
+      sessionId
+    );
+  });
+
+  test("extractClientSessionId：应按结构化 user_id > metadata.session_id > 请求头 > 纯 user_id 提取", async () => {
+    const { extractClientSessionId } = await loadHelpers();
+    const structuredUserId = JSON.stringify({
+      device_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      account_uuid: "",
+      session_id: "sess_structured",
+    });
+    const plainOnly = { metadata: { user_id: "sess_plain_user" } };
+    const headers = new Headers({
+      "x-claude-code-session-id": "sess_header_claude",
+      "x-session-id": "sess_header_x",
+      session_id: "sess_header_plain",
+    });
+
+    expect(
+      extractClientSessionId(
+        { metadata: { user_id: structuredUserId, session_id: "sess_metadata" } },
+        headers
+      )
+    ).toBe("sess_structured");
+    expect(
+      extractClientSessionId(
+        { metadata: { user_id: "sess_plain_user", session_id: "sess_metadata" } },
+        headers
+      )
+    ).toBe("sess_metadata");
+    expect(extractClientSessionId(plainOnly, headers)).toBe("sess_header_claude");
+
+    headers.set("x-claude-code-session-id", "invalid session id");
+    expect(extractClientSessionId(plainOnly, headers)).toBe("sess_header_x");
+
+    headers.delete("x-session-id");
+    expect(extractClientSessionId(plainOnly, headers)).toBe("sess_header_plain");
+
+    headers.delete("session_id");
+    expect(extractClientSessionId(plainOnly, headers)).toBe("sess_plain_user");
+  });
 });
