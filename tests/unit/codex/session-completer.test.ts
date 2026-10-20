@@ -55,6 +55,7 @@ function makeFakeRedis() {
         return "OK";
       }
     ),
+    expire: vi.fn(async (key: string, _ttlSeconds: number) => (store.has(key) ? 1 : 0)),
   };
 
   return { client, store };
@@ -271,6 +272,51 @@ describe("Codex session completer", () => {
     expect(second.action).toBe("reused_fingerprint_cache");
     expect(first.sessionId).toBe(second.sessionId);
     expect(first.sessionId).toMatch(UUID_V7_PATTERN);
+  });
+
+  test("slides the fingerprint cache TTL whenever a cached session id is reused", async () => {
+    process.env.SESSION_TTL = "600";
+    const { client: fakeRedis } = makeFakeRedis();
+    redisClientRef = fakeRedis;
+    const completeTurn = () =>
+      completeCodexSessionIdentifiers({
+        keyId: 7,
+        headers: new Headers({ "x-forwarded-for": "203.0.113.20" }),
+        requestBody: makeCodexRequestBody(),
+        userAgent: "codex_cli_rs/0.50.0",
+      });
+
+    const first = await completeTurn();
+    expect(fakeRedis.expire).not.toHaveBeenCalled();
+
+    const second = await completeTurn();
+
+    expect(second.action).toBe("reused_fingerprint_cache");
+    expect(second.sessionId).toBe(first.sessionId);
+    expect(fakeRedis.expire).toHaveBeenCalledTimes(1);
+    expect(fakeRedis.expire).toHaveBeenCalledWith(
+      expect.stringMatching(/^codex:fingerprint:[0-9a-f]{64}:session_id$/),
+      600
+    );
+  });
+
+  test("keeps the cached session id when the fingerprint TTL refresh fails", async () => {
+    const { client: fakeRedis } = makeFakeRedis();
+    fakeRedis.expire.mockRejectedValue(new Error("READONLY"));
+    redisClientRef = fakeRedis;
+    const completeTurn = () =>
+      completeCodexSessionIdentifiers({
+        keyId: 7,
+        headers: new Headers({ "x-forwarded-for": "203.0.113.21" }),
+        requestBody: makeCodexRequestBody(),
+        userAgent: "codex_cli_rs/0.50.0",
+      });
+
+    const first = await completeTurn();
+    const second = await completeTurn();
+
+    expect(second.action).toBe("reused_fingerprint_cache");
+    expect(second.sessionId).toBe(first.sessionId);
   });
 
   test("completes header session_id when only x-session-id is provided", async () => {

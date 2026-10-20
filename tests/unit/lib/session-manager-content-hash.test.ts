@@ -7,6 +7,7 @@ let redisClientRef: {
   pipeline: ReturnType<typeof vi.fn>;
 };
 let values: Map<string, string>;
+let expiredKeys: Array<[string, number]>;
 
 const bindingMocks = vi.hoisted(() => ({
   mutateLegacySessionBindingSafely: vi.fn(),
@@ -61,12 +62,17 @@ function legacyHashKey(): string {
 beforeEach(() => {
   vi.clearAllMocks();
   values = new Map<string, string>();
+  expiredKeys = [];
 
   const createPipeline = () => {
     const operations: Array<() => void> = [];
     const pipeline = {
       setex: vi.fn((key: string, _ttlSeconds: number, value: string) => {
         operations.push(() => values.set(key, value));
+        return pipeline;
+      }),
+      expire: vi.fn((key: string, ttlSeconds: number) => {
+        operations.push(() => expiredKeys.push([key, ttlSeconds]));
         return pipeline;
       }),
       exec: vi.fn(async () => {
@@ -136,6 +142,20 @@ describe("SessionManager content-hash mapping tenant isolation", () => {
     expect(bindingMocks.readOrReconcileSessionBinding).toHaveBeenCalledWith(
       expect.objectContaining({ sessionId: first, keyId: 101 })
     );
+  });
+
+  it("slides the tenant-scoped mapping TTL every time the mapping is reused", async () => {
+    const first = await SessionManager.getOrCreateSessionId(101, MESSAGES, null);
+    await vi.waitFor(() => expect(values.get(tenantHashKey(101))).toBe(first));
+    expect(expiredKeys).toEqual([]);
+
+    await expect(SessionManager.getOrCreateSessionId(101, MESSAGES, null)).resolves.toBe(first);
+    await expect(SessionManager.getOrCreateSessionId(101, MESSAGES, null)).resolves.toBe(first);
+
+    expect(expiredKeys).toEqual([
+      [tenantHashKey(101), 300],
+      [tenantHashKey(101), 300],
+    ]);
   });
 
   it.each([

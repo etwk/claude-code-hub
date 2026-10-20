@@ -45,6 +45,7 @@ const makePipeline = () => {
   return pipeline;
 };
 
+vi.mock("server-only", () => ({}));
 vi.mock("@/lib/logger", () => ({
   logger: {
     debug: vi.fn(),
@@ -160,6 +161,25 @@ describe("SESSION_TTL environment variable validation", () => {
         getGlobalActiveSessionsKey(),
         "-inf",
         expectedCutoff
+      );
+    });
+  });
+
+  describe("SessionManager TTL parsing", () => {
+    it.each([
+      ["empty string", "", 300],
+      ["NaN", "not-a-number", 300],
+      ["0", "0", 300],
+      ["negative", "-100", 300],
+      ["valid positive integer", "600", 600],
+    ])("should resolve %s SESSION_TTL (%s) to %i seconds", async (_label, raw, expectedSeconds) => {
+      process.env.SESSION_TTL = raw;
+      // SESSION_TTL is read at module load; each case re-imports after vi.resetModules().
+      const { SessionManager } = await import("@/lib/session-manager");
+
+      // Binding heartbeats run at one third of SESSION_TTL.
+      expect(SessionManager.getVersionedSessionBindingRefreshIntervalMs()).toBe(
+        Math.floor((expectedSeconds * 1000) / 3)
       );
     });
   });

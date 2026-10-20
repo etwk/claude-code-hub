@@ -52,6 +52,12 @@
   （`mcp_call` 及服务端工具结果须 `status=completed`）、成功的空 `response.done`；
   Gemini 识别仅含 `thoughtSignature` 的思考分片。
   没有任何工具调用的完成原因、空流、仅元数据流及上游错误仍按原规则拒绝 (#12)
+- 修复活跃 Claude 会话每隔 `SESSION_TTL` 被拆分：非 Codex 请求在缺少结构化 `metadata.user_id`
+  时依次读取 `metadata.session_id`、请求头 `x-claude-code-session-id` / `x-session-id` /
+  `session_id`，最后将纯 `metadata.user_id`（如裸 UUID）作为会话 ID；客户端会话 ID 限制为
+  64 个字符以内的字母、数字及 `_-.:`（与数据库列宽一致），无法解析出会话 ID 的
+  `metadata.user_id` 视为不可用并由注入补全；内容哈希降级命中时滑动续期哈希映射 TTL。
+  同类修复：Codex 指纹缓存命中时续期 TTL；`SESSION_TTL` 为空、非数字或非正数时回退为 300 秒 (#13)
 - 移除自定义服务器测试对不存在的 `isNextDevMode` helper 的陈旧断言，保留路径脱敏与
   开发/生产 WebSocket 行为覆盖；生产服务器的模式选择逻辑保持不变
 - 修复 System One 深层嵌套敏感词绕过；客户端或过滤器设置 `stream: true` 时仍使用

@@ -5,7 +5,10 @@ import crypto from "node:crypto";
 import { extractCodexSessionId } from "@/app/v1/_lib/codex/session-extractor";
 import { sanitizeHeaders, sanitizeUrl } from "@/app/v1/_lib/proxy/errors";
 import { RESERVED_INTERNAL_HEADERS } from "@/app/v1/_lib/responses-ws/internal-secret";
-import { parseClaudeMetadataUserId } from "@/lib/claude-code/metadata-user-id";
+import {
+  normalizeClaudeClientSessionId,
+  parseClaudeMetadataUserId,
+} from "@/lib/claude-code/metadata-user-id";
 import { getEnvConfig } from "@/lib/config/env.schema";
 import { logger } from "@/lib/logger";
 import {
@@ -545,6 +548,9 @@ function buildTenantContentHashSessionKey(keyId: number, contentHash: string): s
   return `hash:${keyId}:${contentHash}:session`;
 }
 
+// Session headers sent by Claude-compatible clients, in priority order.
+const CLIENT_SESSION_HEADERS = ["x-claude-code-session-id", "x-session-id", "session_id"] as const;
+
 /**
  * Session 管理器
  *
@@ -555,7 +561,10 @@ function buildTenantContentHashSessionKey(keyId: number, contentHash: string): s
  * 4. 存储和查询活跃 session 详细信息（用于实时监控）
  */
 export class SessionManager {
-  private static readonly SESSION_TTL = parseInt(process.env.SESSION_TTL || "300", 10); // 5 分钟
+  private static readonly SESSION_TTL = (() => {
+    const parsed = Number.parseInt(process.env.SESSION_TTL ?? "", 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 300; // 默认 5 分钟
+  })();
   /**
    * 获取 STORE_SESSION_MESSAGES 配置
    * - true：原样存储 message 内容
@@ -568,9 +577,11 @@ export class SessionManager {
   /**
    * 从客户端请求中提取 session_id（支持 metadata 或 header）
    *
-   * 优先级:
-   * 1. metadata.user_id (Claude Code 主要方式，兼容旧字符串格式和新 JSON 字符串格式)
-   * 2. metadata.session_id (备选方式)
+   * Codex 请求使用 extractCodexSessionId；其他请求优先级:
+   * 1. 结构化 metadata.user_id（JSON 字符串或旧版 user_..._account__session_... 格式）
+   * 2. metadata.session_id
+   * 3. 请求头 x-claude-code-session-id / x-session-id / session_id
+   * 4. 纯 metadata.user_id（如裸 UUID）
    */
   static extractClientSessionId(
     requestMessage: Record<string, unknown>,
@@ -591,16 +602,15 @@ export class SessionManager {
       return null;
     }
 
-    const metadata = requestMessage.metadata;
-    if (!metadata || typeof metadata !== "object") {
-      return null;
-    }
+    const metadata =
+      requestMessage.metadata &&
+      typeof requestMessage.metadata === "object" &&
+      !Array.isArray(requestMessage.metadata)
+        ? (requestMessage.metadata as Record<string, unknown>)
+        : null;
 
-    const metadataObj = metadata as Record<string, unknown>;
-
-    // 方案 A: 从 metadata.user_id 中提取 (Claude Code 主要方式)
-    const extractedFromUserId = parseClaudeMetadataUserId(metadataObj.user_id);
-    if (extractedFromUserId.sessionId) {
+    const extractedFromUserId = parseClaudeMetadataUserId(metadata?.user_id);
+    if (extractedFromUserId.sessionId && extractedFromUserId.format !== "plain") {
       logger.trace("SessionManager: Extracted session from metadata.user_id", {
         sessionId: extractedFromUserId.sessionId,
         format: extractedFromUserId.format,
@@ -608,12 +618,33 @@ export class SessionManager {
       return extractedFromUserId.sessionId;
     }
 
-    // 方案 B: 直接从 metadata.session_id 读取 (备选方案)
-    if (typeof metadataObj.session_id === "string" && metadataObj.session_id.length > 0) {
+    const metadataSessionId = normalizeClaudeClientSessionId(metadata?.session_id);
+    if (metadataSessionId) {
       logger.trace("SessionManager: Extracted session from metadata.session_id", {
-        sessionId: metadataObj.session_id,
+        sessionId: metadataSessionId,
       });
-      return metadataObj.session_id;
+      return metadataSessionId;
+    }
+
+    if (headers) {
+      for (const header of CLIENT_SESSION_HEADERS) {
+        const headerSessionId = normalizeClaudeClientSessionId(headers.get(header));
+        if (headerSessionId) {
+          logger.trace("SessionManager: Extracted session from request header", {
+            sessionId: headerSessionId,
+            header,
+          });
+          return headerSessionId;
+        }
+      }
+    }
+
+    // A plain user_id may be a stable per-user identifier, so explicit session sources win.
+    if (extractedFromUserId.sessionId) {
+      logger.trace("SessionManager: Extracted session from plain metadata.user_id", {
+        sessionId: extractedFromUserId.sessionId,
+      });
+      return extractedFromUserId.sessionId;
     }
 
     return null;
@@ -935,8 +966,8 @@ export class SessionManager {
             keyId
           );
           if (ownership.owned) {
-            // 找到当前 tenant 的已有 session，刷新 TTL
-            await SessionManager.refreshSessionTTL(existingSessionId, keyId);
+            // 找到当前 tenant 的已有 session，滑动刷新 session 与 hash 映射的 TTL
+            await SessionManager.refreshSessionTTL(existingSessionId, keyId, hashKey);
             logger.trace("SessionManager: Reusing tenant-scoped session via hash", {
               sessionId: existingSessionId,
               hash: contentHash,
@@ -1031,8 +1062,14 @@ export class SessionManager {
 
   /**
    * 刷新 session TTL（滑动窗口）
+   *
+   * contentHashKey：内容哈希降级命中时一并续期 hash → session 映射，避免活跃会话在首个 TTL 到期后被拆分。
    */
-  private static async refreshSessionTTL(sessionId: string, keyId?: number | null): Promise<void> {
+  private static async refreshSessionTTL(
+    sessionId: string,
+    keyId?: number | null,
+    contentHashKey?: string
+  ): Promise<void> {
     const redis = getRedisClient();
     if (redis?.status !== "ready") return;
 
@@ -1056,6 +1093,9 @@ export class SessionManager {
             reason: legacyRefresh.reason,
           });
         }
+      }
+      if (contentHashKey) {
+        pipeline.expire(contentHashKey, SessionManager.SESSION_TTL);
       }
       pipeline.setex(
         `session:${sessionId}:last_seen`,
