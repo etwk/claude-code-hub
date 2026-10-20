@@ -218,6 +218,56 @@ const REFUSAL_FRAMES = [
   }),
   MESSAGE_STOP_FRAME,
 ];
+// 无参数工具调用：input:{} + partial_json:""，直到 stop_reason=tool_use 才宣告完成（#12）
+const PARAMETERLESS_TOOL_FRAMES = [
+  MESSAGE_START_FRAME,
+  sseFrame("content_block_start", {
+    type: "content_block_start",
+    index: 0,
+    content_block: { type: "tool_use", id: "toolu_01", name: "get_status", input: {} },
+  }),
+  PING_FRAME,
+  sseFrame("content_block_delta", {
+    type: "content_block_delta",
+    index: 0,
+    delta: { type: "input_json_delta", partial_json: "" },
+  }),
+  sseFrame("content_block_stop", { type: "content_block_stop", index: 0 }),
+  sseFrame("message_delta", {
+    type: "message_delta",
+    delta: { stop_reason: "tool_use", stop_sequence: null },
+    usage: { output_tokens: 35 },
+  }),
+  MESSAGE_STOP_FRAME,
+];
+// adaptive/omitted thinking：65 个只带 estimated_tokens 的进度帧超过默认 64 帧预缓冲上限（#12）
+const OMITTED_THINKING_FRAMES = [
+  MESSAGE_START_FRAME,
+  sseFrame("content_block_start", {
+    type: "content_block_start",
+    index: 0,
+    content_block: { type: "thinking", thinking: "", signature: "" },
+  }),
+  ...Array.from({ length: 65 }, (_, index) =>
+    sseFrame("content_block_delta", {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "thinking_delta", thinking: "", estimated_tokens: (index + 1) * 50 },
+    })
+  ),
+  sseFrame("content_block_delta", {
+    type: "content_block_delta",
+    index: 0,
+    delta: { type: "signature_delta", signature: "sig" },
+  }),
+  sseFrame("content_block_stop", { type: "content_block_stop", index: 0 }),
+  sseFrame("message_delta", {
+    type: "message_delta",
+    delta: { stop_reason: "end_turn", stop_sequence: null },
+    usage: { output_tokens: 3250 },
+  }),
+  MESSAGE_STOP_FRAME,
+];
 
 // failover 后获胜供应商的正常内容流
 const WINNER_FRAMES = [MESSAGE_START_FRAME, CONTENT_DELTA_FRAME, MESSAGE_STOP_FRAME];
@@ -948,6 +998,50 @@ describe("F1 stream content gate x ProxyForwarder paths", () => {
           }),
           MESSAGE_STOP_FRAME,
         ];
+        const doForward = spyOnDoForward();
+        doForward.mockImplementation(async (attemptSession) => {
+          attachAttemptRuntime(attemptSession, {
+            clearResponseTimeout: vi.fn(),
+            releaseAgent: vi.fn(),
+          });
+          return createSseResponse(frames);
+        });
+
+        const response = await ProxyForwarder.send(session);
+
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe(frames.join(""));
+        expect(doForward).toHaveBeenCalledTimes(1);
+        expect(mocks.pickRandomProviderWithExclusion).not.toHaveBeenCalled();
+        expect(mocks.recordFailure).not.toHaveBeenCalled();
+        expect(mocks.tombstoneAffinityOnFailure).not.toHaveBeenCalled();
+        expect(session.provider?.id).toBe(provider.id);
+      }
+    );
+
+    test.each([
+      {
+        name: "无参数 tool_use",
+        frames: PARAMETERLESS_TOOL_FRAMES,
+        firstByteTimeoutStreamingMs: 0,
+      },
+      {
+        name: "无参数 tool_use",
+        frames: PARAMETERLESS_TOOL_FRAMES,
+        firstByteTimeoutStreamingMs: 100,
+      },
+      { name: "omitted thinking", frames: OMITTED_THINKING_FRAMES, firstByteTimeoutStreamingMs: 0 },
+      {
+        name: "omitted thinking",
+        frames: OMITTED_THINKING_FRAMES,
+        firstByteTimeoutStreamingMs: 100,
+      },
+    ])(
+      "$name 流提交且不 failover、不计入熔断（hedge timeout $firstByteTimeoutStreamingMs，#12）",
+      async ({ frames, firstByteTimeoutStreamingMs }) => {
+        const provider = createProvider({ firstByteTimeoutStreamingMs });
+        const session = createSession();
+        session.setProvider(provider);
         const doForward = spyOnDoForward();
         doForward.mockImplementation(async (attemptSession) => {
           attachAttemptRuntime(attemptSession, {

@@ -17,10 +17,11 @@ import { SseFrameBufferLimitError, SseFrameParser } from "./sse-frames";
  *
  * - content 帧到达 -> 提交：返回已缓冲的前缀字节 + 原 reader，调用方拼接透传
  * - error / malformed 帧 -> precommit 失败：调用方抛错走现有供应商切换循环
- * - terminal 先于 content -> 空流失败；但 openai-responses 的干净完成（status=completed）
- *   视为成功响应直接提交，空回复是合法结果（见 isCleanResponsesCompletion）；
- *   anthropic 的 message_delta(stop_reason=refusal) 由分类器判为 content，请求级拒绝
- *   在 message_stop 之前即提交透传
+ * - terminal 先于 content -> 空流失败；但 openai-responses 的干净完成（response.completed /
+ *   response.done 且 status=completed）视为成功响应直接提交，空回复是合法结果（见
+ *   isCleanResponsesCompletion）；anthropic 的 message_delta(stop_reason=refusal / tool_use /
+ *   pause_turn) 与 openai-chat 的 finish_reason=tool_calls / function_call 由分类器判为
+ *   content，请求级拒绝与无参数工具调用在终止帧之前即提交透传
  * - 流提前结束（无终止帧的 EOF）-> 空流失败
  * - neutral 帧入缓冲；超过 event/byte 上限 -> prebuffer_overflow 失败
  *   （请求回显帧不计入字节上限，见 isRequestEchoFrame）
@@ -108,10 +109,10 @@ export class StreamPrecommitError extends ProxyError {
  * 必须同时满足 `terminalBeforeContent`：`empty_stream` 也覆盖「上游断流 / 空 body」的
  * EOF 分支，那是真实的供应商侧异常，必须继续计入熔断。
  *
- * 其余家族的 `empty_stream` 保持计入：anthropic / openai-chat / gemini 在正常空回复下
- * 仍会发出内容帧（如 `text_delta` 的空串所在的 content_block 系列；anthropic 请求级
- * 拒绝的 `message_delta.delta.stop_reason=refusal` 由分类器判为 content 直接提交），
- * 没有任何内容或明确拒绝就只吐终止帧属于畸形流，是真实的供应商侧异常。
+ * 其余家族的 `empty_stream` 保持计入：anthropic / openai-chat / gemini 的可交付结果都会
+ * 先发出内容信号（非空 delta、anthropic 的 `message_delta.delta.stop_reason` 为 refusal /
+ * tool_use / pause_turn、openai-chat 的 `finish_reason` 为 tool_calls / function_call），
+ * 没有任何内容、工具调用或明确拒绝就只吐终止帧属于畸形流，是真实的供应商侧异常。
  *
  * 其余 reason 一律计入：`gate_error` / `decode_error` 是真实上游错误帧或损坏载荷，
  * `idle_timeout` 是真实上游静默，`prebuffer_overflow` 是异常中性帧洪泛。

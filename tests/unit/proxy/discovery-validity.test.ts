@@ -355,6 +355,63 @@ describe("discovery validity", () => {
     ).toBe(true);
   });
 
+  it.each(["tool_use", "pause_turn"])(
+    "marks a parameterless Anthropic tool turn ready at stop_reason=%s (#12)",
+    (stopReason) => {
+      const parser = new DiscoveryValidityParser("anthropic");
+      expect(
+        parser.push(
+          'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tu_1","name":"now","input":{}}}\n\n'
+        ).ready
+      ).toBe(false);
+      expect(
+        parser.push(
+          'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}\n\n'
+        ).ready
+      ).toBe(false);
+      expect(
+        parser.push(
+          `event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"${stopReason}"}}\n\n`
+        )
+      ).toEqual({ ready: true, terminal: false, error: false });
+    }
+  );
+
+  it("marks omitted Anthropic thinking ready at the first numeric estimated_tokens (#12)", () => {
+    const parser = new DiscoveryValidityParser("anthropic");
+    expect(
+      parser.push(
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"","estimated_tokens":null}}\n\n'
+      ).ready
+    ).toBe(false);
+    expect(
+      parser.push(
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"","estimated_tokens":50}}\n\n'
+      )
+    ).toEqual({ ready: true, terminal: false, error: false });
+  });
+
+  it("marks a parameterless OpenAI Chat tool call ready at finish_reason=tool_calls", () => {
+    const parser = new DiscoveryValidityParser("openai-chat");
+    expect(
+      parser.push(
+        'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"now","arguments":""}}]},"finish_reason":null}]}\n\n'
+      ).ready
+    ).toBe(false);
+    expect(
+      parser.push('data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n')
+    ).toEqual({ ready: true, terminal: false, error: false });
+  });
+
+  it("accepts a clean empty Responses response.done as a complete candidate", () => {
+    expect(
+      classifyDiscoveryChunk(
+        'event: response.done\ndata: {"type":"response.done","response":{"status":"completed","output":[],"error":null}}\n\n',
+        "openai-responses"
+      )
+    ).toEqual({ ready: true, terminal: true, error: false });
+  });
+
   it("shares the enforced gate content boundary for structured protocol frames", () => {
     expect(
       classifyDiscoveryChunk(

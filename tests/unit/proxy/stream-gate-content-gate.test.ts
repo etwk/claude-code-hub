@@ -342,6 +342,75 @@ describe("runStreamContentGate", () => {
     expect(JSON.parse(gateError.upstreamError?.body ?? "{}").error.upstream_status_code).toBe(200);
   });
 
+  it.each([
+    ["tool_use", "tool_use"],
+    ["server_tool_use", "pause_turn"],
+  ])(
+    "无参数 %s 流在 message_delta(stop_reason=%s) 提交，不伪造 empty_stream（#12）",
+    async (blockType, stopReason) => {
+      const frames = [
+        MESSAGE_START,
+        `event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"${blockType}","id":"toolu_01","name":"get_status","input":{}}}\n\n`,
+        PING,
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}\n\n',
+        'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+        `event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"${stopReason}","stop_sequence":null},"usage":{"output_tokens":35}}\n\n`,
+        MESSAGE_STOP,
+      ];
+      const wire = encoder.encode(frames.join(""));
+      for (const size of [1, 7, wire.length]) {
+        const chunks: Uint8Array[] = [];
+        for (let i = 0; i < wire.length; i += size) chunks.push(wire.subarray(i, i + size));
+        const reader = readerFromChunks(chunks);
+        const result = await runStreamContentGate(reader, {
+          ...GATE_OPTIONS,
+          captureCommitMarker: true,
+        });
+        expect(result.committed).toBe(true);
+        if (!result.committed) continue;
+        expect(result.commitMarker?.frameIndex).toBe(6);
+        const delivered = [...result.prefixChunks];
+        while (true) {
+          const next = await reader.read();
+          if (next.done) break;
+          delivered.push(next.value);
+        }
+        expect(await drainPrefix(delivered)).toBe(frames.join(""));
+      }
+    }
+  );
+
+  it("omitted thinking 在首个 estimated_tokens 进度帧提交，不触发 prebuffer_overflow（#12）", async () => {
+    const thinkingStart =
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}\n\n';
+    // 超过事件上限的进度帧，末尾是 estimated_tokens:null 占位帧
+    const estimates = [
+      ...Array.from({ length: GATE_OPTIONS.prebufferEventCap + 1 }, (_, index) => (index + 1) * 50),
+      null,
+    ];
+    const progress = estimates.map(
+      (estimated) =>
+        `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"","estimated_tokens":${estimated}}}\n\n`
+    );
+    const frames = [
+      MESSAGE_START,
+      thinkingStart,
+      ...progress,
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}\n\n',
+      MESSAGE_STOP,
+    ];
+    const result = await runStreamContentGate(readerFromChunks(frames), {
+      ...GATE_OPTIONS,
+      captureCommitMarker: true,
+    });
+    expect(result.committed).toBe(true);
+    if (!result.committed) return;
+    expect(result.commitMarker?.frameIndex).toBe(3);
+    expect(await drainPrefix(result.prefixChunks)).toBe(
+      MESSAGE_START + thinkingStart + progress[0]
+    );
+  });
+
   it("treats EOF without any content as empty stream", async () => {
     const reader = readerFromChunks([PING, MESSAGE_START]);
     const result = await runStreamContentGate(reader, GATE_OPTIONS);
@@ -493,6 +562,25 @@ describe("runStreamContentGate", () => {
     if (!result.committed) return;
     expect(await drainPrefix(result.prefixChunks)).toBe(reasoningFrames[0]);
     expect(result.readerDone).toBe(false);
+  });
+
+  it("openai-chat: 无参数 tool_calls 在 finish_reason 帧提交，不在 [DONE] 判为空流", async () => {
+    const frames = [
+      'data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_status","arguments":""}}]},"finish_reason":null}]}\n\n',
+      'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+      "data: [DONE]\n\n",
+    ];
+    const reader = readerFromChunks(frames);
+    const result = await runStreamContentGate(reader, {
+      ...GATE_OPTIONS,
+      family: "openai-chat",
+    });
+
+    expect(result.committed).toBe(true);
+    if (!result.committed) return;
+    expect(await drainPrefix(result.prefixChunks)).toBe(frames[0] + frames[1]);
+    const rest = await reader.read();
+    expect(new TextDecoder().decode(rest.value)).toBe(frames[2]);
   });
 
   it("openai-responses: commits a compaction item before response.completed", async () => {
@@ -890,9 +978,23 @@ describe("OpenAI Responses 空输出完成", () => {
     expect(await drainPrefix(result.prefixChunks)).toBe(frame);
   });
 
+  it("透传明确成功但没有输出的 response.done 终态", async () => {
+    const frame = `event: response.done\ndata: ${JSON.stringify({
+      type: "response.done",
+      response: { id: "resp_done", status: "completed", output: [], error: null },
+    })}\n\n`;
+
+    const result = await runStreamContentGate(readerFromChunks([frame]), options);
+
+    expect(result.committed).toBe(true);
+    if (!result.committed) return;
+    expect(await drainPrefix(result.prefixChunks)).toBe(frame);
+  });
+
   it.each([
     ["response.completed", "failed", null],
     ["response.completed", "completed", { code: "server_error" }],
+    ["response.done", "failed", null],
   ])("拒绝非成功终态 %s/%s", async (eventName, status, error) => {
     const payload = JSON.stringify({
       type: eventName,

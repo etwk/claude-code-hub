@@ -87,6 +87,7 @@ function compile(family: ProtocolFamily) {
   const outputCompaction =
     family === "openai-responses" ? compaction("response.output.#") : BigInt(0);
   const completedType = equal("type", "response.completed", true);
+  const doneType = equal("type", "response.done", true);
   const incompleteType = equal("type", "response.incomplete", true);
   const completedStatus = equal("response.status", "completed", true);
   const incompleteStatus = equal("response.status", "incomplete", true);
@@ -128,9 +129,11 @@ function compile(family: ProtocolFamily) {
           event || wrapEventQueries.find(([, bit]) => (facts & bit) !== BigInt(0))?.[0] || "";
         verdict = classifyRules(facts, wrappedEvent, wrappedRules);
       }
+      const cleanType =
+        ((!event || event === "response.completed") && (facts & completedType) !== BigInt(0)) ||
+        ((!event || event === "response.done") && (facts & doneType) !== BigInt(0));
       const clean =
-        (!event || event === "response.completed") &&
-        (facts & completedType) !== BigInt(0) &&
+        cleanType &&
         (facts & completedStatus) !== BigInt(0) &&
         (facts & responseError) === BigInt(0);
       const incomplete =

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyFrame,
+  isCleanResponsesCompletion,
+  isResponsesIncompleteCompletion,
   type ProtocolFamily,
 } from "@/app/v1/_lib/proxy/stream-gate/frame-classifier";
 import { createFrameProbe } from "@/app/v1/_lib/proxy/stream-gate/frame-probe";
@@ -53,6 +55,26 @@ const samples = [
   '{"error":1.}',
   '{"error":1e}',
   '{"error":true,}',
+  '{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"","estimated_tokens":50}}',
+  '{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"","estimated_tokens":0}}',
+  '{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"","estimated_tokens":null}}',
+  '{"type":"content_block_start","content_block":{"type":"tool_use","id":"t","name":"f","input":{}}}',
+  '{"type":"content_block_start","content_block":{"type":"mcp_tool_use","input":{"a":1}}}',
+  '{"type":"content_block_start","content_block":{"type":["server_tool_use"],"input":{"a":null}}}',
+  '{"type":"content_block_start","content_block":{"type":"text","text":"","input":{"a":1}}}',
+  '{"type":"message_delta","delta":{"stop_reason":"tool_use"}}',
+  '{"type":"message_delta","delta":{"stop_reason":"pause_turn"},"error":{"message":"boom"}}',
+  '{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"f","arguments":""}}]},"finish_reason":null}]}',
+  '{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+  '{"choices":[{"delta":{},"finish_reason":["function_call"]}]}',
+  '{"type":"response.output_item.done","item":{"type":"function_call","name":"f","arguments":""}}',
+  '{"type":"response.output_item.added","item":{"type":"function_call","name":"f","arguments":""}}',
+  '{"type":"response.output_item.done","item":{"type":"image_generation_call","result":"b64"}}',
+  '{"type":"response.output_item.done","item":{"type":"file_search_call","results":[]}}',
+  '{"type":"response.done","response":{"status":"completed","error":null}}',
+  '{"type":"response.done","response":{"status":"completed","error":{"message":"x"}}}',
+  '{"candidates":[{"content":{"parts":[{"thought":true,"text":"","thoughtSignature":"sig"}]}}]}',
+  '{"response":{"candidates":[{"content":{"parts":[{"thoughtSignature":""}]}}]}}',
 ];
 
 describe("增量分类与既有分类器差分", () => {
@@ -110,6 +132,34 @@ describe("增量分类与既有分类器差分", () => {
             probe.finish(event, data.slice(0, 2000), data.length).verdict,
             `${event}: ${data}`
           ).toBe(classifyFrame(family, event, data));
+        }
+      }
+    }
+  });
+
+  it.each(families)("%s 的 acceptTerminal 与 Responses 干净/incomplete 终态判定一致", (family) => {
+    const terminals = [
+      '{"type":"response.completed","response":{"status":"completed","error":null}}',
+      '{"type":"response.done","response":{"status":"completed"}}',
+      '{"type":"response.done","response":{"status":"failed"}}',
+      '{"type":"response.done","response":{"status":"completed","error":{"message":"x"}}}',
+      '{"type":"response.done","type":"response.completed","response":{"status":"completed"}}',
+      '{"type":"response.done","response":[{"status":"completed"}]}',
+      '{"type":"response.incomplete","response":{"status":"incomplete"}}',
+      '{"type":"response.done"}',
+    ];
+    for (const data of terminals) {
+      for (const event of [null, "response.completed", "response.done", "response.incomplete"]) {
+        const expected =
+          family === "openai-responses" &&
+          (isCleanResponsesCompletion(event, data) || isResponsesIncompleteCompletion(event, data));
+        for (const size of [1, 7, 128]) {
+          const probe = createFrameProbe(family);
+          for (let i = 0; i < data.length; i += size) probe.feed(data.slice(i, i + size));
+          expect(
+            probe.finish(event, data.slice(0, 2000), data.length).acceptTerminal,
+            `${event}: ${data}`
+          ).toBe(expected);
         }
       }
     }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyFrame,
+  isCleanResponsesCompletion,
   isRequestEchoFrame,
   mapProviderTypeToFamily,
 } from "@/app/v1/_lib/proxy/stream-gate/frame-classifier";
@@ -184,6 +185,66 @@ describe("classifyFrame: anthropic", () => {
     ).toBe("error");
   });
 
+  it("content: omitted-thinking progress delta with numeric estimated_tokens (#12)", () => {
+    const delta = (estimated: number | null) =>
+      JSON.stringify({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "thinking_delta", thinking: "", estimated_tokens: estimated },
+      });
+    expect(classifyFrame("anthropic", "content_block_delta", delta(50))).toBe("content");
+    expect(classifyFrame("anthropic", null, delta(0))).toBe("content");
+    // 进度结束时的 null 占位帧不携带任何可交付信号
+    expect(classifyFrame("anthropic", "content_block_delta", delta(null))).toBe("neutral");
+  });
+
+  it("tool-use content_block_start commits only with an inline non-empty input (#12)", () => {
+    for (const type of ["tool_use", "server_tool_use", "mcp_tool_use"]) {
+      const start = (input?: unknown) =>
+        JSON.stringify({
+          type: "content_block_start",
+          index: 0,
+          content_block: { type, id: "toolu_1", name: "lookup", ...(input ? { input } : {}) },
+        });
+      expect(classifyFrame("anthropic", "content_block_start", start()), type).toBe("neutral");
+      expect(classifyFrame("anthropic", "content_block_start", start({})), type).toBe("neutral");
+      expect(classifyFrame("anthropic", "content_block_start", start({ query: "ok" })), type).toBe(
+        "content"
+      );
+    }
+    // input 只对工具块有语义
+    expect(
+      classifyFrame(
+        "anthropic",
+        "content_block_start",
+        '{"type":"content_block_start","content_block":{"type":"text","text":"","input":{"a":1}}}'
+      )
+    ).toBe("neutral");
+  });
+
+  it("content: message_delta stop_reason tool_use / pause_turn completes a parameterless tool turn (#12)", () => {
+    for (const stopReason of ["tool_use", "pause_turn"]) {
+      const data = `{"type":"message_delta","delta":{"stop_reason":"${stopReason}","stop_sequence":null},"usage":{"output_tokens":35}}`;
+      expect(classifyFrame("anthropic", "message_delta", data)).toBe("content");
+      expect(classifyFrame("anthropic", null, data)).toBe("content");
+      expect(
+        classifyFrame(
+          "anthropic",
+          "message_delta",
+          `{"type":"message_delta","delta":{"stop_reason":"${stopReason}"},"error":{"message":"boom"}}`
+        )
+      ).toBe("error");
+    }
+    // compaction 结束本身不证明有 payload，仍由 compaction 块决定
+    expect(
+      classifyFrame(
+        "anthropic",
+        "message_delta",
+        '{"type":"message_delta","delta":{"stop_reason":"compaction"}}'
+      )
+    ).toBe("neutral");
+  });
+
   it("error: error event and fake-200 error envelope", () => {
     expect(
       classifyFrame(
@@ -273,6 +334,27 @@ describe("classifyFrame: openai-chat", () => {
     expect(
       classifyFrame("openai-chat", null, '{"choices":[{"delta":{"reasoning_content":""}}]}')
     ).toBe("neutral");
+  });
+
+  it("content: finish_reason tool_calls / function_call completes a parameterless call", () => {
+    for (const finishReason of ["tool_calls", "function_call"]) {
+      expect(
+        classifyFrame(
+          "openai-chat",
+          null,
+          `{"choices":[{"index":0,"delta":{},"finish_reason":"${finishReason}"}]}`
+        )
+      ).toBe("content");
+    }
+    for (const finishReason of ['"length"', '"content_filter"', "null"]) {
+      expect(
+        classifyFrame(
+          "openai-chat",
+          null,
+          `{"choices":[{"index":0,"delta":{},"finish_reason":${finishReason}}]}`
+        )
+      ).toBe("neutral");
+    }
   });
 
   it("error: in-stream error payload", () => {
@@ -384,6 +466,55 @@ describe("classifyFrame: openai-responses", () => {
         '{"type":"response.output_item.done","item":{"type":"function_call","name":"get_x","arguments":"{}"}}'
       )
     ).toBe("content");
+  });
+
+  it.each([
+    ["function_call", { name: "get_time", call_id: "call_1", arguments: "" }],
+    ["mcp_call", { name: "ping", server_label: "srv", arguments: "" }],
+    ["custom_tool_call", { name: "noop", call_id: "call_2", input: "" }],
+  ])("content: completed parameterless %s item; added stays neutral", (type, fields) => {
+    const frame = (event: string, item: Record<string, unknown>) =>
+      JSON.stringify({ type: event, output_index: 0, item: { id: "item_1", type, ...item } });
+    expect(
+      classifyFrame(
+        "openai-responses",
+        "response.output_item.done",
+        frame("response.output_item.done", fields)
+      )
+    ).toBe("content");
+    expect(
+      classifyFrame(
+        "openai-responses",
+        "response.output_item.added",
+        frame("response.output_item.added", fields)
+      )
+    ).toBe("neutral");
+    expect(
+      classifyFrame(
+        "openai-responses",
+        "response.output_item.done",
+        frame("response.output_item.done", { ...fields, name: "" })
+      )
+    ).toBe("neutral");
+  });
+
+  it.each([
+    ["image_generation_call", "result", "base64-png", null],
+    ["file_search_call", "results", [{ file_id: "file_1", text: "hit" }], []],
+    // 省略 name，单独验证 output 字段
+    ["mcp_call", "output", "tool output", ""],
+    ["code_interpreter_call", "outputs", [{ type: "logs", logs: "ok" }], []],
+  ])("output_item.done %s commits on non-empty %s", (type, field, value, empty) => {
+    for (const [payload, verdict] of [
+      [value, "content"],
+      [empty, "neutral"],
+    ] as const) {
+      const data = JSON.stringify({
+        type: "response.output_item.done",
+        item: { id: "item_1", type, status: "completed", [field]: payload },
+      });
+      expect(classifyFrame("openai-responses", "response.output_item.done", data)).toBe(verdict);
+    }
   });
 
   it("content: compaction output item with opaque encrypted content", () => {
@@ -597,6 +728,17 @@ describe("classifyFrame: gemini", () => {
     ).toBe("neutral");
   });
 
+  it("content: thought signature carries opaque thinking even with empty text", () => {
+    const chunk = (thoughtSignature: string) => ({
+      candidates: [{ content: { parts: [{ thought: true, text: "", thoughtSignature }] } }],
+    });
+    expect(classifyFrame("gemini", null, JSON.stringify(chunk("sig")))).toBe("content");
+    expect(classifyFrame("gemini", null, JSON.stringify({ response: chunk("sig") }))).toBe(
+      "content"
+    );
+    expect(classifyFrame("gemini", null, JSON.stringify(chunk("")))).toBe("neutral");
+  });
+
   it("error: error chunk / promptFeedback.blockReason / abnormal finishReason", () => {
     expect(
       classifyFrame("gemini", null, '{"error":{"code":500,"message":"x","status":"INTERNAL"}}')
@@ -696,5 +838,39 @@ describe("isRequestEchoFrame", () => {
     expect(isRequestEchoFrame("anthropic", "response.created", "{}")).toBe(false);
     expect(isRequestEchoFrame("openai-chat", null, '{"type":"response.created"}')).toBe(false);
     expect(isRequestEchoFrame("gemini", null, '{"type":"response.created"}')).toBe(false);
+  });
+});
+
+describe("isCleanResponsesCompletion", () => {
+  const frame = (type: string, response: Record<string, unknown>) =>
+    JSON.stringify({ type, response });
+
+  it.each(["response.completed", "response.done"])(
+    "accepts a clean %s with or without the event line",
+    (type) => {
+      const data = frame(type, { status: "completed", output: [], error: null });
+      expect(isCleanResponsesCompletion(type, data)).toBe(true);
+      expect(isCleanResponsesCompletion(null, data)).toBe(true);
+      expect(isCleanResponsesCompletion(type, frame(type, { status: "failed" }))).toBe(false);
+      expect(
+        isCleanResponsesCompletion(
+          type,
+          frame(type, { status: "completed", error: { message: "boom" } })
+        )
+      ).toBe(false);
+    }
+  );
+
+  it("rejects an event line that disagrees with the payload type", () => {
+    const done = frame("response.done", { status: "completed" });
+    const completed = frame("response.completed", { status: "completed" });
+    expect(isCleanResponsesCompletion("response.completed", done)).toBe(false);
+    expect(isCleanResponsesCompletion("response.done", completed)).toBe(false);
+    expect(
+      isCleanResponsesCompletion(
+        "response.incomplete",
+        frame("response.incomplete", { status: "completed" })
+      )
+    ).toBe(false);
   });
 });

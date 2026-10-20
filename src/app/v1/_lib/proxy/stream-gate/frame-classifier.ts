@@ -48,12 +48,15 @@ export const STREAM_SIGNALS: Record<ProtocolFamily, StreamSignal> = {
   anthropic: {
     contentRules: [
       {
-        // text / input_json / thinking / signature / citations / compaction deltas
+        // text / input_json / thinking / estimated_tokens / signature / citations / compaction deltas。
+        // adaptive/omitted thinking 的进度帧 thinking 为空串，但数值 estimated_tokens 已表示
+        // 模型正在产出思考；null 占位帧保持中性。
         eventTypes: ["content_block_delta"],
         anyPaths: [
           "delta.text",
           "delta.partial_json",
           "delta.thinking",
+          "delta.estimated_tokens",
           "delta.signature",
           "delta.citation",
           "delta.content",
@@ -61,8 +64,9 @@ export const STREAM_SIGNALS: Record<ProtocolFamily, StreamSignal> = {
         ],
       },
       {
-        // start 帧即携带完整实体 payload 的内容块。tool_use 系列只提供 id/name，
-        // Anthropic SDK 需要后续 input_json_delta 才能得到可执行 input，不能在这里提交。
+        // start 帧即携带完整实体 payload 的内容块。tool_use 系列通常只带 id/name 与空
+        // input:{}，需等待后续 input_json_delta 或 message_delta(stop_reason=tool_use)；
+        // 上游若在 start 帧内联非空 input 则已是可执行调用，可直接提交。
         eventTypes: ["content_block_start"],
         anyPaths: [
           "content_block.data",
@@ -72,11 +76,15 @@ export const STREAM_SIGNALS: Record<ProtocolFamily, StreamSignal> = {
           "content_block.fileId",
           "content_block.url",
           "content_block.result",
+          "content_block.input",
         ],
         valueMatches: [
           {
             path: "content_block.type",
             values: [
+              "tool_use",
+              "server_tool_use",
+              "mcp_tool_use",
               "redacted_thinking",
               "compaction",
               "web_search_tool_result",
@@ -95,8 +103,12 @@ export const STREAM_SIGNALS: Record<ProtocolFamily, StreamSignal> = {
         // 请求级拒绝：模型可在不产生任何内容块的情况下以 stop_reason=refusal 结束。
         // 拒绝本身就是需要交给客户端的请求结果（与 openai-chat/responses 的 refusal
         // 内容规则一致），不能被当成空流伪造 502、触发重试或计入供应商熔断。
+        // 无参数工具调用只发送 input:{} 与 partial_json:""，直到 stop_reason=tool_use /
+        // pause_turn 才宣告工具调用完成；同样是可交付结果，必须在 message_stop 前提交。
         eventTypes: ["message_delta"],
-        valueMatches: [{ path: "delta.stop_reason", values: ["refusal"] }],
+        valueMatches: [
+          { path: "delta.stop_reason", values: ["refusal", "tool_use", "pause_turn"] },
+        ],
       },
     ],
     errorRules: [
@@ -119,6 +131,13 @@ export const STREAM_SIGNALS: Record<ProtocolFamily, StreamSignal> = {
           "choices.#.delta.refusal",
           "choices.#.delta.audio.data",
           "choices.#.delta.audio.transcript",
+        ],
+      },
+      {
+        // 无参数工具调用的 delta 只带 arguments:""，直到 finish_reason=tool_calls /
+        // function_call 才宣告调用完成；该 chunk 是可交付结果，必须在 [DONE] 前提交。
+        valueMatches: [
+          { path: "choices.#.finish_reason", values: ["tool_calls", "function_call"] },
         ],
       },
     ],
@@ -183,7 +202,8 @@ export const STREAM_SIGNALS: Record<ProtocolFamily, StreamSignal> = {
       {
         // output_item.added 的 name/id/status 只是结构元数据；真实 payload 到达前不能提交，
         // 否则紧随其后的 response.failed / 断流将失去透明 fallback 机会。
-        // fake-streaming 的完整 item 会在 added/done 中携带 arguments/input/action，仍可提交。
+        // fake-streaming 的完整 item 会在 added/done 中携带 arguments/input/action，仍可提交；
+        // 服务端工具（image_generation / mcp / file_search / code_interpreter）在 done 中携带结果。
         eventTypes: ["response.output_item.added", "response.output_item.done"],
         anyPaths: [
           "item.content.#.text",
@@ -196,6 +216,19 @@ export const STREAM_SIGNALS: Record<ProtocolFamily, StreamSignal> = {
           "item.code",
           "item.command",
           "item.operation",
+          "item.result",
+          "item.results",
+          "item.output",
+          "item.outputs",
+        ],
+      },
+      {
+        // 无参数工具调用的 arguments/input 为空串：added 阶段仍保持中性，
+        // output_item.done 表示该调用项已完整收尾，是可交付结果。
+        eventTypes: ["response.output_item.done"],
+        anyPaths: ["item.name"],
+        valueMatches: [
+          { path: "item.type", values: ["function_call", "mcp_call", "custom_tool_call"] },
         ],
       },
     ],
@@ -216,6 +249,7 @@ export const STREAM_SIGNALS: Record<ProtocolFamily, StreamSignal> = {
         // candidates[].content.parts[] 任一实体载荷字段非空
         anyPaths: [
           "candidates.#.content.parts.#.text",
+          "candidates.#.content.parts.#.thoughtSignature",
           "candidates.#.content.parts.#.inlineData.data",
           "candidates.#.content.parts.#.fileData.fileUri",
           "candidates.#.content.parts.#.functionCall.name",
@@ -631,7 +665,7 @@ export function isNonEmptyValue(value: unknown): boolean {
 }
 
 /**
- * 干净完成帧判定：`response.completed` 且 `response.status === "completed"`。
+ * 干净完成帧判定：`response.completed` / `response.done` 且 `response.status === "completed"`。
  *
  * 这类帧在 classifyFrame 中仍是 `terminal`（StreamProtocolObserver 依赖该判定来确认流
  * 正常收尾），但对门控而言它是协议层面的成功响应：即使可见内容为空也应当透传，而不是
@@ -642,7 +676,9 @@ export function isNonEmptyValue(value: unknown): boolean {
  */
 export function isCleanResponsesCompletion(eventName: string | null, data: string): boolean {
   const effective = (eventName ?? "").trim();
-  if (effective !== "" && effective !== "response.completed") return false;
+  if (effective !== "" && effective !== "response.completed" && effective !== "response.done") {
+    return false;
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(data);
@@ -651,7 +687,8 @@ export function isCleanResponsesCompletion(eventName: string | null, data: strin
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return false;
   const record = parsed as Record<string, unknown>;
-  if (record.type !== "response.completed") return false;
+  if (record.type !== "response.completed" && record.type !== "response.done") return false;
+  if (effective !== "" && effective !== record.type) return false;
   const response = record.response;
   if (response === null || typeof response !== "object" || Array.isArray(response)) return false;
   const inner = response as Record<string, unknown>;
