@@ -44,12 +44,13 @@
 - 修复 Anthropic compaction 流被内容门控误判为 `empty_stream`：识别起始块与增量中的
   `content` / `encrypted_content`，原样透传有效压缩结果，避免无效切商与熔断计数；
   空载荷、上游错误及损坏帧仍按原有规则拒绝 (#7)
-- 修复内容门控误拒有效流：Anthropic 无参数工具调用在 `stop_reason=tool_use` / `pause_turn`
-  时提交，不再判为 `empty_stream`；adaptive/omitted thinking 的 `estimated_tokens` 进度帧
-  直接提交，不再缓冲到 `prebuffer_overflow`；起始块内联非空 `input` 的工具调用立即提交。
-  同类修复：OpenAI Chat 无参数工具调用在 `finish_reason=tool_calls` / `function_call` 时提交；
-  Responses 识别已完成的无参数工具调用项、工具结果字段及成功的空 `response.done`；
-  Gemini 识别仅含 `thoughtSignature` 的思考分片。空流、仅元数据流及上游错误仍按原规则拒绝 (#12)
+- 修复内容门控误拒有效流：Anthropic 无参数工具调用在工具块之后的 `stop_reason=tool_use` /
+  `pause_turn` 时提交，不再判为 `empty_stream`；adaptive/omitted thinking 的 `estimated_tokens`
+  进度帧直接提交，不再缓冲到 `prebuffer_overflow`；起始块内联非空 `input` 的工具调用立即提交。
+  同类修复：OpenAI Chat 无参数工具调用在具名调用之后的 `finish_reason=tool_calls` /
+  `function_call` 时提交；Responses 识别已完成的无参数工具调用项（`mcp_call` 须明确成功）、
+  工具结果字段及成功的空 `response.done`；Gemini 识别仅含 `thoughtSignature` 的思考分片。
+  没有任何工具调用的完成原因、空流、仅元数据流及上游错误仍按原规则拒绝 (#12)
 - 移除自定义服务器测试对不存在的 `isNextDevMode` helper 的陈旧断言，保留路径脱敏与
   开发/生产 WebSocket 行为覆盖；生产服务器的模式选择逻辑保持不变
 - 修复 System One 深层嵌套敏感词绕过；客户端或过滤器设置 `stream: true` 时仍使用

@@ -380,6 +380,22 @@ describe("runStreamContentGate", () => {
     }
   );
 
+  it.each(["tool_use", "pause_turn"])(
+    "没有工具块就只给出 stop_reason=%s 的流仍是 empty_stream 并计入熔断（#12）",
+    async (stopReason) => {
+      const orphanStop = `event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"${stopReason}"}}\n\n`;
+      const result = await runStreamContentGate(
+        readerFromChunks([MESSAGE_START, PING, orphanStop, MESSAGE_STOP]),
+        GATE_OPTIONS
+      );
+      expect(result.committed).toBe(false);
+      if (result.committed) return;
+      const gateError = result.error as StreamPrecommitError;
+      expect(gateError.gateReason).toBe("empty_stream");
+      expect(isRequestScopedGateFailure(gateError)).toBe(false);
+    }
+  );
+
   it("omitted thinking 在首个 estimated_tokens 进度帧提交，不触发 prebuffer_overflow（#12）", async () => {
     const thinkingStart =
       'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}\n\n';
@@ -581,6 +597,22 @@ describe("runStreamContentGate", () => {
     expect(await drainPrefix(result.prefixChunks)).toBe(frames[0] + frames[1]);
     const rest = await reader.read();
     expect(new TextDecoder().decode(rest.value)).toBe(frames[2]);
+  });
+
+  it("openai-chat: 没有任何调用就只给出 finish_reason=tool_calls 的流仍是 empty_stream", async () => {
+    const result = await runStreamContentGate(
+      readerFromChunks([
+        'data: {"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\n',
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+        "data: [DONE]\n\n",
+      ]),
+      { ...GATE_OPTIONS, family: "openai-chat" }
+    );
+    expect(result.committed).toBe(false);
+    if (result.committed) return;
+    const gateError = result.error as StreamPrecommitError;
+    expect(gateError.gateReason).toBe("empty_stream");
+    expect(isRequestScopedGateFailure(gateError)).toBe(false);
   });
 
   it("openai-responses: commits a compaction item before response.completed", async () => {

@@ -177,6 +177,20 @@ describe("StreamProtocolObserver", () => {
     });
   });
 
+  test("Anthropic 没有工具块的 stop_reason=tool_use 不记为已交付内容（#12）", () => {
+    const observer = createStreamProtocolObserver("anthropic");
+    observer.observe(
+      encoder.encode(
+        [
+          'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}\n\n',
+          'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+        ].join("")
+      )
+    );
+
+    expect(observer.finish()).toMatchObject({ sawContent: false, sawTerminal: true });
+  });
+
   test("缺失 terminal 时保留 sawContent，但不能证明流已成功完成", () => {
     const observer = createStreamProtocolObserver("openai-chat");
     observer.observe(encoder.encode('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'));

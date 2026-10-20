@@ -7,7 +7,11 @@ import { getCachedProxyRuntimeSettings } from "@/lib/system-settings/proxy-runti
 import { inferUpstreamErrorStatusCodeFromText } from "@/lib/utils/upstream-error-detection";
 import { BufferedByteChunks } from "../buffered-byte-chunks";
 import { ProxyError } from "../errors";
-import { classifyFrame, type FrameVerdict, type ProtocolFamily } from "./frame-classifier";
+import {
+  createStreamFrameClassifier,
+  type FrameVerdict,
+  type ProtocolFamily,
+} from "./frame-classifier";
 import type { StreamGatePrebufferBudget, StreamGatePrebufferLease } from "./prebuffer-budget";
 import { ProbedSseFrames } from "./probed-sse-frames";
 import { SseFrameBufferLimitError, SseFrameParser } from "./sse-frames";
@@ -19,9 +23,10 @@ import { SseFrameBufferLimitError, SseFrameParser } from "./sse-frames";
  * - error / malformed 帧 -> precommit 失败：调用方抛错走现有供应商切换循环
  * - terminal 先于 content -> 空流失败；但 openai-responses 的干净完成（response.completed /
  *   response.done 且 status=completed）视为成功响应直接提交，空回复是合法结果（见
- *   isCleanResponsesCompletion）；anthropic 的 message_delta(stop_reason=refusal / tool_use /
- *   pause_turn) 与 openai-chat 的 finish_reason=tool_calls / function_call 由分类器判为
- *   content，请求级拒绝与无参数工具调用在终止帧之前即提交透传
+ *   isCleanResponsesCompletion）；anthropic 的 message_delta(stop_reason=refusal) 由分类器判为
+ *   content，请求级拒绝在 message_stop 之前即提交透传；无参数工具调用的完成原因
+ *   （anthropic stop_reason=tool_use / pause_turn、openai-chat finish_reason=tool_calls /
+ *   function_call）在同一流此前出现过工具块/调用时同样提交（见 STREAM_SIGNALS.toolCallRules）
  * - 流提前结束（无终止帧的 EOF）-> 空流失败
  * - neutral 帧入缓冲；超过 event/byte 上限 -> prebuffer_overflow 失败
  *   （请求回显帧不计入字节上限，见 isRequestEchoFrame）
@@ -110,9 +115,9 @@ export class StreamPrecommitError extends ProxyError {
  * EOF 分支，那是真实的供应商侧异常，必须继续计入熔断。
  *
  * 其余家族的 `empty_stream` 保持计入：anthropic / openai-chat / gemini 的可交付结果都会
- * 先发出内容信号（非空 delta、anthropic 的 `message_delta.delta.stop_reason` 为 refusal /
- * tool_use / pause_turn、openai-chat 的 `finish_reason` 为 tool_calls / function_call），
- * 没有任何内容、工具调用或明确拒绝就只吐终止帧属于畸形流，是真实的供应商侧异常。
+ * 先发出内容信号（非空 delta、anthropic 的 `message_delta.delta.stop_reason=refusal`，或在
+ * 工具块/调用之后的无参数调用完成原因），没有任何内容、工具调用或明确拒绝就只吐终止帧
+ * 属于畸形流，是真实的供应商侧异常。
  *
  * 其余 reason 一律计入：`gate_error` / `decode_error` 是真实上游错误帧或损坏载荷，
  * `idle_timeout` 是真实上游静默，`prebuffer_overflow` 是异常中性帧洪泛。
@@ -624,6 +629,7 @@ export function createShadowGateObserver(context: {
   const parser = new SseFrameParser({
     maxBufferedCharacters: STREAM_SHADOW_OBSERVER_MAX_BUFFER_CHARACTERS,
   });
+  const classifier = createStreamFrameClassifier(context.family);
   const verdictCounts: Record<FrameVerdict, number> = {
     content: 0,
     error: 0,
@@ -642,7 +648,7 @@ export function createShadowGateObserver(context: {
           firstByteAt = Date.now();
         }
         parser.visit(chunk, (eventName, data) => {
-          const verdict = classifyFrame(context.family, eventName, data);
+          const verdict = classifier.classify(eventName, data);
           verdictCounts[verdict]++;
           if (verdict === "content" || verdict === "error" || verdict === "malformed") {
             reported = true;

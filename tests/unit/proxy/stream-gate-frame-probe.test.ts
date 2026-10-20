@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyFrame,
+  createStreamFrameClassifier,
   isCleanResponsesCompletion,
   isResponsesIncompleteCompletion,
   type ProtocolFamily,
@@ -38,6 +39,13 @@ const samples = [
   '{"type":"content_block_delta","delta":{"type":"compaction_delta","content":"summary"},"error":{"message":"boom"}}',
   '{"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"type":"refusal"}}}',
   '{"type":"message_delta","delta":{"stop_reason":"end_turn"}}',
+  // 早于任何工具块的完成原因：流级状态尚未打开，必须保持中性
+  '{"type":"message_delta","delta":{"stop_reason":"tool_use"}}',
+  '{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+  '{"type":"content_block_start","content_block":{"type":"tool_use","id":"t","name":"","input":{}}}',
+  '{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"","arguments":""}}]}}]}',
+  '{"type":"message_delta","delta":{"stop_reason":"pause_turn"}}',
+  '{"choices":[{"delta":{},"finish_reason":"function_call"}]}',
   '{"type":"message_delta","delta":{"stop_reason":["refusal"]}}',
   '{"type":"message_delta","delta":{"stop_reason":"refusal"},"error":{"message":"boom"}}',
   '{"type":"response.output_text.delta","delta":"ok","error":{"message":"failed"}}',
@@ -68,6 +76,9 @@ const samples = [
   '{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
   '{"choices":[{"delta":{},"finish_reason":["function_call"]}]}',
   '{"type":"response.output_item.done","item":{"type":"function_call","name":"f","arguments":""}}',
+  '{"type":"response.output_item.done","item":{"type":"mcp_call","name":"f","arguments":"","status":"completed"}}',
+  '{"type":"response.output_item.done","item":{"type":"mcp_call","name":"f","arguments":"","status":"failed","error":"x"}}',
+  '{"type":"response.output_item.done","item":{"type":"mcp_call","name":"f","arguments":""}}',
   '{"type":"response.output_item.added","item":{"type":"function_call","name":"f","arguments":""}}',
   '{"type":"response.output_item.done","item":{"type":"image_generation_call","result":"b64"}}',
   '{"type":"response.output_item.done","item":{"type":"file_search_call","results":[]}}',
@@ -78,7 +89,7 @@ const samples = [
 ];
 
 describe("增量分类与既有分类器差分", () => {
-  it.each(families)("%s 保留裸 JSON、SSE 混合帧和任意网络分块语义", (family) => {
+  it.each(families)("%s 保留裸 JSON、SSE 混合帧、流级工具调用状态和任意网络分块语义", (family) => {
     const wires = [
       samples.map((sample) => `  ${sample} \t`).join("\r\n"),
       '  {"candidates":[{"content":{"parts":[{"text":"你好"}]}}]}  \n[{}]\n',
@@ -93,13 +104,14 @@ describe("增量分类与既有分类器差分", () => {
       const bytes = new TextEncoder().encode(wire);
       for (const size of [1, 2, 7, bytes.length]) {
         const old = new SseFrameParser();
+        const classifier = createStreamFrameClassifier(family);
         const parser = new ProbedSseFrames(family, 10 * 1024 * 1024);
         const expected: unknown[] = [];
         const actual: unknown[] = [];
         const before = (event: string | null, data: string) => {
           expected.push({
             event,
-            verdict: classifyFrame(family, event, data),
+            verdict: classifier.classify(event, data),
             dataBytes: Buffer.byteLength(data),
           });
         };

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyFrame,
+  createStreamFrameClassifier,
   isCleanResponsesCompletion,
   isRequestEchoFrame,
   mapProviderTypeToFamily,
@@ -222,23 +223,65 @@ describe("classifyFrame: anthropic", () => {
     ).toBe("neutral");
   });
 
-  it("content: message_delta stop_reason tool_use / pause_turn completes a parameterless tool turn (#12)", () => {
-    for (const stopReason of ["tool_use", "pause_turn"]) {
-      const data = `{"type":"message_delta","delta":{"stop_reason":"${stopReason}","stop_sequence":null},"usage":{"output_tokens":35}}`;
-      expect(classifyFrame("anthropic", "message_delta", data)).toBe("content");
-      expect(classifyFrame("anthropic", null, data)).toBe("content");
+  it.each(["tool_use", "pause_turn"])(
+    "content: stop_reason=%s completes a parameterless tool turn only after a tool block (#12)",
+    (stopReason) => {
+      const stop = `{"type":"message_delta","delta":{"stop_reason":"${stopReason}","stop_sequence":null},"usage":{"output_tokens":35}}`;
+      const toolStart = (type: string, name: string) =>
+        JSON.stringify({
+          type: "content_block_start",
+          index: 0,
+          content_block: { type, id: "toolu_1", name, input: {} },
+        });
+
+      // 没有工具块就只给出完成原因的畸形流不可交付
+      expect(classifyFrame("anthropic", "message_delta", stop)).toBe("neutral");
+      const orphan = createStreamFrameClassifier("anthropic");
+      expect(orphan.classify("message_delta", stop)).toBe("neutral");
+      // 非工具块与无名工具块都不能打开调用
       expect(
-        classifyFrame(
-          "anthropic",
+        orphan.classify(
+          "content_block_start",
+          '{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}'
+        )
+      ).toBe("neutral");
+      expect(orphan.classify("content_block_start", toolStart("tool_use", ""))).toBe("neutral");
+      expect(orphan.classify("message_delta", stop)).toBe("neutral");
+
+      for (const type of ["tool_use", "server_tool_use", "mcp_tool_use"]) {
+        const stream = createStreamFrameClassifier("anthropic");
+        expect(stream.classify("content_block_start", toolStart(type, "lookup")), type).toBe(
+          "neutral"
+        );
+        expect(stream.classify(null, stop), type).toBe("content");
+      }
+
+      const failed = createStreamFrameClassifier("anthropic");
+      failed.classify("content_block_start", toolStart("tool_use", "lookup"));
+      expect(
+        failed.classify(
           "message_delta",
           `{"type":"message_delta","delta":{"stop_reason":"${stopReason}"},"error":{"message":"boom"}}`
         )
       ).toBe("error");
+
+      // 每条流独立：另一实例看不到前一条流的工具块
+      const opened = createStreamFrameClassifier("anthropic");
+      opened.classify("content_block_start", toolStart("tool_use", "lookup"));
+      expect(createStreamFrameClassifier("anthropic").classify("message_delta", stop)).toBe(
+        "neutral"
+      );
     }
-    // compaction 结束本身不证明有 payload，仍由 compaction 块决定
+  );
+
+  it("neutral: compaction stop_reason alone does not prove a payload", () => {
+    const stream = createStreamFrameClassifier("anthropic");
+    stream.classify(
+      "content_block_start",
+      '{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t","name":"f","input":{}}}'
+    );
     expect(
-      classifyFrame(
-        "anthropic",
+      stream.classify(
         "message_delta",
         '{"type":"message_delta","delta":{"stop_reason":"compaction"}}'
       )
@@ -336,24 +379,47 @@ describe("classifyFrame: openai-chat", () => {
     ).toBe("neutral");
   });
 
-  it("content: finish_reason tool_calls / function_call completes a parameterless call", () => {
-    for (const finishReason of ["tool_calls", "function_call"]) {
+  it("content: finish_reason tool_calls / function_call completes a parameterless call only after a named call", () => {
+    const finish = (reason: string) =>
+      `{"choices":[{"index":0,"delta":{},"finish_reason":${reason}}]}`;
+    for (const [finishReason, call] of [
+      [
+        "tool_calls",
+        '{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"ping","arguments":""}}]}',
+      ],
+      ["function_call", '{"function_call":{"name":"ping","arguments":""}}'],
+    ]) {
+      const close = finish(`"${finishReason}"`);
+      expect(classifyFrame("openai-chat", null, close)).toBe("neutral");
+      expect(createStreamFrameClassifier("openai-chat").classify(null, close)).toBe("neutral");
+
+      const stream = createStreamFrameClassifier("openai-chat");
+      expect(stream.classify(null, `{"choices":[{"index":0,"delta":${call}}]}`)).toBe("neutral");
+      expect(stream.classify(null, close)).toBe("content");
+
+      // 部分上游把调用与完成原因放在同一 chunk
       expect(
-        classifyFrame(
-          "openai-chat",
+        createStreamFrameClassifier("openai-chat").classify(
           null,
-          `{"choices":[{"index":0,"delta":{},"finish_reason":"${finishReason}"}]}`
+          `{"choices":[{"index":0,"delta":${call},"finish_reason":"${finishReason}"}]}`
         )
       ).toBe("content");
     }
+
+    const unnamed = createStreamFrameClassifier("openai-chat");
+    unnamed.classify(
+      null,
+      '{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"","arguments":""}}]}}]}'
+    );
+    expect(unnamed.classify(null, finish('"tool_calls"'))).toBe("neutral");
+
+    const opened = createStreamFrameClassifier("openai-chat");
+    opened.classify(
+      null,
+      '{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"ping","arguments":""}}]}}]}'
+    );
     for (const finishReason of ['"length"', '"content_filter"', "null"]) {
-      expect(
-        classifyFrame(
-          "openai-chat",
-          null,
-          `{"choices":[{"index":0,"delta":{},"finish_reason":${finishReason}}]}`
-        )
-      ).toBe("neutral");
+      expect(opened.classify(null, finish(finishReason))).toBe("neutral");
     }
   });
 
@@ -470,7 +536,7 @@ describe("classifyFrame: openai-responses", () => {
 
   it.each([
     ["function_call", { name: "get_time", call_id: "call_1", arguments: "" }],
-    ["mcp_call", { name: "ping", server_label: "srv", arguments: "" }],
+    ["mcp_call", { name: "ping", server_label: "srv", arguments: "", status: "completed" }],
     ["custom_tool_call", { name: "noop", call_id: "call_2", input: "" }],
   ])("content: completed parameterless %s item; added stays neutral", (type, fields) => {
     const frame = (event: string, item: Record<string, unknown>) =>
@@ -496,6 +562,32 @@ describe("classifyFrame: openai-responses", () => {
         frame("response.output_item.done", { ...fields, name: "" })
       )
     ).toBe("neutral");
+  });
+
+  it("neutral: failed or status-less parameterless mcp_call item is not deliverable", () => {
+    const done = (item: Record<string, unknown>) =>
+      JSON.stringify({
+        type: "response.output_item.done",
+        output_index: 0,
+        item: {
+          id: "mcp_1",
+          type: "mcp_call",
+          name: "ping",
+          server_label: "srv",
+          arguments: "",
+          ...item,
+        },
+      });
+    for (const item of [
+      { status: "failed", error: "tool crashed", output: null },
+      { status: "incomplete" },
+      {},
+    ]) {
+      expect(
+        classifyFrame("openai-responses", "response.output_item.done", done(item)),
+        JSON.stringify(item)
+      ).toBe("neutral");
+    }
   });
 
   it.each([

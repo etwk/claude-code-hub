@@ -1,9 +1,11 @@
 import {
   classifyFrame,
+  createStreamFrameClassifier,
   type FrameVerdict,
   isCleanResponsesCompletion,
   isResponsesIncompleteCompletion,
   type ProtocolFamily,
+  type StreamFrameClassifier,
 } from "@/app/v1/_lib/proxy/stream-gate/frame-classifier";
 import { SegmentedTextBuffer } from "@/app/v1/_lib/proxy/stream-gate/sse-frames";
 
@@ -69,11 +71,11 @@ function validityFromVerdict(verdict: FrameVerdict): DiscoveryValidity {
 
 function classifyProtocolFrame(
   data: string,
-  protocol: DiscoveryProtocol,
+  classifier: StreamFrameClassifier | null,
   eventName: string | null
 ): DiscoveryValidity {
-  const family = DISCOVERY_PROTOCOL_FAMILIES[protocol];
-  if (!family) return { ready: false, terminal: false, error: false };
+  if (!classifier) return { ready: false, terminal: false, error: false };
+  const family = classifier.family;
 
   let parsed: unknown;
   try {
@@ -94,7 +96,7 @@ function classifyProtocolFrame(
     return { ready: true, terminal: true, error: false };
   }
 
-  let verdict = classifyFrame(family, eventName, data);
+  let verdict = classifier.classify(eventName, data);
   if (verdict !== "neutral") return validityFromVerdict(verdict);
 
   // Gemini SDK wrappers may expose the native candidate chunk under response.
@@ -145,7 +147,13 @@ export class DiscoveryValidityParser {
   private bytesSeen = 0;
   private eventsSeen = 0;
 
-  constructor(readonly protocol: DiscoveryProtocol) {}
+  private readonly classifier: StreamFrameClassifier | null;
+
+  constructor(readonly protocol: DiscoveryProtocol) {
+    // 每个候选流独立累积工具调用状态，无参数调用的完成原因才能判为就绪。
+    const family = DISCOVERY_PROTOCOL_FAMILIES[protocol];
+    this.classifier = family ? createStreamFrameClassifier(family) : null;
+  }
 
   push(chunk: Uint8Array | string): DiscoveryValidity {
     if (this._error) return this.result;
@@ -350,7 +358,7 @@ export class DiscoveryValidityParser {
   }
 
   private consumeFrame(data: string, eventName: string | null): void {
-    const result = classifyProtocolFrame(data, this.protocol, eventName);
+    const result = classifyProtocolFrame(data, this.classifier, eventName);
     this._ready ||= result.ready;
     this._terminal ||= result.terminal;
     this._error ||= result.error;

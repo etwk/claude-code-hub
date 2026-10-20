@@ -403,6 +403,21 @@ describe("discovery validity", () => {
     ).toEqual({ ready: true, terminal: false, error: false });
   });
 
+  it.each([
+    ["anthropic", 'data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}\n\n'],
+    ["anthropic", 'data: {"type":"message_delta","delta":{"stop_reason":"pause_turn"}}\n\n'],
+    ["openai-chat", 'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n'],
+  ] as const)(
+    "keeps a %s tool completion reason without any tool call not ready",
+    (protocol, frame) => {
+      expect(classifyDiscoveryChunk(frame, protocol)).toEqual({
+        ready: false,
+        terminal: false,
+        error: false,
+      });
+    }
+  );
+
   it("accepts a clean empty Responses response.done as a complete candidate", () => {
     expect(
       classifyDiscoveryChunk(
