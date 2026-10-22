@@ -1766,8 +1766,8 @@ export class ProxyForwarder {
     let lastError: Error | null = null;
     let currentProvider = session.provider;
     const failedProviderIds: number[] = []; // 记录已失败的供应商ID
+    const dispatchedProviderIds = new Set<number>(); // 实际发起过上游请求的供应商ID
     let totalProvidersAttempted = 0; // 已尝试的供应商数量（用于日志）
-
     // ========== 外层循环：供应商切换（最多 MAX_PROVIDER_SWITCHES 次）==========
     while (totalProvidersAttempted < MAX_PROVIDER_SWITCHES) {
       totalProvidersAttempted++;
@@ -2001,6 +2001,7 @@ export class ProxyForwarder {
         };
 
         try {
+          dispatchedProviderIds.add(currentProvider.id);
           let response = await ProxyForwarder.doForward(
             session,
             currentProvider,
@@ -3253,7 +3254,7 @@ export class ProxyForwarder {
     const attemptedProviderIds = new Set(failedProviderIds);
     if (session.provider?.id != null) attemptedProviderIds.add(session.provider.id);
     await ProxyForwarder.clearSessionProviderBindings(session, attemptedProviderIds);
-    throw ProxyForwarder.resolveHedgeTerminalError(lastError, null, totalProvidersAttempted);
+    throw ProxyForwarder.resolveHedgeTerminalError(lastError, null, dispatchedProviderIds.size);
   }
 
   /**
@@ -6477,6 +6478,7 @@ export class ProxyForwarder {
     let currentRound = 1;
     let winner: (typeof attempts extends Map<string, infer V> ? V : never) | null = null;
     let committed = false;
+    const dispatchedProviders = new Set<number>();
     let settled = false;
     let noMoreCandidates = false;
     let lastError: Error | null = null;
@@ -7586,6 +7588,7 @@ export class ProxyForwarder {
         }
       };
       const releaseRequestMemory = retainCurrentRequestMemory("discovery-attempt");
+      dispatchedProviders.add(provider.id);
       void ProxyForwarder.doForward(
         attempt.session,
         { ...provider, firstByteTimeoutStreamingMs: 0 },
@@ -8555,7 +8558,11 @@ export class ProxyForwarder {
       }
       if (action.type === "terminal_failure") {
         await settleFailure(
-          ProxyForwarder.resolveHedgeTerminalError(lastError, lastErrorCategory, launched.size),
+          ProxyForwarder.resolveHedgeTerminalError(
+            lastError,
+            lastErrorCategory,
+            dispatchedProviders.size
+          ),
           {
             cancellationKind: terminalCancellationKind,
           }
@@ -9092,6 +9099,7 @@ export class ProxyForwarder {
 
     if (providersAttemptedCount === 1 && lastError instanceof ProxyError) {
       const isInternalSetupOrGateError =
+        lastError.statusCode === 524 ||
         lastError.message === ALL_PROVIDERS_UNAVAILABLE_MESSAGE ||
         lastError.message === "No available provider endpoints" ||
         lastError.message === "Vendor-type circuit is open" ||
@@ -9100,7 +9108,7 @@ export class ProxyForwarder {
         lastError.message === "MALFORMED_BUFFERED_JSON" ||
         lastError.message === "Service temporarily unavailable" ||
         lastError.message === "Internal configuration error" ||
-        /(?:供应商)?并发\s*Session\s*上限已达到|Provider concurrent (?:session )?limit reached/iu.test(
+        /(?:供应商)?并发\s*Session\s*上限已达到|Provider concurrent (?:session )?limit reached|\bProvider\s+(?:failed\s+to\s+respond\b|(?:streaming\s+response\s+idle|first\s+content|first-byte|response)\s+timeout\s*:)|供应商(?:流式响应静默|首个有效内容|首字节响应|响应)超时\s*:/iu.test(
           lastError.message
         ) ||
         lastError instanceof StreamPrecommitError;

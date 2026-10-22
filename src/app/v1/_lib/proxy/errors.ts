@@ -133,13 +133,22 @@ export class ProxyError extends Error {
       ProxyError.extractRequestIdFromBody(parsed) ||
       ProxyError.extractRequestIdFromHeaders(response.headers);
 
+    const rawBodyMaxChars = 4096;
+    const rawBody = body.length > rawBodyMaxChars ? body.slice(0, rawBodyMaxChars) : body;
+    const rawBodyTruncated = body.length > rawBodyMaxChars;
+
     return new ProxyError(message, response.status, {
       body: truncatedBody,
       parsed,
       providerId: provider.id,
       providerName: provider.name,
       requestId,
-      ...(body ? { rawBody: body } : {}),
+      ...(rawBody
+        ? {
+            rawBody,
+            rawBodyTruncated,
+          }
+        : {}),
     });
   }
 

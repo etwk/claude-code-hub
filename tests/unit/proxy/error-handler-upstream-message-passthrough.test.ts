@@ -326,4 +326,15 @@ describe("ProxyErrorHandler.handle - upstream message passthrough", () => {
       "Invalid request: Upstream returned 'Invalid request'"
     );
   });
+
+  test("ProxyError.fromUpstreamResponse bounds rawBody to 4096 chars and sets rawBodyTruncated", async () => {
+    const largeBody = `plain error prefix ${"x".repeat(5000)}`;
+    const err = await ProxyError.fromUpstreamResponse(new Response(largeBody, { status: 502 }), {
+      id: 1,
+      name: "Anthropic",
+    });
+
+    expect(err.upstreamError?.rawBody?.length).toBe(4096);
+    expect(err.upstreamError?.rawBodyTruncated).toBe(true);
+  });
 });
