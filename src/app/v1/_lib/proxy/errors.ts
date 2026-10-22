@@ -19,7 +19,11 @@ import { isJsonResponseContentType } from "./response-content-type";
 import type { ProxySession } from "./session";
 
 /** Marker message for the synthetic terminal error emitted when every provider fails. */
-export const ALL_PROVIDERS_UNAVAILABLE_MESSAGE = "所有供应商暂时不可用，请稍后重试";
+export const ALL_PROVIDERS_UNAVAILABLE_MESSAGE =
+  "All providers are temporarily unavailable. Please try again later.";
+
+/** Client message for failures that are not Error instances. */
+export const UNKNOWN_PROXY_ERROR_MESSAGE = "An unknown error occurred while proxying the request.";
 
 export class ProxyError extends Error {
   public readonly isLocalAbort: boolean;

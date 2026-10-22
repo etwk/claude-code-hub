@@ -2,20 +2,27 @@ import { extractApiKeyFromHeaders as sharedExtractApiKeyFromHeaders } from "@/li
 import { getClientIpWithFreshSettings } from "@/lib/ip";
 import { logger } from "@/lib/logger";
 import { LoginAbusePolicy } from "@/lib/security/login-abuse-policy";
-import { ERROR_CODES, getErrorMessageServer } from "@/lib/utils/error-messages";
 import { resolveApiKeyAuthOutcome } from "@/repository/key";
 import { markUserExpired } from "@/repository/user";
 import { GEMINI_PROTOCOL } from "../gemini/protocol";
 import { ProxyResponses } from "./responses";
 import type { AuthFailureKind, AuthState, ProxySession } from "./session";
 
-async function getRequestLocale(): Promise<string> {
-  // Match the rate-limit-guard pattern: read next-intl's request locale
-  // (Accept-Language or cookie) lazily inside the guard so the proxy hot
-  // path does not pay the import cost on every cold start.
-  const { getLocale } = await import("next-intl/server");
-  return await getLocale();
-}
+/** Client-facing auth failure messages, shared with the /v1/models endpoint. */
+export const PROXY_AUTH_MESSAGES = {
+  missingCredentials:
+    "No API key provided. Include it in the Authorization header, the x-api-key header, or the x-goog-api-key header.",
+  conflictingKeys:
+    "Multiple conflicting API keys were provided. Use only one authentication method.",
+  invalidApiKey: "Invalid API key. The provided key does not exist or has been deleted.",
+  apiKeyDisabled:
+    "This API key has been disabled. Please contact your administrator to re-enable it, or use a different key.",
+  apiKeyExpired:
+    "This API key has expired. Please contact your administrator to renew it or rotate to a new key.",
+  userDisabled: "This user account has been disabled. Please contact your administrator.",
+  userExpired: (expiresAt: Date) =>
+    `This user account expired on ${expiresAt.toISOString().split("T")[0]}. Please renew your subscription.`,
+} as const;
 
 /**
  * Build an auth failure AuthState. The factory exists so every call site is
@@ -122,7 +129,7 @@ export class ProxyAuthenticator {
     }
 
     // 返回详细的错误信息，帮助用户快速定位问题
-    return authState.errorResponse ?? ProxyResponses.buildError(401, "认证失败");
+    return authState.errorResponse ?? ProxyResponses.buildError(401, "Authentication failed");
   }
 
   private static resolvePreAuthCandidateKey(headers: {
@@ -177,7 +184,7 @@ export class ProxyAuthenticator {
         failureKind: "credentials",
         errorResponse: ProxyResponses.buildError(
           401,
-          "未提供认证凭据。请在 Authorization 头部、x-api-key 头部或 x-goog-api-key 头部中包含 API 密钥。",
+          PROXY_AUTH_MESSAGES.missingCredentials,
           "authentication_error"
         ),
       });
@@ -194,7 +201,7 @@ export class ProxyAuthenticator {
         failureKind: "credentials",
         errorResponse: ProxyResponses.buildError(
           401,
-          "提供了多个冲突的 API 密钥。请仅使用一种认证方式。",
+          PROXY_AUTH_MESSAGES.conflictingKeys,
           "authentication_error"
         ),
       });
@@ -208,7 +215,6 @@ export class ProxyAuthenticator {
       // repository layer will trigger a compile error in assertNever below
       // until this guard is updated, preventing a new variant from silently
       // falling into the wrong branch.
-      const locale = await getRequestLocale();
       switch (outcome.reason) {
         case "not_found":
           logger.debug("[ProxyAuthenticator] API key validation failed: not found", {
@@ -222,7 +228,7 @@ export class ProxyAuthenticator {
             failureKind: "credentials",
             errorResponse: ProxyResponses.buildError(
               401,
-              await getErrorMessageServer(locale, ERROR_CODES.PROXY_INVALID_API_KEY),
+              PROXY_AUTH_MESSAGES.invalidApiKey,
               "invalid_api_key"
             ),
           });
@@ -236,7 +242,7 @@ export class ProxyAuthenticator {
             failureKind: "account_state",
             errorResponse: ProxyResponses.buildError(
               401,
-              await getErrorMessageServer(locale, ERROR_CODES.PROXY_API_KEY_DISABLED),
+              PROXY_AUTH_MESSAGES.apiKeyDisabled,
               "key_disabled"
             ),
           });
@@ -250,7 +256,7 @@ export class ProxyAuthenticator {
             failureKind: "account_state",
             errorResponse: ProxyResponses.buildError(
               401,
-              await getErrorMessageServer(locale, ERROR_CODES.PROXY_API_KEY_EXPIRED),
+              PROXY_AUTH_MESSAGES.apiKeyExpired,
               "key_expired"
             ),
           });
@@ -274,7 +280,7 @@ export class ProxyAuthenticator {
         failureKind: "account_state",
         errorResponse: ProxyResponses.buildError(
           401,
-          "用户账户已被禁用。请联系管理员。",
+          PROXY_AUTH_MESSAGES.userDisabled,
           "user_disabled"
         ),
       });
@@ -299,7 +305,7 @@ export class ProxyAuthenticator {
         failureKind: "account_state",
         errorResponse: ProxyResponses.buildError(
           401,
-          `用户账户已于 ${user.expiresAt.toISOString().split("T")[0]} 过期。请续费订阅。`,
+          PROXY_AUTH_MESSAGES.userExpired(user.expiresAt),
           "user_expired"
         ),
       });

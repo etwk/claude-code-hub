@@ -1,7 +1,6 @@
 import { Buffer } from "node:buffer";
 import { gzipSync } from "node:zlib";
 import type { Context } from "hono";
-import { createTranslator } from "next-intl";
 import { getLocale } from "next-intl/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ProxyModelGuard } from "@/app/v1/_lib/proxy/model-guard";
@@ -11,19 +10,6 @@ import {
   serializeSystemOneMultipartBody,
 } from "@/app/v1/_lib/proxy/systemone-compat";
 import { withRequestMemoryLifetime } from "@/lib/memory/request-lifetime";
-import enErrors from "../../../messages/en/errors.json";
-import jaErrors from "../../../messages/ja/errors.json";
-import ruErrors from "../../../messages/ru/errors.json";
-import zhCnErrors from "../../../messages/zh-CN/errors.json";
-import zhTwErrors from "../../../messages/zh-TW/errors.json";
-
-const errorsByLocale = {
-  en: enErrors,
-  ja: jaErrors,
-  ru: ruErrors,
-  "zh-CN": zhCnErrors,
-  "zh-TW": zhTwErrors,
-};
 
 vi.mock("@/repository/model-price", () => ({
   findLatestPriceByModel: vi.fn(),
@@ -35,13 +21,6 @@ vi.mock("@/repository/system-config", () => ({
 
 vi.mock("next-intl/server", () => ({
   getLocale: vi.fn(async () => "en"),
-  getTranslations: vi.fn(async ({ locale }: { locale: string }) =>
-    createTranslator({
-      locale,
-      messages: { errors: errorsByLocale[locale as keyof typeof errorsByLocale] },
-      namespace: "errors",
-    })
-  ),
 }));
 
 beforeEach(() => {
@@ -356,10 +335,9 @@ describe("ProxySession System One body parsing", () => {
   });
 
   it.each(["en", "ja", "ru", "zh-CN", "zh-TW"] as const)(
-    "returns a localized invalid_request_error for a large missing-model upload in %s",
+    "returns an English invalid_request_error for a large missing-model upload in %s",
     async (locale) => {
       vi.mocked(getLocale).mockResolvedValue(locale);
-      const expectedMessage = errorsByLocale[locale].REQUIRED_FIELD.replace("{field}", "model");
       const withoutModel = {
         state: message.state,
         questions: message.questions,
@@ -383,7 +361,7 @@ describe("ProxySession System One body parsing", () => {
 
       expect(response.status).toBe(400);
       expect(await response.json()).toMatchObject({
-        error: { type: "invalid_request_error", message: expectedMessage },
+        error: { type: "invalid_request_error", message: "model is required" },
       });
     }
   );

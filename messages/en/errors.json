@@ -1,5 +1,4 @@
 {
-  "LOCAL_CAPACITY_EXCEEDED": "Local request capacity exhausted; retry later.",
   "_comment": "Error messages for English",
 
   "REQUIRED_FIELD": "{field} is required",
@@ -33,13 +32,9 @@
   "INVALID_TOKEN": "Invalid authentication token",
   "SESSION_REQUEST_SOURCE_MISMATCH": "The request source does not belong to this session",
   "SESSION_REQUEST_SELECTOR_INCOMPLETE": "Prefix Session requests must specify both the physical source and request sequence",
-  "PROXY_INVALID_API_KEY": "Invalid API key. The provided key does not exist or has been deleted.",
-  "PROXY_API_KEY_DISABLED": "This API key has been disabled. Please contact your administrator to re-enable it, or use a different key.",
-  "PROXY_API_KEY_EXPIRED": "This API key has expired. Please contact your administrator to renew it or rotate to a new key.",
 
   "INTERNAL_ERROR": "Internal server error, please try again later",
   "DATABASE_ERROR": "Database error",
-  "INVALID_NORMALIZED_BODY": "The normalized request body could not be serialized",
   "NOT_FOUND": "Resource not found",
   "OPERATION_FAILED": "Operation failed",
   "USER_5H_FIXED_RESET_REQUIRES_REDIS": "Resetting a fixed 5H limit requires Redis to be available",
@@ -54,7 +49,6 @@
   "DELETE_FAILED": "Failed to delete, please try again",
 
   "CONNECTION_FAILED": "Connection failed",
-  "CLIENT_ABORTED": "Client aborted request",
   "TIMEOUT": "Request timeout",
   "NETWORK_ERROR": "Network error",
 
@@ -65,16 +59,6 @@
   "INVALID_STATE": "Operation not allowed in current state",
   "CONFLICT": "Operation conflict",
   "ENDPOINT_REFERENCED_BY_ENABLED_PROVIDERS": "This endpoint is still referenced by {count} enabled providers: {providers}",
-
-  "RATE_LIMIT_RPM_EXCEEDED": "Rate limit exceeded: {current} requests per minute (limit: {limit}). Resets at {resetTime}",
-  "RATE_LIMIT_5H_EXCEEDED": "5-hour cost limit exceeded: ${current} USD (limit: ${limit} USD). Resets at {resetTime}",
-  "RATE_LIMIT_5H_ROLLING_EXCEEDED": "5-hour rolling window cost limit exceeded: ${current} USD (limit: ${limit} USD). Usage gradually expires over the past 5 hours",
-  "RATE_LIMIT_WEEKLY_EXCEEDED": "Weekly cost limit exceeded: ${current} USD (limit: ${limit} USD). Resets at {resetTime}",
-  "RATE_LIMIT_MONTHLY_EXCEEDED": "Monthly cost limit exceeded: ${current} USD (limit: ${limit} USD). Resets at {resetTime}",
-  "RATE_LIMIT_TOTAL_EXCEEDED": "Total spending limit exceeded: ${current} USD (limit: ${limit} USD)",
-  "RATE_LIMIT_CONCURRENT_SESSIONS_EXCEEDED": "Concurrent sessions limit exceeded: {current} sessions (limit: {limit}). Please wait for active sessions to complete",
-  "RATE_LIMIT_DAILY_QUOTA_EXCEEDED": "Daily quota exceeded: ${current} USD (limit: ${limit} USD). Resets at {resetTime}",
-  "RATE_LIMIT_DAILY_ROLLING_EXCEEDED": "24-hour rolling window cost limit exceeded: ${current} USD (limit: ${limit} USD). Usage gradually expires over the past 24 hours",
 
   "USER_NOT_FOUND": "User not found",
   "USER_CANNOT_MODIFY_SENSITIVE_FIELDS": "Regular users cannot modify quota limits and provider groups",

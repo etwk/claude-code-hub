@@ -221,7 +221,9 @@ describe("ProxyErrorHandler.handle - upstream message passthrough", () => {
     const res = await ProxyErrorHandler.handle(createSession(), err);
     const body = await res.json();
 
-    expect(body.error.message).toContain("上游服务当前限流，请稍后重试");
+    expect(body.error.message).toContain(
+      "Upstream service is rate limited. Please try again later."
+    );
     expect(body.error.message).not.toContain("Quota exceeded");
   });
 

@@ -4,7 +4,6 @@ import { describe, expect, test } from "vitest";
 
 const LOCALES = ["zh-CN", "zh-TW", "en", "ja", "ru"] as const;
 const ERROR_CODES = [
-  "INVALID_NORMALIZED_BODY",
   "SESSION_REQUEST_SOURCE_MISMATCH",
   "SESSION_REQUEST_SELECTOR_INCOMPLETE",
 ] as const;

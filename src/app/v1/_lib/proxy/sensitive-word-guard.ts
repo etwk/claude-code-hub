@@ -114,7 +114,7 @@ export class ProxySensitiveWordGuard {
           matchType: result.matchType,
           matchedText: result.matchedText,
         }),
-        errorMessage: `请求包含敏感词："${result.word}"`,
+        errorMessage: `Request contains a sensitive word: "${result.word}"`,
       });
 
       logger.info("[SensitiveWordGuard] Blocked request logged to database", {
@@ -137,24 +137,18 @@ export class ProxySensitiveWordGuard {
   }): string {
     const parts: string[] = [];
 
-    parts.push(`请求包含敏感词："${result.word}"`);
+    parts.push(`Request contains a sensitive word: "${result.word}".`);
 
     if (result.matchedText && result.matchedText !== result.word) {
-      parts.push(`匹配内容："${result.matchedText}"`);
+      parts.push(`Matched text: "${result.matchedText}".`);
     }
 
     if (result.matchType) {
-      const typeLabels: Record<string, string> = {
-        contains: "包含匹配",
-        exact: "精确匹配",
-        regex: "正则匹配",
-      };
-      const typeLabel = typeLabels[result.matchType] || result.matchType;
-      parts.push(`匹配类型：${typeLabel}`);
+      parts.push(`Match type: ${result.matchType}.`);
     }
 
-    parts.push("请修改后重试。");
+    parts.push("Please revise the request and try again.");
 
-    return parts.join("，");
+    return parts.join(" ");
   }
 }

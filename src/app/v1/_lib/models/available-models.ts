@@ -3,7 +3,6 @@ import { request as undiciRequest } from "undici";
 import { normalizeAllowedModelRules } from "@/lib/allowed-model-rules";
 import { logger } from "@/lib/logger";
 import { createProxyAgentForProvider } from "@/lib/proxy-agent";
-import { ERROR_CODES, getErrorMessageServer } from "@/lib/utils/error-messages";
 import { isProviderActiveNow } from "@/lib/utils/provider-schedule";
 import { resolveSystemTimezone } from "@/lib/utils/timezone";
 import { resolveApiKeyAuthOutcome } from "@/repository/key";
@@ -14,7 +13,7 @@ import type {
   OpenAIModelsResponse,
 } from "@/types/models";
 import type { Provider } from "@/types/provider";
-import { extractApiKeyFromHeaders } from "../proxy/auth-guard";
+import { extractApiKeyFromHeaders, PROXY_AUTH_MESSAGES } from "../proxy/auth-guard";
 import type { ClientFormat } from "../proxy/format-mapper";
 import { checkProviderGroupMatch } from "../proxy/provider-selector";
 
@@ -71,7 +70,10 @@ async function authenticateRequest(c: Context): Promise<{
 }> {
   const apiKey = extractApiKey(c);
   if (!apiKey) {
-    throw c.json({ error: { message: "未提供认证凭据", type: "authentication_error" } }, 401);
+    throw c.json(
+      { error: { message: PROXY_AUTH_MESSAGES.missingCredentials, type: "authentication_error" } },
+      401
+    );
   }
 
   const outcome = await resolveApiKeyAuthOutcome(apiKey);
@@ -79,14 +81,12 @@ async function authenticateRequest(c: Context): Promise<{
     // Exhaustive switch: see auth-guard.ts for rationale. Adding a new
     // ApiKeyAuthFailureReason will produce a TypeScript error on the
     // exhaustiveness fallthrough until this branch is handled explicitly.
-    const { getLocale } = await import("next-intl/server");
-    const locale = await getLocale();
     switch (outcome.reason) {
       case "key_disabled":
         throw c.json(
           {
             error: {
-              message: await getErrorMessageServer(locale, ERROR_CODES.PROXY_API_KEY_DISABLED),
+              message: PROXY_AUTH_MESSAGES.apiKeyDisabled,
               type: "key_disabled",
             },
           },
@@ -96,7 +96,7 @@ async function authenticateRequest(c: Context): Promise<{
         throw c.json(
           {
             error: {
-              message: await getErrorMessageServer(locale, ERROR_CODES.PROXY_API_KEY_EXPIRED),
+              message: PROXY_AUTH_MESSAGES.apiKeyExpired,
               type: "key_expired",
             },
           },
@@ -106,7 +106,7 @@ async function authenticateRequest(c: Context): Promise<{
         throw c.json(
           {
             error: {
-              message: await getErrorMessageServer(locale, ERROR_CODES.PROXY_INVALID_API_KEY),
+              message: PROXY_AUTH_MESSAGES.invalidApiKey,
               type: "invalid_api_key",
             },
           },
@@ -122,11 +122,19 @@ async function authenticateRequest(c: Context): Promise<{
   const { user, key } = outcome;
 
   if (!user.isEnabled) {
-    throw c.json({ error: { message: "用户账户已被禁用", type: "user_disabled" } }, 401);
+    throw c.json(
+      { error: { message: PROXY_AUTH_MESSAGES.userDisabled, type: "user_disabled" } },
+      401
+    );
   }
 
   if (user.expiresAt && user.expiresAt.getTime() <= Date.now()) {
-    throw c.json({ error: { message: "用户账户已过期", type: "user_expired" } }, 401);
+    throw c.json(
+      {
+        error: { message: PROXY_AUTH_MESSAGES.userExpired(user.expiresAt), type: "user_expired" },
+      },
+      401
+    );
   }
 
   return { user, key };

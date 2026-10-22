@@ -1,25 +1,10 @@
-import { createTranslator } from "next-intl";
-import { getLocale } from "next-intl/server";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ProxyModelGuard } from "@/app/v1/_lib/proxy/model-guard";
 import type { ProxySession } from "@/app/v1/_lib/proxy/session";
-import enErrors from "../../../messages/en/errors.json";
-import zhErrors from "../../../messages/zh-CN/errors.json";
 
 vi.mock("next-intl/server", () => ({
-  getLocale: vi.fn(async () => "en"),
-  getTranslations: vi.fn(async ({ locale }: { locale: string }) =>
-    createTranslator({
-      locale,
-      messages: { errors: locale === "zh-CN" ? zhErrors : enErrors },
-      namespace: "errors",
-    })
-  ),
+  getLocale: vi.fn(async () => "zh-CN"),
 }));
-
-beforeEach(() => {
-  vi.mocked(getLocale).mockResolvedValue("en");
-});
 
 function createSession(model: unknown, allowedModels: string[] = [], pathname = "/v1/rerank") {
   return {
@@ -66,20 +51,12 @@ describe.each(["/v1/rerank", "/v1/systemone"])("%s model boundary", (endpoint) =
     ).toBe(400);
   });
 
-  it("returns the validation error in the request locale", async () => {
-    const english = await ProxyModelGuard.ensure(createEndpointSession(null));
-    expect(english).not.toBeNull();
-    const englishError = (await english!.json()).error;
-    vi.mocked(getLocale).mockResolvedValue("zh-CN");
-    const chinese = await ProxyModelGuard.ensure(createEndpointSession(null));
-    expect(chinese).not.toBeNull();
-    const chineseError = (await chinese!.json()).error;
-
-    expect(chinese?.status).toBe(400);
-    expect(chineseError.type).toBe(englishError.type);
-    expect(chineseError.message).toContain("model");
-    expect(chineseError.message).toMatch(/\p{Script=Han}/u);
-    expect(englishError.message).not.toMatch(/\p{Script=Han}/u);
+  it("returns the validation error in English regardless of the request locale", async () => {
+    const response = await ProxyModelGuard.ensure(createEndpointSession(null));
+    expect(response?.status).toBe(400);
+    expect(await response?.json()).toMatchObject({
+      error: { type: "invalid_request_error", message: "model is required" },
+    });
   });
 
   it("enforces the user allowlist for a valid rerank model", async () => {

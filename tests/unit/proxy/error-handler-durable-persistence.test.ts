@@ -1,6 +1,5 @@
 import { Context } from "hono";
 import { DrizzleQueryError } from "drizzle-orm";
-import { createTranslator } from "next-intl";
 import { getLocale } from "next-intl/server";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { ProxyErrorHandler } from "@/app/v1/_lib/proxy/error-handler";
@@ -13,11 +12,6 @@ import type { emitProxyLangfuseTrace } from "@/lib/langfuse/emit-proxy-trace";
 import type { updateMessageRequestDetailsDurably } from "@/repository/message";
 import type { Key } from "@/types/key";
 import type { User } from "@/types/user";
-import enErrors from "../../../messages/en/errors.json";
-import jaErrors from "../../../messages/ja/errors.json";
-import ruErrors from "../../../messages/ru/errors.json";
-import zhCnErrors from "../../../messages/zh-CN/errors.json";
-import zhTwErrors from "../../../messages/zh-TW/errors.json";
 
 const mocks = vi.hoisted(() => ({
   detectAsync: vi.fn<(content: string) => Promise<ErrorDetectionResult>>(),
@@ -31,23 +25,8 @@ const mocks = vi.hoisted(() => ({
   loggerWarn: vi.fn(),
 }));
 
-const ERROR_CATALOGS: Record<Locale, Record<string, string>> = {
-  en: enErrors,
-  ja: jaErrors,
-  ru: ruErrors,
-  "zh-CN": zhCnErrors,
-  "zh-TW": zhTwErrors,
-};
-
 vi.mock("next-intl/server", () => ({
   getLocale: vi.fn(async () => "en"),
-  getTranslations: vi.fn(async ({ locale }: { locale: Locale }) =>
-    createTranslator({
-      locale,
-      messages: { errors: ERROR_CATALOGS[locale] },
-      namespace: "errors",
-    })
-  ),
 }));
 
 vi.mock("@/lib/error-rule-detector", () => ({
@@ -159,7 +138,7 @@ describe("ProxyErrorHandler.handle durable persistence", () => {
   });
 
   test.each(["en", "zh-CN", "zh-TW", "ja", "ru"] satisfies Locale[])(
-    "localizes native client aborts for %s while persisting 499/CLIENT_ABORTED",
+    "returns an English client-abort message for %s while persisting 499/CLIENT_ABORTED",
     async (locale) => {
       vi.mocked(getLocale).mockResolvedValue(locale);
       const session = await createSession();
@@ -169,7 +148,7 @@ describe("ProxyErrorHandler.handle durable persistence", () => {
 
       expect(response.status).toBe(499);
       expect(await response.json()).toMatchObject({
-        error: { message: expect.stringContaining(ERROR_CATALOGS[locale].CLIENT_ABORTED) },
+        error: { message: expect.stringContaining("Client aborted request") },
       });
       expect(mocks.updateMessageRequestDetailsDurably).toHaveBeenCalledWith(
         901,
@@ -186,22 +165,7 @@ describe("ProxyErrorHandler.handle durable persistence", () => {
     }
   );
 
-  test("preserves native cancellation when request-locale lookup fails", async () => {
-    vi.mocked(getLocale).mockRejectedValueOnce(new Error("request locale unavailable"));
-    const session = await createSession();
-    attachMessageContext(session);
-
-    const response = await ProxyErrorHandler.handle(session, new DOMException("", "AbortError"));
-
-    expect(response.status).toBe(499);
-    expect(mocks.updateMessageRequestDetailsDurably).toHaveBeenCalledWith(
-      901,
-      expect.objectContaining({ errorMessage: "CLIENT_ABORTED", statusCode: 499 })
-    );
-  });
-
-  test("does not localize an upstream HTTP 499 as a local cancellation", async () => {
-    vi.mocked(getLocale).mockResolvedValue("zh-CN");
+  test("does not report an upstream HTTP 499 as a local cancellation", async () => {
     const session = await createSession();
     attachMessageContext(session);
     const error = await ProxyError.fromUpstreamResponse(
@@ -216,7 +180,7 @@ describe("ProxyErrorHandler.handle durable persistence", () => {
 
     expect(response.status).toBe(499);
     expect(await response.json()).not.toMatchObject({
-      error: { message: expect.stringContaining(zhCnErrors.CLIENT_ABORTED) },
+      error: { message: expect.stringContaining("Client aborted request") },
     });
     expect(mocks.updateMessageRequestDetailsDurably).toHaveBeenCalledWith(
       901,

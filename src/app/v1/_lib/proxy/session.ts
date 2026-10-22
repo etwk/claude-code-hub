@@ -1,5 +1,4 @@
 import type { Context } from "hono";
-import { getLocale } from "next-intl/server";
 import {
   isCountTokensEndpointPath,
   normalizeEndpointPath,
@@ -21,7 +20,6 @@ import {
   getSessionRequestArtifactMaxBytes,
 } from "@/lib/session-request-artifact-limit";
 import { clientRequestsContext1m as clientRequestsContext1mHelper } from "@/lib/special-attributes";
-import { ERROR_CODES, getErrorMessageServer } from "@/lib/utils/error-messages";
 import { extractNativeThinkingConfigFromRequestBody } from "@/lib/utils/native-thinking";
 import {
   type ResolvedPricing,
@@ -1322,12 +1320,7 @@ export class ProxySession {
   async syncRequestBodyFromMessage(): Promise<void> {
     const serialized = JSON.stringify(this.request.message);
     if (serialized === undefined) {
-      const { getLocale } = await import("next-intl/server");
-      const message = await getErrorMessageServer(
-        await getLocale(),
-        ERROR_CODES.INVALID_NORMALIZED_BODY
-      );
-      throw new ProxyError(message, 400);
+      throw new ProxyError("The normalized request body could not be serialized", 400);
     }
 
     this.request.buffer = new TextEncoder().encode(serialized).buffer;
@@ -1844,12 +1837,7 @@ async function parseRequestBody(c: Context): Promise<RequestBodyResult> {
   ) {
     const parsed = parseSystemOneMultipartRequest(rawBodyBuffer, contentType);
     if (!parsed) {
-      throw new ProxyError(
-        await getErrorMessageServer(await getLocale(), ERROR_CODES.REQUIRED_FIELD, {
-          field: "request",
-        }),
-        400
-      );
+      throw new ProxyError("request is required", 400);
     }
     loaded.lease.shrinkTo(loaded.retainedBytes);
     return {

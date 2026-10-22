@@ -236,7 +236,9 @@ describe("ProxyForwarder terminal safe client message candidate", () => {
     const error = await ProxyForwarder.send(session).catch((rejection) => rejection as ProxyError);
 
     expect(error.statusCode).toBe(503);
-    expect(error.message).toBe("所有供应商暂时不可用，请稍后重试");
+    expect(error.message).toBe(
+      "All providers are temporarily unavailable. Please try again later."
+    );
     expect(error.upstreamError?.safeClientMessageCandidate).toContain("Quota exceeded");
     expect(error.upstreamError?.safeClientMessageCandidate).not.toContain("https://");
     expect(error.upstreamError?.safeClientMessageCandidate).not.toContain("req_abc123");
