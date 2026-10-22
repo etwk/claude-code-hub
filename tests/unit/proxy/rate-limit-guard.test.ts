@@ -30,26 +30,6 @@ vi.mock("@/lib/logger", () => ({
   },
 }));
 
-vi.mock("next-intl/server", () => ({
-  getLocale: vi.fn(async () => "zh-CN"),
-}));
-
-const getErrorMessageServerMock = vi.fn(async () => "mock rate limit message");
-
-vi.mock("@/lib/utils/error-messages", () => ({
-  ERROR_CODES: {
-    RATE_LIMIT_TOTAL_EXCEEDED: "RATE_LIMIT_TOTAL_EXCEEDED",
-    RATE_LIMIT_CONCURRENT_SESSIONS_EXCEEDED: "RATE_LIMIT_CONCURRENT_SESSIONS_EXCEEDED",
-    RATE_LIMIT_RPM_EXCEEDED: "RATE_LIMIT_RPM_EXCEEDED",
-    RATE_LIMIT_DAILY_QUOTA_EXCEEDED: "RATE_LIMIT_DAILY_QUOTA_EXCEEDED",
-    RATE_LIMIT_5H_EXCEEDED: "RATE_LIMIT_5H_EXCEEDED",
-    RATE_LIMIT_5H_ROLLING_EXCEEDED: "RATE_LIMIT_5H_ROLLING_EXCEEDED",
-    RATE_LIMIT_WEEKLY_EXCEEDED: "RATE_LIMIT_WEEKLY_EXCEEDED",
-    RATE_LIMIT_MONTHLY_EXCEEDED: "RATE_LIMIT_MONTHLY_EXCEEDED",
-  },
-  getErrorMessageServer: getErrorMessageServerMock,
-}));
-
 describe("ProxyRateLimitGuard - key daily limit enforcement", () => {
   const createSession = (overrides?: {
     user?: Partial<{
@@ -281,7 +261,6 @@ describe("ProxyRateLimitGuard - key daily limit enforcement", () => {
     rateLimitServiceMock.checkAndTrackKeyUserSession.mockResolvedValueOnce({
       allowed: false,
       rejectedBy: "key",
-      reasonCode: "RATE_LIMIT_CONCURRENT_SESSIONS_EXCEEDED",
       reasonParams: { current: 2, limit: 1, target: "key" },
       keyCount: 2,
       userCount: 0,
@@ -307,7 +286,6 @@ describe("ProxyRateLimitGuard - key daily limit enforcement", () => {
     rateLimitServiceMock.checkAndTrackKeyUserSession.mockResolvedValueOnce({
       allowed: false,
       rejectedBy: "user",
-      reasonCode: "RATE_LIMIT_CONCURRENT_SESSIONS_EXCEEDED",
       reasonParams: { current: 2, limit: 1, target: "user" },
       keyCount: 0,
       userCount: 2,
@@ -426,21 +404,13 @@ describe("ProxyRateLimitGuard - key daily limit enforcement", () => {
 
     await expect(ProxyRateLimitGuard.ensure(session)).rejects.toMatchObject({
       name: "RateLimitError",
+      message:
+        "5-hour cost limit exceeded: $20.0000 USD (limit: $10.0000 USD). Resets at 2026-03-01T12:00:00.000Z",
       limitType: "usd_5h",
       currentUsage: 20,
       limitValue: 10,
       resetTime: resetAt,
     });
-
-    expect(getErrorMessageServerMock).toHaveBeenCalledWith(
-      "zh-CN",
-      "RATE_LIMIT_5H_EXCEEDED",
-      expect.objectContaining({
-        current: "20.0000",
-        limit: "10.0000",
-        resetTime: resetAt,
-      })
-    );
   });
 
   it("Key 周限额超限应拦截（usd_weekly）", async () => {

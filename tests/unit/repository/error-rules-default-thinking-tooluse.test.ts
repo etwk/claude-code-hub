@@ -95,7 +95,7 @@ describe("syncDefaultErrorRules - 默认 thinking/tool_use 兜底规则", () => 
     expect(rule.overrideResponse?.error?.type).toBe("thinking_error");
     expect(rule.overrideResponse?.error?.message).toContain("tool_result");
     expect(rule.overrideResponse?.error?.message).toContain("signature");
-    expect(rule.overrideResponse?.error?.message).toContain("关闭");
+    expect(rule.overrideResponse?.error?.message).toContain("disable");
   });
 
   test("应包含 Expected thinking/redacted_thinking but found tool_use 的默认规则，并提供可操作提示", async () => {
@@ -123,6 +123,6 @@ describe("syncDefaultErrorRules - 默认 thinking/tool_use 兜底规则", () => 
     expect(rule.overrideResponse?.error?.type).toBe("thinking_error");
     expect(rule.overrideResponse?.error?.message).toContain("tool_result");
     expect(rule.overrideResponse?.error?.message).toContain("signature");
-    expect(rule.overrideResponse?.error?.message).toContain("关闭");
+    expect(rule.overrideResponse?.error?.message).toContain("disable");
   });
 });

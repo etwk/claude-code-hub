@@ -1,5 +1,4 @@
 {
-  "LOCAL_CAPACITY_EXCEEDED": "ローカルのリクエスト処理容量が不足しています。しばらくしてから再試行してください。",
   "_comment": "Error messages for Japanese",
 
   "REQUIRED_FIELD": "{field}は必須です",
@@ -33,13 +32,9 @@
   "INVALID_TOKEN": "無効な認証トークン",
   "SESSION_REQUEST_SOURCE_MISMATCH": "リクエスト元はこの Session に属していません",
   "SESSION_REQUEST_SELECTOR_INCOMPLETE": "プレフィックス Session のリクエストでは、物理ソースとリクエスト番号の両方を指定する必要があります",
-  "PROXY_INVALID_API_KEY": "API キーが無効です。指定されたキーは存在しないか、削除されています。",
-  "PROXY_API_KEY_DISABLED": "この API キーは無効化されています。管理者に再有効化を依頼するか、別のキーをご使用ください。",
-  "PROXY_API_KEY_EXPIRED": "この API キーは期限切れです。管理者に更新を依頼するか、新しいキーへ切り替えてください。",
 
   "INTERNAL_ERROR": "内部サーバーエラー、後でもう一度お試しください",
   "DATABASE_ERROR": "データベースエラー",
-  "INVALID_NORMALIZED_BODY": "正規化されたリクエスト本文をシリアル化できません",
   "NOT_FOUND": "リソースが見つかりません",
   "OPERATION_FAILED": "操作に失敗しました",
   "USER_5H_FIXED_RESET_REQUIRES_REDIS": "固定 5H 制限のリセットには Redis が必要です",
@@ -54,22 +49,12 @@
   "DELETE_FAILED": "削除に失敗しました。後でもう一度お試しください",
 
   "CONNECTION_FAILED": "接続に失敗しました",
-  "CLIENT_ABORTED": "クライアントがリクエストを中止しました",
   "TIMEOUT": "リクエストがタイムアウトしました",
   "NETWORK_ERROR": "ネットワークエラー",
 
   "QUOTA_EXCEEDED": "クォータを超過しました",
   "BATCH_SIZE_EXCEEDED": "一括操作は {max} 件を超えることはできません",
   "RATE_LIMIT_EXCEEDED": "リクエストが多すぎます。後でもう一度お試しください",
-  "RATE_LIMIT_RPM_EXCEEDED": "リクエストレート制限を超過しました：現在 {current} 回/分（制限：{limit} 回/分）。{resetTime} にリセットされます",
-  "RATE_LIMIT_5H_EXCEEDED": "5時間コスト制限を超過しました：${current} USD（制限：${limit} USD）。{resetTime} にリセットされます",
-  "RATE_LIMIT_5H_ROLLING_EXCEEDED": "5時間ローリングウィンドウのコスト制限を超過しました：${current} USD（制限：${limit} USD）。使用量は過去5時間で徐々に解放されます",
-  "RATE_LIMIT_DAILY_QUOTA_EXCEEDED": "日次クォータを超過しました：${current} USD（制限：${limit} USD）。{resetTime} にリセットされます",
-  "RATE_LIMIT_DAILY_ROLLING_EXCEEDED": "24時間ローリングウィンドウのコスト制限を超過しました：${current} USD（制限：${limit} USD）。使用量は過去24時間で徐々に解放されます",
-  "RATE_LIMIT_WEEKLY_EXCEEDED": "週次コスト制限を超過しました：${current} USD（制限：${limit} USD）。{resetTime} にリセットされます",
-  "RATE_LIMIT_MONTHLY_EXCEEDED": "月次コスト制限を超過しました：${current} USD（制限：${limit} USD）。{resetTime} にリセットされます",
-  "RATE_LIMIT_TOTAL_EXCEEDED": "総支出制限を超過しました：${current} / ${limit} USD",
-  "RATE_LIMIT_CONCURRENT_SESSIONS_EXCEEDED": "同時セッション制限を超過しました：現在 {current} セッション（制限：{limit}）。アクティブなセッションが完了するまでお待ちください",
   "RESOURCE_BUSY": "リソースは現在使用中です",
   "INVALID_STATE": "現在の状態では操作が許可されていません",
   "CONFLICT": "操作の競合",

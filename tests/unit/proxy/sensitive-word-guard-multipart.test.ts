@@ -145,7 +145,7 @@ describe("ProxySensitiveWordGuard - multipart image logical body", () => {
     const response = await ProxySensitiveWordGuard.ensure(session);
 
     expect(response?.status).toBe(400);
-    expect(await response?.text()).toContain("敏感词");
+    expect(await response?.text()).toContain("sensitive word");
   });
 
   it("inspects repeated multipart prompt fields via the logical body array view", async () => {
@@ -190,7 +190,7 @@ describe("ProxySensitiveWordGuard - rerank text", () => {
 
       expect(response?.status).toBe(400);
       expect(await response?.json()).toMatchObject({
-        error: { message: expect.stringContaining('敏感词："blocked"') },
+        error: { message: expect.stringContaining('sensitive word: "blocked"') },
       });
     }
   );
@@ -211,7 +211,7 @@ describe("ProxySensitiveWordGuard - rerank text", () => {
 
     expect(response?.status).toBe(400);
     expect(await response?.json()).toMatchObject({
-      error: { message: expect.stringContaining('敏感词："blocked"') },
+      error: { message: expect.stringContaining('sensitive word: "blocked"') },
     });
   });
 

@@ -84,7 +84,6 @@ import {
   TRACK_COST_ROLLING_WINDOW,
 } from "@/lib/redis/lua-scripts";
 import { SessionTracker } from "@/lib/session-tracker";
-import { ERROR_CODES } from "@/lib/utils/error-messages";
 import {
   sumKeyTotalCost,
   sumProviderTotalCost,
@@ -781,7 +780,6 @@ export class RateLimitService {
     trackedKey: boolean;
     trackedUser: boolean;
     rejectedBy?: "key" | "user";
-    reasonCode?: string;
     reasonParams?: Record<string, string | number>;
   }> {
     if (keyLimit <= 0 && userLimit <= 0) {
@@ -826,7 +824,6 @@ export class RateLimitService {
           trackedKey: false,
           trackedUser: false,
           rejectedBy: rejectTarget,
-          reasonCode: ERROR_CODES.RATE_LIMIT_CONCURRENT_SESSIONS_EXCEEDED,
           reasonParams: { current: count, limit, target: rejectTarget },
         };
       }

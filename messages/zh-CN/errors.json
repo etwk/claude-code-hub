@@ -1,5 +1,4 @@
 {
-  "LOCAL_CAPACITY_EXCEEDED": "本地请求处理容量不足，请稍后重试。",
   "_comment": "Error messages for Chinese Simplified",
 
   "REQUIRED_FIELD": "{field}不能为空",
@@ -33,13 +32,9 @@
   "INVALID_TOKEN": "无效的认证令牌",
   "SESSION_REQUEST_SOURCE_MISMATCH": "请求来源不属于该 Session",
   "SESSION_REQUEST_SELECTOR_INCOMPLETE": "前缀 Session 请求必须同时指定物理来源和请求序号",
-  "PROXY_INVALID_API_KEY": "API 密钥无效。提供的密钥不存在或已被删除。",
-  "PROXY_API_KEY_DISABLED": "API 密钥已被禁用。请联系管理员重新启用，或使用其他可用密钥。",
-  "PROXY_API_KEY_EXPIRED": "API 密钥已过期。请联系管理员续期或更换密钥。",
 
   "INTERNAL_ERROR": "系统内部错误，请稍后重试",
   "DATABASE_ERROR": "数据库错误",
-  "INVALID_NORMALIZED_BODY": "规范化后的请求体无法序列化",
   "NOT_FOUND": "资源不存在",
   "OPERATION_FAILED": "操作失败",
   "USER_5H_FIXED_RESET_REQUIRES_REDIS": "重置固定 5H 限额需要 Redis 可用",
@@ -54,22 +49,12 @@
   "DELETE_FAILED": "删除失败，请稍后重试",
 
   "CONNECTION_FAILED": "连接失败",
-  "CLIENT_ABORTED": "客户端已中止请求",
   "TIMEOUT": "请求超时",
   "NETWORK_ERROR": "网络错误",
 
   "QUOTA_EXCEEDED": "配额已用尽",
   "BATCH_SIZE_EXCEEDED": "批量操作不能超过 {max} 个项目",
   "RATE_LIMIT_EXCEEDED": "请求过于频繁，请稍后重试",
-  "RATE_LIMIT_RPM_EXCEEDED": "请求频率超限：当前 {current} 次/分钟（限制：{limit} 次/分钟）。将于 {resetTime} 重置",
-  "RATE_LIMIT_DAILY_QUOTA_EXCEEDED": "每日额度超限：当前 ${current} USD（限制：${limit} USD）。将于 {resetTime} 重置",
-  "RATE_LIMIT_DAILY_ROLLING_EXCEEDED": "24小时滚动窗口消费超限：当前 ${current} USD（限制：${limit} USD）。消费将在过去24小时内逐渐释放",
-  "RATE_LIMIT_5H_EXCEEDED": "5小时消费超限：当前 ${current} USD（限制：${limit} USD）。将于 {resetTime} 重置",
-  "RATE_LIMIT_5H_ROLLING_EXCEEDED": "5小时滚动窗口消费超限：当前 ${current} USD（限制：${limit} USD）。消费将在过去5小时内逐渐释放",
-  "RATE_LIMIT_WEEKLY_EXCEEDED": "周消费超限：当前 ${current} USD（限制：${limit} USD）。将于 {resetTime} 重置",
-  "RATE_LIMIT_MONTHLY_EXCEEDED": "月消费超限：当前 ${current} USD（限制：${limit} USD）。将于 {resetTime} 重置",
-  "RATE_LIMIT_TOTAL_EXCEEDED": "总消费上限已达到：${current} / ${limit} USD",
-  "RATE_LIMIT_CONCURRENT_SESSIONS_EXCEEDED": "并发 Session 超限：当前 {current} 个（限制：{limit} 个）。请等待活跃 Session 完成",
   "RESOURCE_BUSY": "资源正在使用中",
   "INVALID_STATE": "当前状态不允许此操作",
   "CONFLICT": "操作冲突",

@@ -291,7 +291,7 @@ describe("handleProxyRequest - session id on errors", async () => {
     const res = await handleProxyRequest({} as any);
     expect(res.status).toBe(500);
     const body = await res.json();
-    expect(body.error.message).toBe("代理请求发生未知错误");
+    expect(body.error.message).toBe("An unknown error occurred while proxying the request.");
   });
 
   test.each([

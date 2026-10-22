@@ -1,5 +1,4 @@
 {
-  "LOCAL_CAPACITY_EXCEEDED": "本機請求處理容量不足，請稍後重試。",
   "_comment": "Error messages for Chinese Traditional",
 
   "REQUIRED_FIELD": "{field}不能為空",
@@ -33,13 +32,9 @@
   "INVALID_TOKEN": "無效的認證令牌",
   "SESSION_REQUEST_SOURCE_MISMATCH": "請求來源不屬於此 Session",
   "SESSION_REQUEST_SELECTOR_INCOMPLETE": "前綴 Session 請求必須同時指定實體來源與請求序號",
-  "PROXY_INVALID_API_KEY": "API 金鑰無效。提供的金鑰不存在或已被刪除。",
-  "PROXY_API_KEY_DISABLED": "API 金鑰已被停用。請聯絡管理員重新啟用，或使用其他可用金鑰。",
-  "PROXY_API_KEY_EXPIRED": "API 金鑰已過期。請聯絡管理員續期或更換金鑰。",
 
   "INTERNAL_ERROR": "系統內部錯誤，請稍後重試",
   "DATABASE_ERROR": "資料庫錯誤",
-  "INVALID_NORMALIZED_BODY": "規範化後的請求體無法序列化",
   "NOT_FOUND": "資源不存在",
   "OPERATION_FAILED": "操作失敗",
   "USER_5H_FIXED_RESET_REQUIRES_REDIS": "重設固定 5H 限額需要 Redis 可用",
@@ -54,22 +49,12 @@
   "DELETE_FAILED": "刪除失敗，請稍後重試",
 
   "CONNECTION_FAILED": "連接失敗",
-  "CLIENT_ABORTED": "用戶端已中止請求",
   "TIMEOUT": "請求逾時",
   "NETWORK_ERROR": "網路錯誤",
 
   "QUOTA_EXCEEDED": "配額已用盡",
   "BATCH_SIZE_EXCEEDED": "批次操作不能超過 {max} 個項目",
   "RATE_LIMIT_EXCEEDED": "請求過於頻繁，請稍後重試",
-  "RATE_LIMIT_RPM_EXCEEDED": "請求頻率超限：當前 {current} 次/分鐘（限制：{limit} 次/分鐘）。將於 {resetTime} 重置",
-  "RATE_LIMIT_5H_EXCEEDED": "5小時消費超限：當前 ${current} USD（限制：${limit} USD）。將於 {resetTime} 重置",
-  "RATE_LIMIT_5H_ROLLING_EXCEEDED": "5小時滾動視窗消費超限：當前 ${current} USD（限制：${limit} USD）。消費將在過去5小時內逐漸釋放",
-  "RATE_LIMIT_DAILY_QUOTA_EXCEEDED": "每日額度超限：當前 ${current} USD（限制：${limit} USD）。將於 {resetTime} 重置",
-  "RATE_LIMIT_DAILY_ROLLING_EXCEEDED": "24小時滾動視窗消費超限：當前 ${current} USD（限制：${limit} USD）。消費將在過去24小時內逐漸釋放",
-  "RATE_LIMIT_WEEKLY_EXCEEDED": "週消費超限：當前 ${current} USD（限制：${limit} USD）。將於 {resetTime} 重置",
-  "RATE_LIMIT_MONTHLY_EXCEEDED": "月消費超限：當前 ${current} USD（限制：${limit} USD）。將於 {resetTime} 重置",
-  "RATE_LIMIT_TOTAL_EXCEEDED": "總消費上限已達到：${current} / ${limit} USD",
-  "RATE_LIMIT_CONCURRENT_SESSIONS_EXCEEDED": "並發 Session 超限：當前 {current} 個（限制：{limit} 個）。請等待活躍 Session 完成",
   "RESOURCE_BUSY": "資源正在使用中",
   "INVALID_STATE": "當前狀態不允許此操作",
   "CONFLICT": "操作衝突",

@@ -302,7 +302,7 @@ const DEFAULT_ERROR_RULES = [
       error: {
         code: 400,
         status: "INVALID_ARGUMENT",
-        message: "当前中转站不支持 Gemini generateContent 端点",
+        message: "This relay does not support the Gemini generateContent endpoint.",
       },
     },
   },
@@ -318,7 +318,7 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "prompt_limit",
-        message: "输入内容过长，请减少 Prompt 中的 token 数量后重试",
+        message: "Input is too long. Reduce the number of tokens in the prompt and try again.",
       },
     },
   },
@@ -335,7 +335,7 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "input_limit",
-        message: "输入内容超过供应商限制，请减少输入长度后重试",
+        message: "Input exceeds the provider's limit. Reduce the input length and try again.",
       },
     },
   },
@@ -351,7 +351,7 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "input_limit",
-        message: "内容长度超过阈值限制，请减少输入内容后重试",
+        message: "Content length exceeds the threshold. Reduce the input and try again.",
       },
     },
   },
@@ -367,7 +367,7 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "validation_error",
-        message: "请求参数验证失败，请检查请求格式是否正确",
+        message: "Request parameter validation failed. Check that the request format is correct.",
       },
     },
   },
@@ -384,7 +384,8 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "context_limit",
-        message: "上下文长度超过模型限制，请减少对话历史或输入内容",
+        message:
+          "Context length exceeds the model limit. Reduce the conversation history or input.",
       },
     },
   },
@@ -400,7 +401,7 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "token_limit",
-        message: "max_tokens 参数超过模型允许的最大值，请降低该参数",
+        message: "max_tokens exceeds the maximum allowed by the model. Lower this parameter.",
       },
     },
   },
@@ -416,7 +417,8 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "context_limit",
-        message: "当前供应商套餐不支持长上下文，请切换供应商或减少输入",
+        message:
+          "The current provider plan does not support long context. Switch providers or reduce the input.",
       },
     },
   },
@@ -432,7 +434,7 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "content_filter",
-        message: "内容被安全过滤器拦截，请修改输入内容后重试",
+        message: "Content was blocked by a safety filter. Modify the input and try again.",
       },
     },
   },
@@ -448,7 +450,8 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "invalid_request_error",
-        message: "内容触发了安全策略拦截 (cyber_policy)，请调整输入后重试",
+        message:
+          "Content triggered a safety policy block (cyber_policy). Adjust the input and try again.",
       },
     },
     overrideStatusCode: 400,
@@ -466,7 +469,7 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "validation_error",
-        message: "tool_use ID 重复，请确保每个工具调用使用唯一 ID",
+        message: "Duplicate tool_use ID. Make sure each tool call uses a unique ID.",
       },
     },
   },
@@ -483,7 +486,8 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "validation_error",
-        message: "消息内容不能为空，请确保所有消息都有有效内容（最后一条 assistant 消息除外）",
+        message:
+          "Message content cannot be empty. Make sure all messages have valid content (except the last assistant message).",
       },
     },
   },
@@ -501,7 +505,8 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "validation_error",
-        message: "工具名称重复，请检查 MCP 服务器配置确保工具名称唯一",
+        message:
+          "Duplicate tool names. Check your MCP server configuration and make sure tool names are unique.",
       },
     },
   },
@@ -518,7 +523,8 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "validation_error",
-        message: "server_tool_use.id 格式错误，必须以 srvtoolu_ 开头且仅包含字母、数字和下划线",
+        message:
+          "Invalid server_tool_use.id format. It must start with srvtoolu_ and contain only letters, digits, and underscores.",
       },
     },
   },
@@ -536,7 +542,8 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "validation_error",
-        message: "tool_result 块中不应包含 tool_use_id 字段，请检查消息格式",
+        message:
+          "tool_result blocks must not contain a tool_use_id field. Check the message format.",
       },
     },
   },
@@ -553,7 +560,7 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "validation_error",
-        message: "tool_result 缺少对应的 tool_use，请检查工具调用链",
+        message: "tool_result has no matching tool_use. Check the tool call chain.",
       },
     },
   },
@@ -572,7 +579,7 @@ const DEFAULT_ERROR_RULES = [
       error: {
         type: "validation_error",
         message:
-          "tool_use 块缺少对应的 tool_result，请确保每个 tool_use 在下一条消息中有对应的 tool_result 块",
+          "tool_use block has no matching tool_result. Make sure every tool_use has a matching tool_result block in the next message.",
       },
     },
   },
@@ -589,7 +596,7 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "model_error",
-        message: "模型参数为空，请检查请求中的 model 字段",
+        message: "Model parameter is empty. Check the model field in the request.",
       },
     },
   },
@@ -605,7 +612,7 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "model_error",
-        message: "未知模型，请检查模型名称是否正确",
+        message: "Unknown model. Check that the model name is correct.",
       },
     },
   },
@@ -621,7 +628,7 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "model_error",
-        message: "缺少必需的 model 参数，请在请求中指定模型名称",
+        message: "Missing required model parameter. Specify a model name in the request.",
       },
     },
   },
@@ -637,7 +644,7 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "model_error",
-        message: "模型名称不能为空，请指定有效的模型名称",
+        message: "Model name cannot be empty. Specify a valid model name.",
       },
     },
   },
@@ -653,7 +660,8 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "pdf_limit",
-        message: "PDF 页数超过限制（通常为 100 页），请减少页数后重试",
+        message:
+          "PDF page count exceeds the limit (usually 100 pages). Reduce the number of pages and try again.",
       },
     },
   },
@@ -670,7 +678,8 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "media_limit",
-        message: "媒体数量超过限制（文档页数 + 图片数量 > 100），请减少图片或文档页数后重试",
+        message:
+          "Media count exceeds the limit (document pages + images > 100). Reduce the number of images or document pages and try again.",
       },
     },
   },
@@ -690,9 +699,11 @@ const DEFAULT_ERROR_RULES = [
       error: {
         type: "thinking_error",
         message:
-          "thinking 已启用，但工具调用续写的 assistant 消息未以 thinking/redacted_thinking 块开头。" +
-          "请在 tool_result 续写请求中原样回传上一轮 assistant 的 thinking/redacted_thinking 块（含 signature/data），" +
-          "或关闭 thinking 后重试。",
+          "Thinking is enabled, but the assistant message continuing the tool call " +
+          "does not start with a thinking/redacted_thinking block. " +
+          "In the tool_result follow-up request, send back the previous assistant turn's " +
+          "thinking/redacted_thinking blocks unchanged (including signature/data), " +
+          "or disable thinking and try again.",
       },
     },
   },
@@ -710,9 +721,11 @@ const DEFAULT_ERROR_RULES = [
       error: {
         type: "thinking_error",
         message:
-          "thinking 已启用，但工具调用续写的 assistant 消息未以 thinking/redacted_thinking 块开头。" +
-          "请在 tool_result 续写请求中原样回传上一轮 assistant 的 thinking/redacted_thinking 块（含 signature/data），" +
-          "或关闭 thinking 后重试。",
+          "Thinking is enabled, but the assistant message continuing the tool call " +
+          "does not start with a thinking/redacted_thinking block. " +
+          "In the tool_result follow-up request, send back the previous assistant turn's " +
+          "thinking/redacted_thinking blocks unchanged (including signature/data), " +
+          "or disable thinking and try again.",
       },
     },
   },
@@ -729,7 +742,7 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "thinking_error",
-        message: "thinking 块格式无效，请检查配置或请求参数",
+        message: "Invalid thinking block format. Check the configuration or request parameters.",
       },
     },
   },
@@ -748,7 +761,7 @@ const DEFAULT_ERROR_RULES = [
       error: {
         type: "thinking_error",
         message:
-          "thinking 块签名无效，通常发生在 Anthropic 渠道与非 Anthropic 渠道切换时，请检查请求格式",
+          "Invalid thinking block signature. This usually happens when switching between Anthropic and non-Anthropic channels. Check the request format.",
       },
     },
   },
@@ -766,10 +779,12 @@ const DEFAULT_ERROR_RULES = [
       error: {
         type: "thinking_error",
         message:
-          "thinking block 缺少必需的 signature 字段。" +
-          "该问题通常发生在从非 Anthropic 渠道切换到 Anthropic 渠道时。" +
-          "请确保 tool_result 续写请求中原样回传上一轮 assistant 的 thinking/redacted_thinking 块（含 signature/data），" +
-          "或关闭 thinking 后重试。",
+          "The thinking block is missing the required signature field. " +
+          "This usually happens when switching from a non-Anthropic channel " +
+          "to an Anthropic channel. " +
+          "Make sure the tool_result follow-up request sends back the previous assistant turn's " +
+          "thinking/redacted_thinking blocks unchanged (including signature/data), " +
+          "or disable thinking and try again.",
       },
     },
   },
@@ -785,7 +800,8 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "parameter_error",
-        message: "缺少必需参数或包含不允许的参数，请检查请求格式",
+        message:
+          "A required parameter is missing or a parameter is not allowed. Check the request format.",
       },
     },
   },
@@ -801,7 +817,8 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "invalid_request",
-        message: "请求格式非法，请检查请求结构是否符合 API 规范",
+        message:
+          "Invalid request format. Check that the request structure conforms to the API specification.",
       },
     },
   },
@@ -817,7 +834,8 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "cache_limit",
-        message: "cache_control 块数量超过限制，请减少缓存块数量",
+        message:
+          "The number of cache_control blocks exceeds the limit. Reduce the number of cache blocks.",
       },
     },
   },
@@ -833,7 +851,7 @@ const DEFAULT_ERROR_RULES = [
       type: "error",
       error: {
         type: "invalid_request",
-        message: "图片大小超过最大限制，请压缩图片后重试",
+        message: "Image size exceeds the maximum limit. Compress the image and try again.",
       },
     },
   },
@@ -851,7 +869,7 @@ const DEFAULT_ERROR_RULES = [
       error: {
         type: "thinking_error",
         message:
-          "当前思考强度不支持该模型，请调整 reasoning_effort 参数或切换模型（如 'high' 仅支持部分模型）",
+          "The current reasoning effort is not supported by this model. Adjust the reasoning_effort parameter or switch models (e.g., 'high' is supported by only some models).",
       },
     },
   },
@@ -867,7 +885,7 @@ const DEFAULT_ERROR_RULES = [
     overrideResponse: {
       error: {
         message:
-          "引用的 Response 项已失效（上游 store=false 导致项未持久化）。请在 Provider 自定义请求体中设置 store=true，或移除输入中的历史项 ID（rs_xxx）后重试",
+          "The referenced Response item is no longer valid (the upstream used store=false, so the item was not persisted). Set store=true in the provider's custom request body, or remove historical item IDs (rs_xxx) from the input and try again.",
         type: "invalid_request_error",
         param: null,
         code: null,
@@ -885,7 +903,8 @@ const DEFAULT_ERROR_RULES = [
     priority: 74,
     overrideResponse: {
       error: {
-        message: "Responses API 的 input 参数必须为数组格式。请检查请求体中 input 字段是否为列表",
+        message:
+          "The input parameter of the Responses API must be an array. Check that the input field in the request body is a list.",
         type: "invalid_request_error",
         param: "input",
         code: null,

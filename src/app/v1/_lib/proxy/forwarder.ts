@@ -916,7 +916,7 @@ function buildStreamingIdleTimeoutError(provider: {
     },
   };
   return new ProxyError(
-    `供应商流式响应静默超时: ${provider.streamingIdleTimeoutMs}ms 内未收到新数据`,
+    `Provider streaming response idle timeout: no new data received within ${provider.streamingIdleTimeoutMs}ms`,
     524,
     {
       body: JSON.stringify(parsed),
@@ -1665,7 +1665,7 @@ export class ProxyForwarder {
 
   private static async sendInternal(session: ProxySession): Promise<Response> {
     if (!session.provider || !session.authState?.success) {
-      throw new Error("代理上下文缺少供应商或鉴权信息");
+      throw new Error("Proxy context is missing provider or authentication state");
     }
 
     const requestStartedAt = Date.now();
@@ -2130,7 +2130,7 @@ export class ProxyForwarder {
 
                   if (timedOutBeforeContent) {
                     throw new ProxyError(
-                      `供应商首个有效内容超时: 门控在收到有效内容帧前被首字节计时器中止`,
+                      "Provider first content timeout: the first-byte timer aborted the stream gate before a valid content frame arrived",
                       524,
                       {
                         body: JSON.stringify({
@@ -3949,7 +3949,7 @@ export class ProxyForwarder {
     };
     const buildResponseTimeoutError = () =>
       new ProxyError(
-        `${responseTimeoutType === "streaming_first_byte" ? "供应商首字节响应超时" : "供应商响应超时"}: ${responseTimeoutMs}ms 内未收到数据`,
+        `${responseTimeoutType === "streaming_first_byte" ? "Provider first-byte timeout" : "Provider response timeout"}: no data received within ${responseTimeoutMs}ms`,
         524,
         {
           body: JSON.stringify({
@@ -4316,7 +4316,7 @@ export class ProxyForwarder {
         // 抛出 ProxyError（归类为 PROVIDER_ERROR）
         cleanupCombinedSignal();
         throw new ProxyError(
-          `供应商流式响应静默超时: ${provider.streamingIdleTimeoutMs}ms 内未收到新数据`,
+          `Provider streaming response idle timeout: no new data received within ${provider.streamingIdleTimeoutMs}ms`,
           524, // 524 = A Timeout Occurred
           {
             body: JSON.stringify({
@@ -4927,7 +4927,7 @@ export class ProxyForwarder {
   ): Promise<Response> {
     const initialProvider = session.provider;
     if (!initialProvider) {
-      throw new Error("代理上下文缺少供应商");
+      throw new Error("Proxy context is missing a provider");
     }
 
     const rawCrossProviderFallbackEnabled = session.isRawCrossProviderFallbackEnabled();
@@ -6410,7 +6410,7 @@ export class ProxyForwarder {
     prepared: PreparedStreamingDiscovery
   ): Promise<Response> {
     const initialProvider = session.provider;
-    if (!initialProvider) throw new Error("代理上下文缺少供应商");
+    if (!initialProvider) throw new Error("Proxy context is missing a provider");
     const { settings, lease, requestStartedAt } = prepared;
     const concurrency = Math.max(2, Math.floor(settings.discoveryConcurrency ?? 2));
     const maxRounds = Math.max(1, Math.floor(settings.maxDiscoveryRounds ?? 2));

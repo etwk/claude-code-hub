@@ -4,7 +4,6 @@ import { resolveKeyUserConcurrentSessionLimits } from "@/lib/rate-limit/concurre
 import { resolveKeyCostResetAt, resolveUser5hCostResetAt } from "@/lib/rate-limit/cost-reset-utils";
 import { getResetInfo, getResetInfoWithMode } from "@/lib/rate-limit/time-utils";
 import { SessionManager } from "@/lib/session-manager";
-import { ERROR_CODES, getErrorMessageServer } from "@/lib/utils/error-messages";
 import { RateLimitError } from "./errors";
 import type { ProxySession } from "./session";
 
@@ -30,6 +29,30 @@ function parseLimitInfo(reason: string): { currentUsage: number; limitValue: num
 
   return { currentUsage: 0, limitValue: 0 };
 }
+
+const usd = (value: number) => `$${value.toFixed(4)} USD`;
+
+/** Client-facing rate-limit messages (gateway responses are English only). */
+const RATE_LIMIT_MESSAGES = {
+  total: (current: number, limit: number) =>
+    `Total spending limit exceeded: ${usd(current)} (limit: ${usd(limit)})`,
+  concurrentSessions: (current: number, limit: number) =>
+    `Concurrent sessions limit exceeded: ${current} sessions (limit: ${limit}). Please wait for active sessions to complete`,
+  rpm: (current: number, limit: number, resetTime: string) =>
+    `Rate limit exceeded: ${current} requests per minute (limit: ${limit}). Resets at ${resetTime}`,
+  fixed5h: (current: number, limit: number, resetTime: string) =>
+    `5-hour cost limit exceeded: ${usd(current)} (limit: ${usd(limit)}). Resets at ${resetTime}`,
+  rolling5h: (current: number, limit: number) =>
+    `5-hour rolling window cost limit exceeded: ${usd(current)} (limit: ${usd(limit)}). Usage gradually expires over the past 5 hours`,
+  fixedDaily: (current: number, limit: number, resetTime: string) =>
+    `Daily quota exceeded: ${usd(current)} (limit: ${usd(limit)}). Resets at ${resetTime}`,
+  rollingDaily: (current: number, limit: number) =>
+    `24-hour rolling window cost limit exceeded: ${usd(current)} (limit: ${usd(limit)}). Usage gradually expires over the past 24 hours`,
+  weekly: (current: number, limit: number, resetTime: string) =>
+    `Weekly cost limit exceeded: ${usd(current)} (limit: ${usd(limit)}). Resets at ${resetTime}`,
+  monthly: (current: number, limit: number, resetTime: string) =>
+    `Monthly cost limit exceeded: ${usd(current)} (limit: ${usd(limit)}). Resets at ${resetTime}`,
+};
 
 /**
  * 限流守卫：集中执行 Key/User 各维度限额校验（含并发 Session / RPM 等资源保护）。
@@ -77,12 +100,7 @@ export class ProxyRateLimitGuard {
     if (!keyTotalCheck.allowed) {
       logger.warn(`[RateLimit] Key total limit exceeded: key=${key.id}, ${keyTotalCheck.reason}`);
 
-      const { getLocale } = await import("next-intl/server");
-      const locale = await getLocale();
-      const message = await getErrorMessageServer(locale, ERROR_CODES.RATE_LIMIT_TOTAL_EXCEEDED, {
-        current: (keyTotalCheck.current || 0).toFixed(4),
-        limit: (key.limitTotalUsd || 0).toFixed(4),
-      });
+      const message = RATE_LIMIT_MESSAGES.total(keyTotalCheck.current || 0, key.limitTotalUsd || 0);
 
       const noReset = "9999-12-31T23:59:59.999Z";
 
@@ -110,12 +128,10 @@ export class ProxyRateLimitGuard {
         `[RateLimit] User total limit exceeded: user=${user.id}, ${userTotalCheck.reason}`
       );
 
-      const { getLocale } = await import("next-intl/server");
-      const locale = await getLocale();
-      const message = await getErrorMessageServer(locale, ERROR_CODES.RATE_LIMIT_TOTAL_EXCEEDED, {
-        current: (userTotalCheck.current || 0).toFixed(4),
-        limit: (user.limitTotalUsd || 0).toFixed(4),
-      });
+      const message = RATE_LIMIT_MESSAGES.total(
+        userTotalCheck.current || 0,
+        user.limitTotalUsd || 0
+      );
 
       const noReset = "9999-12-31T23:59:59.999Z";
 
@@ -179,15 +195,9 @@ export class ProxyRateLimitGuard {
 
       const resetTime = new Date().toISOString();
 
-      const { getLocale } = await import("next-intl/server");
-      const locale = await getLocale();
-      const message = await getErrorMessageServer(
-        locale,
-        concurrentCheck.reasonCode ?? ERROR_CODES.RATE_LIMIT_CONCURRENT_SESSIONS_EXCEEDED,
-        {
-          current: String(resolvedCurrentUsage),
-          limit: String(resolvedLimitValue),
-        }
+      const message = RATE_LIMIT_MESSAGES.concurrentSessions(
+        resolvedCurrentUsage,
+        resolvedLimitValue
       );
 
       throw new RateLimitError(
@@ -209,13 +219,7 @@ export class ProxyRateLimitGuard {
 
         const resetTime = new Date(Date.now() + 60 * 1000).toISOString();
 
-        const { getLocale } = await import("next-intl/server");
-        const locale = await getLocale();
-        const message = await getErrorMessageServer(locale, ERROR_CODES.RATE_LIMIT_RPM_EXCEEDED, {
-          current: String(rpmCheck.current || 0),
-          limit: String(user.rpm),
-          resetTime,
-        });
+        const message = RATE_LIMIT_MESSAGES.rpm(rpmCheck.current || 0, user.rpm, resetTime);
 
         throw new RateLimitError(
           "rate_limit_error",
@@ -247,24 +251,19 @@ export class ProxyRateLimitGuard {
 
       const { currentUsage, limitValue } = parseLimitInfo(key5hCheck.reason!);
 
-      const { getLocale } = await import("next-intl/server");
-      const locale = await getLocale();
       const resetAt = await RateLimitService.get5hWindowResetAt(
         key.id,
         "key",
         normalizedKey5hResetMode
       );
-      const message = await getErrorMessageServer(
-        locale,
+      const message =
         normalizedKey5hResetMode === "fixed"
-          ? ERROR_CODES.RATE_LIMIT_5H_EXCEEDED
-          : ERROR_CODES.RATE_LIMIT_5H_ROLLING_EXCEEDED,
-        {
-          current: currentUsage.toFixed(4),
-          limit: limitValue.toFixed(4),
-          resetTime: resetAt?.toISOString() ?? new Date().toISOString(),
-        }
-      );
+          ? RATE_LIMIT_MESSAGES.fixed5h(
+              currentUsage,
+              limitValue,
+              resetAt?.toISOString() ?? new Date().toISOString()
+            )
+          : RATE_LIMIT_MESSAGES.rolling5h(currentUsage, limitValue);
 
       throw new RateLimitError(
         "rate_limit_error",
@@ -294,24 +293,19 @@ export class ProxyRateLimitGuard {
 
       const { currentUsage, limitValue } = parseLimitInfo(user5hCheck.reason!);
 
-      const { getLocale } = await import("next-intl/server");
-      const locale = await getLocale();
       const resetAt = await RateLimitService.get5hWindowResetAt(
         user.id,
         "user",
         normalizedUser5hResetMode
       );
-      const message = await getErrorMessageServer(
-        locale,
+      const message =
         normalizedUser5hResetMode === "fixed"
-          ? ERROR_CODES.RATE_LIMIT_5H_EXCEEDED
-          : ERROR_CODES.RATE_LIMIT_5H_ROLLING_EXCEEDED,
-        {
-          current: currentUsage.toFixed(4),
-          limit: limitValue.toFixed(4),
-          resetTime: resetAt?.toISOString() ?? new Date().toISOString(),
-        }
-      );
+          ? RATE_LIMIT_MESSAGES.fixed5h(
+              currentUsage,
+              limitValue,
+              resetAt?.toISOString() ?? new Date().toISOString()
+            )
+          : RATE_LIMIT_MESSAGES.rolling5h(currentUsage, limitValue);
 
       throw new RateLimitError(
         "rate_limit_error",
@@ -340,20 +334,10 @@ export class ProxyRateLimitGuard {
 
       const { currentUsage, limitValue } = parseLimitInfo(keyDailyCheck.reason!);
 
-      const { getLocale } = await import("next-intl/server");
-      const locale = await getLocale();
-
       // 根据模式选择不同的错误消息
       if (key.dailyResetMode === "rolling") {
         // rolling 模式：使用滚动窗口专用消息（无固定重置时间）
-        const message = await getErrorMessageServer(
-          locale,
-          ERROR_CODES.RATE_LIMIT_DAILY_ROLLING_EXCEEDED,
-          {
-            current: currentUsage.toFixed(4),
-            limit: limitValue.toFixed(4),
-          }
-        );
+        const message = RATE_LIMIT_MESSAGES.rollingDaily(currentUsage, limitValue);
 
         throw new RateLimitError(
           "rate_limit_error",
@@ -375,15 +359,7 @@ export class ProxyRateLimitGuard {
           resetInfo.resetAt?.toISOString() ??
           new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
-        const message = await getErrorMessageServer(
-          locale,
-          ERROR_CODES.RATE_LIMIT_DAILY_QUOTA_EXCEEDED,
-          {
-            current: currentUsage.toFixed(4),
-            limit: limitValue.toFixed(4),
-            resetTime,
-          }
-        );
+        const message = RATE_LIMIT_MESSAGES.fixedDaily(currentUsage, limitValue, resetTime);
 
         throw new RateLimitError(
           "rate_limit_error",
@@ -416,20 +392,10 @@ export class ProxyRateLimitGuard {
 
       const { currentUsage, limitValue } = parseLimitInfo(userDailyCheck.reason!);
 
-      const { getLocale } = await import("next-intl/server");
-      const locale = await getLocale();
-
       // 根据模式选择不同的错误消息
       if (user.dailyResetMode === "rolling") {
         // rolling 模式：使用滚动窗口专用消息（无固定重置时间）
-        const message = await getErrorMessageServer(
-          locale,
-          ERROR_CODES.RATE_LIMIT_DAILY_ROLLING_EXCEEDED,
-          {
-            current: currentUsage.toFixed(4),
-            limit: limitValue.toFixed(4),
-          }
-        );
+        const message = RATE_LIMIT_MESSAGES.rollingDaily(currentUsage, limitValue);
 
         throw new RateLimitError(
           "rate_limit_error",
@@ -451,15 +417,7 @@ export class ProxyRateLimitGuard {
           resetInfo.resetAt?.toISOString() ??
           new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
-        const message = await getErrorMessageServer(
-          locale,
-          ERROR_CODES.RATE_LIMIT_DAILY_QUOTA_EXCEEDED,
-          {
-            current: currentUsage.toFixed(4),
-            limit: limitValue.toFixed(4),
-            resetTime,
-          }
-        );
+        const message = RATE_LIMIT_MESSAGES.fixedDaily(currentUsage, limitValue, resetTime);
 
         throw new RateLimitError(
           "rate_limit_error",
@@ -491,13 +449,7 @@ export class ProxyRateLimitGuard {
       const resetInfo = await getResetInfo("weekly");
       const resetTime = resetInfo.resetAt?.toISOString() || new Date().toISOString();
 
-      const { getLocale } = await import("next-intl/server");
-      const locale = await getLocale();
-      const message = await getErrorMessageServer(locale, ERROR_CODES.RATE_LIMIT_WEEKLY_EXCEEDED, {
-        current: currentUsage.toFixed(4),
-        limit: limitValue.toFixed(4),
-        resetTime,
-      });
+      const message = RATE_LIMIT_MESSAGES.weekly(currentUsage, limitValue, resetTime);
 
       throw new RateLimitError(
         "rate_limit_error",
@@ -528,13 +480,7 @@ export class ProxyRateLimitGuard {
       const resetInfo = await getResetInfo("weekly");
       const resetTime = resetInfo.resetAt?.toISOString() || new Date().toISOString();
 
-      const { getLocale } = await import("next-intl/server");
-      const locale = await getLocale();
-      const message = await getErrorMessageServer(locale, ERROR_CODES.RATE_LIMIT_WEEKLY_EXCEEDED, {
-        current: currentUsage.toFixed(4),
-        limit: limitValue.toFixed(4),
-        resetTime,
-      });
+      const message = RATE_LIMIT_MESSAGES.weekly(currentUsage, limitValue, resetTime);
 
       throw new RateLimitError(
         "rate_limit_error",
@@ -565,13 +511,7 @@ export class ProxyRateLimitGuard {
       const resetInfo = await getResetInfo("monthly");
       const resetTime = resetInfo.resetAt?.toISOString() || new Date().toISOString();
 
-      const { getLocale } = await import("next-intl/server");
-      const locale = await getLocale();
-      const message = await getErrorMessageServer(locale, ERROR_CODES.RATE_LIMIT_MONTHLY_EXCEEDED, {
-        current: currentUsage.toFixed(4),
-        limit: limitValue.toFixed(4),
-        resetTime,
-      });
+      const message = RATE_LIMIT_MESSAGES.monthly(currentUsage, limitValue, resetTime);
 
       throw new RateLimitError(
         "rate_limit_error",
@@ -602,13 +542,7 @@ export class ProxyRateLimitGuard {
       const resetInfo = await getResetInfo("monthly");
       const resetTime = resetInfo.resetAt?.toISOString() || new Date().toISOString();
 
-      const { getLocale } = await import("next-intl/server");
-      const locale = await getLocale();
-      const message = await getErrorMessageServer(locale, ERROR_CODES.RATE_LIMIT_MONTHLY_EXCEEDED, {
-        current: currentUsage.toFixed(4),
-        limit: limitValue.toFixed(4),
-        resetTime,
-      });
+      const message = RATE_LIMIT_MESSAGES.monthly(currentUsage, limitValue, resetTime);
 
       throw new RateLimitError(
         "rate_limit_error",

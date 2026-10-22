@@ -35,18 +35,8 @@ vi.mock("@/repository/provider", () => ({
 }));
 
 vi.mock("next-intl/server", () => ({
-  getLocale: vi.fn().mockResolvedValue("en"),
+  getLocale: vi.fn().mockResolvedValue("zh-CN"),
 }));
-
-vi.mock("@/lib/utils/error-messages", async () => {
-  const actual = await vi.importActual<typeof import("@/lib/utils/error-messages")>(
-    "@/lib/utils/error-messages"
-  );
-  return {
-    ...actual,
-    getErrorMessageServer: vi.fn(async (_locale: string, code: string) => code),
-  };
-});
 
 function makeContext(apiKey: string) {
   let thrown: Response | null = null;
@@ -115,7 +105,9 @@ describe("handleAvailableModels auth outcomes", () => {
     expect(response.status).toBe(401);
     const error = await readErrorBody(response);
     expect(error.type).toBe("key_disabled");
-    expect(error.message).toBe("PROXY_API_KEY_DISABLED");
+    expect(error.message).toBe(
+      "This API key has been disabled. Please contact your administrator to re-enable it, or use a different key."
+    );
   });
 
   it("returns 401 key_expired for an expired key", async () => {
@@ -130,7 +122,9 @@ describe("handleAvailableModels auth outcomes", () => {
     expect(response.status).toBe(401);
     const error = await readErrorBody(response);
     expect(error.type).toBe("key_expired");
-    expect(error.message).toBe("PROXY_API_KEY_EXPIRED");
+    expect(error.message).toBe(
+      "This API key has expired. Please contact your administrator to renew it or rotate to a new key."
+    );
   });
 
   it("returns 401 invalid_api_key for an unknown key", async () => {
@@ -145,7 +139,9 @@ describe("handleAvailableModels auth outcomes", () => {
     expect(response.status).toBe(401);
     const error = await readErrorBody(response);
     expect(error.type).toBe("invalid_api_key");
-    expect(error.message).toBe("PROXY_INVALID_API_KEY");
+    expect(error.message).toBe(
+      "Invalid API key. The provided key does not exist or has been deleted."
+    );
   });
 
   it("returns 401 user_disabled when the user account is disabled", async () => {

@@ -159,7 +159,8 @@ describe("handleProxyRequest public error behavior", () => {
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({
       error: {
-        message: "上游服务暂时不可用，请稍后重试 (cch_session_id: session-forward-error)",
+        message:
+          "Upstream service is temporarily unavailable. Please try again later. (cch_session_id: session-forward-error)",
         type: "service_unavailable_error",
         code: "service_unavailable_error",
       },
@@ -205,7 +206,7 @@ describe("handleProxyRequest public error behavior", () => {
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({
       error: {
-        message: "代理请求发生未知错误",
+        message: "An unknown error occurred while proxying the request.",
         type: "internal_server_error",
         code: "internal_server_error",
       },
