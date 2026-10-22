@@ -110,12 +110,13 @@ export class ProxyError extends Error {
     }
 
     // 2. 尝试解析 JSON（支持标准/扩展 JSON Content-Type 及以 {/ [ 开头的 JSON 响应体）
+    const rawBodyMaxChars = 4096;
     const trimmedBody = body.trim();
     if (
       trimmedBody &&
       (isJsonResponseContentType(contentType) ||
-        trimmedBody.startsWith("{") ||
-        trimmedBody.startsWith("["))
+        (trimmedBody.length <= rawBodyMaxChars &&
+          (trimmedBody.startsWith("{") || trimmedBody.startsWith("["))))
     ) {
       try {
         parsed = JSON.parse(trimmedBody);
@@ -137,7 +138,6 @@ export class ProxyError extends Error {
       ProxyError.extractRequestIdFromBody(parsed) ||
       ProxyError.extractRequestIdFromHeaders(response.headers);
 
-    const rawBodyMaxChars = 4096;
     const rawBody = body.length > rawBodyMaxChars ? body.slice(0, rawBodyMaxChars) : body;
     const rawBodyTruncated = body.length > rawBodyMaxChars;
 

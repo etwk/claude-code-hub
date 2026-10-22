@@ -9162,7 +9162,7 @@ export class ProxyForwarder {
           lastError.message
         ) ||
         lastError instanceof StreamPrecommitError;
-      if (!isInternalSetupOrGateError && lastError.statusCode !== 499) {
+      if (!isInternalSetupOrGateError && !lastError.isLocalAbort) {
         return lastError;
       }
     }

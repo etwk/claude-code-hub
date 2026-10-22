@@ -376,6 +376,18 @@ describe("ProxyErrorHandler.handle - upstream message passthrough", () => {
     expect(err.upstreamError?.rawBody?.length).toBe(4096);
     expect(err.upstreamError?.rawBodyTruncated).toBe(true);
 
+    const largeSniffedJsonBody = JSON.stringify({
+      error: { message: `bad ${"x".repeat(5000)}` },
+    });
+    const largeSniffedErr = await ProxyError.fromUpstreamResponse(
+      new Response(largeSniffedJsonBody, {
+        status: 502,
+        headers: { "content-type": "text/plain" },
+      }),
+      { id: 1, name: "Anthropic" }
+    );
+    expect(largeSniffedErr.upstreamError?.parsed).toBeUndefined();
+    expect(largeSniffedErr.upstreamError?.body.length).toBe(503);
     const nestedDetailErr = await ProxyError.fromUpstreamResponse(
       new Response(JSON.stringify({ error: { detail: "invalid field" } }), {
         status: 422,
