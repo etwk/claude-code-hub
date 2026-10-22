@@ -369,10 +369,15 @@ describe("ProxyForwarder terminal safe client message candidate", () => {
     expect(resolved.upstreamError?.safeClientMessageCandidate).toBeUndefined();
 
     const upstream524 = await ProxyError.fromUpstreamResponse(
-      new Response(JSON.stringify({ error: { message: "Origin server timed out" } }), {
-        status: 524,
-        headers: { "content-type": "application/json", "x-request-id": "req_cf_524" },
-      }),
+      new Response(
+        JSON.stringify({
+          error: { message: "Provider response timeout: origin did not answer" },
+        }),
+        {
+          status: 524,
+          headers: { "content-type": "application/json", "x-request-id": "req_cf_524" },
+        }
+      ),
       { id: provider1.id, name: provider1.name }
     );
     mocks.pickRandomProviderWithExclusion.mockResolvedValueOnce(null);
@@ -382,6 +387,21 @@ describe("ProxyForwarder terminal safe client message candidate", () => {
     );
     expect(resolvedUpstream524).toBe(upstream524);
     expect(resolvedUpstream524.statusCode).toBe(524);
+
+    const upstream499 = await ProxyError.fromUpstreamResponse(
+      new Response(JSON.stringify({ error: { message: "invalid request" } }), {
+        status: 499,
+        headers: { "content-type": "application/json" },
+      }),
+      { id: provider1.id, name: provider1.name }
+    );
+    mocks.pickRandomProviderWithExclusion.mockResolvedValueOnce(null);
+    mocks.categorizeErrorAsync.mockResolvedValueOnce(ErrorCategory.NON_RETRYABLE_CLIENT_ERROR);
+    doForward.mockRejectedValueOnce(upstream499);
+    const resolvedUpstream499 = await ProxyForwarder.send(session).catch(
+      (rejection) => rejection as ProxyError
+    );
+    expect(resolvedUpstream499.statusCode).toBe(503);
   });
 
   test("passes through upstream error when an earlier provider was skipped before dispatch", async () => {

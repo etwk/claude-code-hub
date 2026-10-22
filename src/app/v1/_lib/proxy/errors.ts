@@ -396,17 +396,37 @@ export class ProxyError extends Error {
    * - request_id: "xxx"
    * - "request_id": "xxx"
    */
+  private static normalizeSafeRequestId(value: string | undefined | null): string | undefined {
+    if (typeof value !== "string") return undefined;
+    const trimmed = value.trim();
+    if (!trimmed || trimmed.length > 128) return undefined;
+    if (!/^[A-Za-z0-9._:-]+$/.test(trimmed)) return undefined;
+    if (/^(?:sk|rk|pk)-/i.test(trimmed) || /^(?:AIza|eyJ)/i.test(trimmed)) return undefined;
+    if (sanitizeErrorTextForDetail(trimmed) !== trimmed) return undefined;
+    return trimmed;
+  }
+
+  private static isEnglishErrorDetail(value: string): boolean {
+    const trimmed = value.trim();
+    if (!trimmed || !/^[\x20-\x7E\r\n\t]+$/.test(trimmed)) {
+      return false;
+    }
+    return /\b(?:the|is|are|was|were|be|been|to|of|in|for|on|with|by|at|from|or|and|not|no|only|can|cannot|may|must|should|will|does|did|has|have|had|error|errors|invalid|missing|required|field|fields|value|values|parameter|parameters|input|inputs|request|response|model|token|tokens|limit|exceeded|quota|rate|unauthorized|forbidden|found|allowed|supported|unsupported|failed|failure|timeout|timed|unavailable|denied|expired|empty|disabled|unknown|unexpected|bad|type|string|number|integer|boolean|array|object|length|maximum|minimum|between|expected|received|null|none|msg|detail|status|code|header|headers|body|message|messages)\b/i.test(
+      trimmed
+    );
+  }
+
   private static extractRequestIdFromText(str: string): string | undefined {
     // 模式 1: (request id: xxx) 或 (request_id: xxx) - 括号内格式
     const parenMatch = str.match(/\(request[_ ]id:\s*([^)]+)\)/i);
     if (parenMatch?.[1]) {
-      return parenMatch[1].trim();
+      return ProxyError.normalizeSafeRequestId(parenMatch[1]);
     }
 
     // 模式 2: "request_id": "xxx" - JSON 字段格式（用于部分损坏的 JSON）
     const jsonFieldMatch = str.match(/"request_id"\s*:\s*"([^"]+)"/);
     if (jsonFieldMatch?.[1]) {
-      return jsonFieldMatch[1].trim();
+      return ProxyError.normalizeSafeRequestId(jsonFieldMatch[1]);
     }
 
     return undefined;
@@ -419,9 +439,9 @@ export class ProxyError extends Error {
     // 常见的 request_id 响应头名称
     const headerNames = ["x-request-id", "request-id", "x-amzn-requestid"];
     for (const name of headerNames) {
-      const value = headers.get(name);
-      if (value?.trim()) {
-        return value.trim();
+      const normalized = ProxyError.normalizeSafeRequestId(headers.get(name));
+      if (normalized) {
+        return normalized;
       }
     }
     return undefined;
@@ -535,20 +555,24 @@ export class ProxyError extends Error {
 
     // FastAPI / Python / 通用嵌套字段：{ "detail": ... } / { "details": ... } / { "errors": ... }
     for (const field of [obj.detail, obj.details, obj.errors]) {
-      if (typeof field === "string" && field.trim()) {
-        return field;
+      if (typeof field === "string" && ProxyError.isEnglishErrorDetail(field)) {
+        return field.trim();
       }
       if (Array.isArray(field)) {
         for (const item of field) {
-          if (typeof item === "string" && item.trim()) {
-            return item;
+          if (typeof item === "string" && ProxyError.isEnglishErrorDetail(item)) {
+            return item.trim();
           }
           if (item && typeof item === "object") {
-            if ("msg" in item && typeof item.msg === "string" && item.msg.trim()) {
+            if (
+              "msg" in item &&
+              typeof item.msg === "string" &&
+              ProxyError.isEnglishErrorDetail(item.msg)
+            ) {
               return item.msg.trim();
             }
             const itemMessage = ProxyError.extractErrorMessage(item, remainingDepth - 1);
-            if (itemMessage) {
+            if (itemMessage && ProxyError.isEnglishErrorDetail(itemMessage)) {
               return itemMessage;
             }
           }
@@ -1135,8 +1159,8 @@ export async function categorizeErrorAsync(error: Error): Promise<ErrorCategory>
   if (
     error instanceof ProxyError &&
     error.upstreamError?.isSyntheticFake200 !== true &&
-    error.statusCode >= 500 &&
-    error.statusCode < 600
+    ((error.statusCode >= 500 && error.statusCode < 600) ||
+      (error.statusCode === 499 && !error.isLocalAbort))
   ) {
     return ErrorCategory.PROVIDER_ERROR;
   }

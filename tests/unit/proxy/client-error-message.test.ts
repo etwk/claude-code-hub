@@ -126,6 +126,17 @@ describe("deriveClientSafeUpstreamErrorMessage", () => {
     ).toBeNull();
     expect(
       deriveClientSafeUpstreamErrorMessage({
+        candidateMessage:
+          "Models deepseek-r1, kimi-k2, grok-beta, and gemini-embedding-001 are unavailable",
+      })
+    ).toBe("Models deepseek-r1, kimi-k2, grok-beta, and gemini-embedding-001 are unavailable");
+    expect(
+      deriveClientSafeUpstreamErrorMessage({
+        candidateMessage: "参数错误",
+      })
+    ).toBeNull();
+    expect(
+      deriveClientSafeUpstreamErrorMessage({
         candidateMessage: "Connection failed at relay.xyz.",
       })
     ).toBe("Connection failed");

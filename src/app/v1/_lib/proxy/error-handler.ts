@@ -576,11 +576,23 @@ export class ProxyErrorHandler {
       }
     }
 
-    const safeRequestId =
-      typeof upstreamRequestId === "string" && upstreamRequestId.trim()
-        ? upstreamRequestId.trim()
-        : undefined;
     const settings = databaseError ? null : await getSettings();
+    const canExposeUpstreamRequestId =
+      Boolean(settings?.verboseProviderError) ||
+      (settings?.passThroughUpstreamErrorMessage ?? true);
+    const trimmedRequestId =
+      canExposeUpstreamRequestId && typeof upstreamRequestId === "string"
+        ? upstreamRequestId.trim()
+        : "";
+    const safeRequestId =
+      trimmedRequestId &&
+      trimmedRequestId.length <= 128 &&
+      /^[A-Za-z0-9._:-]+$/.test(trimmedRequestId) &&
+      !/^(?:sk|rk|pk)-/i.test(trimmedRequestId) &&
+      !/^(?:AIza|eyJ)/i.test(trimmedRequestId) &&
+      sanitizeErrorTextForDetail(trimmedRequestId) === trimmedRequestId
+        ? trimmedRequestId
+        : undefined;
     const finalClientErrorMessage = resolveFinalClientErrorMessage({
       error,
       currentFallbackMessage: clientErrorMessage,

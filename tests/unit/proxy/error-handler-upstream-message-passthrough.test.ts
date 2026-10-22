@@ -349,5 +349,23 @@ describe("ProxyErrorHandler.handle - upstream message passthrough", () => {
     expect(resNested.status).toBe(422);
     expect(bodyNested.error.message).toContain("invalid field");
     expect(bodyNested.request_id).toBe("req_nested_422");
+
+    const nonEnglishDetailErr = await ProxyError.fromUpstreamResponse(
+      new Response(JSON.stringify({ error: { detail: "参数错误" } }), {
+        status: 422,
+        headers: {
+          "content-type": "application/json",
+          "x-request-id": "sk-secret-1234567890abcdef1234567890",
+        },
+      }),
+      { id: 1, name: "Anthropic" }
+    );
+    const resNonEnglishDetail = await ProxyErrorHandler.handle(
+      createSession(),
+      nonEnglishDetailErr
+    );
+    const bodyNonEnglishDetail = await resNonEnglishDetail.json();
+    expect(bodyNonEnglishDetail.error.message).not.toContain("参数错误");
+    expect(bodyNonEnglishDetail.request_id).toBeUndefined();
   });
 });

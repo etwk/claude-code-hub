@@ -45,14 +45,17 @@ const RAW_JSON_BLOB_ANCHORED_RE = /^[[{]/u;
 const RAW_JSON_BLOB_EMBEDDED_RE = /[[{]\s*"[^"\n]{1,80}"\s*:/u;
 // Replacement regexes use the /g flag so `String.prototype.replace` can strip every match.
 // `String.prototype.replace` resets `lastIndex`, so these stay safe during normalization.
-const URL_RE = /\bhttps?:\/\/[^\s"'<>]+/giu;
+const URL_RE = /\bhttps?:\/\/[^\s"'<>()[\]]+/giu;
 const DOMAIN_RE =
-  /(?<![\w-]|\.[a-z0-9_-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|ai|app|dev|cloud|cn|co|uk|jp|ru|de|fr|us|example)(?![\w-]|\.[a-z0-9_-])(?:\b|\/[^\s"'<>]*)/giu;
+  /(?<![\w-]|\.[a-z0-9_-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|ai|app|dev|cloud|cn|co|uk|jp|ru|de|fr|us|example)(?![\w-]|\.[a-z0-9_-])(?::\d{2,5})?(?:[/?#][^\s"'<>()[\]]*)?/giu;
 const HOSTLIKE_RE =
-  /(?<![\w-]|\.[a-z0-9_-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,}|xn--[a-z0-9-]{2,})(?::\d{2,5})?(?:\/[^\s"'<>]*)?(?![\w-]|\.[a-z0-9_-])/giu;
-const MODEL_IDENTIFIER_RE =
-  /\b(?:claude|gemini|deepseek|qwen|grok|kimi|codex)-(?:\d[\d.]*(?:-(?:\d[\d.]*|opus|sonnet|haiku|pro|flash|ultra|coder|chat|reasoner|math|vl|plus|max|turbo|lite|mini|preview|exp|latest|vision|instruct|thinking|fast|v\d+))*|(?:opus|sonnet|haiku|pro|flash|ultra|coder|chat|reasoner|math|vl|plus|max|turbo|lite|mini|preview|exp|latest|v\d+)(?:-(?:\d[\d.]*|opus|sonnet|haiku|pro|flash|ultra|coder|chat|reasoner|math|vl|plus|max|turbo|lite|mini|preview|exp|latest|vision|instruct|thinking|fast|v\d+))*)(?![\w-])/giu;
-// an infrastructure-style qualifier (separator + token, or explicit port), to avoid
+  /(?<![\w-]|\.[a-z0-9_-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,}|xn--[a-z0-9-]{2,})(?![\w-]|\.[a-z0-9_-])(?::\d{2,5})?(?:[/?#][^\s"'<>()[\]]*)?/giu;
+const MODEL_SEGMENT_PATTERN =
+  "(?:\\d[\\d.]*[a-z]*|[a-z]{1,2}\\d[\\d.]*|opus|sonnet|haiku|pro|flash|ultra|nano|coder|chat|reasoner|reasoning|math|vl|plus|max|turbo|lite|mini|micro|preview|exp|experimental|latest|beta|alpha|vision|instruct|thinking|fast|embedding|embeddings|moderation|audio|image|imagen|realtime|live|search|rerank|distill|zero|base)";
+const MODEL_IDENTIFIER_RE = new RegExp(
+  `\\b(?:claude|gemini|deepseek|qwen|grok|kimi|codex)-(?:${MODEL_SEGMENT_PATTERN})(?:-(?:${MODEL_SEGMENT_PATTERN}))*(?![\\w-])`,
+  "giu"
+);
 // stripping natural phrases like "Rate limit exceeded for this endpoint".
 const INTERNAL_LABEL_RE =
   /\b(?:gateway|proxy|provider|vendor|region|shard|cluster|internal|router|route|endpoint|node|alpha|beta)(?:[-_./][\w.-]{2,}|:\d{2,5}(?:\/[^\s"'<>]*)?)\b/giu;
@@ -127,7 +130,8 @@ function hasForbiddenProviderLabel(
   );
 }
 function normalizeClientMessage(text: string): string {
-  let sanitized = sanitizeErrorTextForDetail(text);
+  let sanitized = text.replace(URL_RE, " ").replace(DOMAIN_RE, " ").replace(HOSTLIKE_RE, " ");
+  sanitized = sanitizeErrorTextForDetail(sanitized);
 
   sanitized = sanitized
     .replace(URL_RE, " ")
@@ -139,13 +143,13 @@ function normalizeClientMessage(text: string): string {
     .replace(REQUEST_ID_TOKEN_RE, " ")
     .replace(INTERNAL_LABEL_RE, " ")
     .replace(KEY_VALUE_RE, " ")
+    .replace(/\(\s*\)|\[\s*\]/g, " ")
     .replace(/\b(?:request[_ -]?id|x-request-id|trace[_ -]?id)\b\s*[:=]?\s*$/giu, " ")
-    .replace(/\s+\b(?:at|from|for|with)\b\s*(?:[,.;:，。；：]|$)/giu, " ")
+    .replace(/\s+\b(?:at|from|for|with|see)\b\s*(?:[,.;:，。；：]|$)/giu, " ")
     .replace(/\s*[,;，；]\s*/g, ", ")
     .replace(/\s*[:：]\s*$/u, "")
     .replace(/\s+/g, " ")
     .trim();
-
   sanitized = sanitized.replace(/^(?:error|message)\s*[:：]\s*/iu, "").trim();
   if (sanitized.length > MAX_CLIENT_ERROR_MESSAGE_CHARS) {
     const budget = MAX_CLIENT_ERROR_MESSAGE_CHARS - ELLIPSIS.length;
@@ -156,19 +160,23 @@ function normalizeClientMessage(text: string): string {
 }
 
 function isUnsafeAfterRedaction(text: string): boolean {
-  if (!text.trim()) return true;
+  const trimmed = text.trim();
+  if (!trimmed) return true;
+  if (!/^[\x20-\x7E]+$/.test(trimmed) || !/[A-Za-z]{2,}/.test(trimmed)) {
+    return true;
+  }
   if (
-    URL_TEST_RE.test(text) ||
-    DOMAIN_TEST_RE.test(text) ||
-    HOSTLIKE_TEST_RE.test(text) ||
-    IPV4_TEST_RE.test(text) ||
-    IPV6_TEST_RE.test(text)
+    URL_TEST_RE.test(trimmed) ||
+    DOMAIN_TEST_RE.test(trimmed) ||
+    HOSTLIKE_TEST_RE.test(trimmed) ||
+    IPV4_TEST_RE.test(trimmed) ||
+    IPV6_TEST_RE.test(trimmed)
   ) {
     return true;
   }
-  if (REQUEST_ID_TEST_RE.test(text) || REQUEST_ID_TOKEN_TEST_RE.test(text)) return true;
-  if (INTERNAL_LABEL_TEST_RE.test(text)) return true;
-  if (API_KEY_SHAPE_RE.test(text)) return true;
+  if (REQUEST_ID_TEST_RE.test(trimmed) || REQUEST_ID_TOKEN_TEST_RE.test(trimmed)) return true;
+  if (INTERNAL_LABEL_TEST_RE.test(trimmed)) return true;
+  if (API_KEY_SHAPE_RE.test(trimmed)) return true;
   return false;
 }
 

@@ -1421,7 +1421,11 @@ async function tryApplyReactiveRectifier(params: {
 }): Promise<ReactiveRectifierResult> {
   if (
     isProviderLocalModelUnavailableError(params.error) ||
-    isRetryableUpstreamStorageCapacityError(params.error)
+    isRetryableUpstreamStorageCapacityError(params.error) ||
+    (params.error instanceof ProxyError &&
+      params.error.upstreamError?.isSyntheticFake200 !== true &&
+      ((params.error.statusCode >= 500 && params.error.statusCode < 600) ||
+        (params.error.statusCode === 499 && !params.error.isLocalAbort)))
   ) {
     return { matched: false };
   }
@@ -2530,7 +2534,12 @@ export class ProxyForwarder {
           }
           // ⭐ 1. 分类错误（供应商错误 vs 系统错误 vs 客户端中断）
           // 使用异步版本确保错误规则已加载
-          let errorCategory = await categorizeErrorAsync(lastError);
+          let errorCategory =
+            lastError instanceof ProxyError &&
+            lastError.statusCode === 499 &&
+            !lastError.isLocalAbort
+              ? ErrorCategory.PROVIDER_ERROR
+              : await categorizeErrorAsync(lastError);
           const databaseError = findSafeDatabaseError(lastError);
           if (databaseError) {
             errorCategory = ErrorCategory.LOCAL_OVERLOAD;
@@ -5686,7 +5695,10 @@ export class ProxyForwarder {
       attempt.healthOutcome = "other_failure";
       lastError = error;
 
-      let errorCategory = await categorizeErrorAsync(error);
+      let errorCategory =
+        error instanceof ProxyError && error.statusCode === 499 && !error.isLocalAbort
+          ? ErrorCategory.PROVIDER_ERROR
+          : await categorizeErrorAsync(error);
       lastErrorCategory = errorCategory;
       if (attempt.dispatched || (error instanceof ProxyError && error.upstreamError != null)) {
         lastDispatchedError = error;
@@ -7803,7 +7815,12 @@ export class ProxyForwarder {
               : null;
           if (stickyWaveForFallback) stickyWaveForFallback.slots = concurrency;
           lastError = error instanceof Error ? error : new Error(String(error));
-          lastErrorCategory = await categorizeErrorAsync(lastError);
+          lastErrorCategory =
+            lastError instanceof ProxyError &&
+            lastError.statusCode === 499 &&
+            !lastError.isLocalAbort
+              ? ErrorCategory.PROVIDER_ERROR
+              : await categorizeErrorAsync(lastError);
           if (isDispatchedAttemptError) {
             lastDispatchedError = lastError;
             lastDispatchedErrorCategory = lastErrorCategory;
@@ -9140,8 +9157,11 @@ export class ProxyForwarder {
     lastErrorCategory: ErrorCategory | null,
     providersAttemptedCount: number = 0
   ): Error {
+    const isUpstream499 =
+      lastError instanceof ProxyError && lastError.statusCode === 499 && !lastError.isLocalAbort;
     if (
       lastError &&
+      !isUpstream499 &&
       (lastErrorCategory === ErrorCategory.CLIENT_ABORT ||
         lastErrorCategory === ErrorCategory.NON_RETRYABLE_CLIENT_ERROR)
     ) {
@@ -9149,6 +9169,13 @@ export class ProxyForwarder {
     }
 
     if (providersAttemptedCount === 1 && lastError instanceof ProxyError) {
+      const hasRawUpstreamResponse = typeof lastError.upstreamError?.rawBody === "string";
+      const isLocalTimeoutError =
+        !hasRawUpstreamResponse &&
+        (lastError.statusCode === 524 ||
+          /\bProvider\s+(?:failed\s+to\s+respond\b|(?:streaming\s+response\s+idle|first\s+content|first-byte|response)\s+timeout\s*:)|供应商(?:流式响应静默|首个有效内容|首字节响应|响应)超时\s*:/iu.test(
+            lastError.message
+          ));
       const isInternalSetupOrGateError =
         lastError.message === ALL_PROVIDERS_UNAVAILABLE_MESSAGE ||
         lastError.message === "No available provider endpoints" ||
@@ -9158,14 +9185,15 @@ export class ProxyForwarder {
         lastError.message === "MALFORMED_BUFFERED_JSON" ||
         lastError.message === "Service temporarily unavailable" ||
         lastError.message === "Internal configuration error" ||
-        /(?:供应商)?并发\s*Session\s*上限已达到|Provider concurrent (?:session )?limit reached|\bProvider\s+(?:failed\s+to\s+respond\b|(?:streaming\s+response\s+idle|first\s+content|first-byte|response)\s+timeout\s*:)|供应商(?:流式响应静默|首个有效内容|首字节响应|响应)超时\s*:/iu.test(
+        /(?:供应商)?并发\s*Session\s*上限已达到|Provider concurrent (?:session )?limit reached/iu.test(
           lastError.message
         ) ||
+        isLocalTimeoutError ||
         lastError instanceof StreamPrecommitError;
       // 499 in CCH represents downstream client cancellation; an upstream 499 is a
       // provider/transport failure that must fall back to 503 rather than telling the
       // client it cancelled its own request (see connected-non-reader-lifetime.test.ts).
-      if (!isInternalSetupOrGateError && lastError.statusCode !== 499) {
+      if (!isInternalSetupOrGateError && !isUpstream499) {
         return lastError;
       }
     }
