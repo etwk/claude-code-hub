@@ -1764,6 +1764,7 @@ export class ProxyForwarder {
       !endpointPolicy.allowRetry && !rawCrossProviderFallbackEnabled;
 
     let lastError: Error | null = null;
+    let lastDispatchedError: Error | null = null;
     let currentProvider = session.provider;
     const failedProviderIds: number[] = []; // 记录已失败的供应商ID
     const dispatchedProviderIds = new Set<number>(); // 实际发起过上游请求的供应商ID
@@ -2525,6 +2526,7 @@ export class ProxyForwarder {
             (lastError instanceof ProxyError && lastError.upstreamError != null)
           ) {
             dispatchedProviderIds.add(currentProvider.id);
+            lastDispatchedError = lastError;
           }
           // ⭐ 1. 分类错误（供应商错误 vs 系统错误 vs 客户端中断）
           // 使用异步版本确保错误规则已加载
@@ -3259,7 +3261,11 @@ export class ProxyForwarder {
     const attemptedProviderIds = new Set(failedProviderIds);
     if (session.provider?.id != null) attemptedProviderIds.add(session.provider.id);
     await ProxyForwarder.clearSessionProviderBindings(session, attemptedProviderIds);
-    throw ProxyForwarder.resolveHedgeTerminalError(lastError, null, dispatchedProviderIds.size);
+    throw ProxyForwarder.resolveHedgeTerminalError(
+      lastDispatchedError ?? lastError,
+      null,
+      dispatchedProviderIds.size
+    );
   }
 
   /**
@@ -4950,6 +4956,8 @@ export class ProxyForwarder {
     let launchingAlternative: Promise<void> | null = null;
     let lastError: Error | null = null;
     let lastErrorCategory: ErrorCategory | null = null;
+    let lastDispatchedError: Error | null = null;
+    let lastDispatchedErrorCategory: ErrorCategory | null = null;
     const attempts = new Set<StreamingHedgeAttempt>();
     const admissionControllers = new WeakMap<StreamingHedgeAttempt, AbortController>();
     const admissionWaiters = new Set<StreamingHedgeAttempt>();
@@ -5349,10 +5357,17 @@ export class ProxyForwarder {
 
     const finishIfExhausted = async () => {
       if (!settled && noMoreProviders && attempts.size === 0) {
+        const terminalError =
+          lastErrorCategory === ErrorCategory.CLIENT_ABORT ||
+          lastErrorCategory === ErrorCategory.NON_RETRYABLE_CLIENT_ERROR
+            ? lastError
+            : (lastDispatchedError ?? lastError);
+        const terminalErrorCategory =
+          terminalError === lastDispatchedError ? lastDispatchedErrorCategory : lastErrorCategory;
         await settleFailure(
           ProxyForwarder.resolveHedgeTerminalError(
-            lastError,
-            lastErrorCategory,
+            terminalError,
+            terminalErrorCategory,
             dispatchedProviderIds.size
           )
         );
@@ -5673,6 +5688,10 @@ export class ProxyForwarder {
 
       let errorCategory = await categorizeErrorAsync(error);
       lastErrorCategory = errorCategory;
+      if (attempt.dispatched || (error instanceof ProxyError && error.upstreamError != null)) {
+        lastDispatchedError = error;
+        lastDispatchedErrorCategory = errorCategory;
+      }
       // F3a：hedge attempt 供应商侧失败且正是亲和提名者 -> 定向墓碑
       // 与顺序路径同一判定：request-scoped 空完成不写墓碑
       if (
@@ -6498,6 +6517,22 @@ export class ProxyForwarder {
     let noMoreCandidates = false;
     let lastError: Error | null = null;
     let lastErrorCategory: ErrorCategory | null = null;
+    let lastDispatchedError: Error | null = null;
+    let lastDispatchedErrorCategory: ErrorCategory | null = null;
+    const resolveDiscoveryTerminalError = () => {
+      const terminalError =
+        lastErrorCategory === ErrorCategory.CLIENT_ABORT ||
+        lastErrorCategory === ErrorCategory.NON_RETRYABLE_CLIENT_ERROR
+          ? lastError
+          : (lastDispatchedError ?? lastError);
+      const terminalErrorCategory =
+        terminalError === lastDispatchedError ? lastDispatchedErrorCategory : lastErrorCategory;
+      return ProxyForwarder.resolveHedgeTerminalError(
+        terminalError,
+        terminalErrorCategory,
+        dispatchedProviders.size
+      );
+    };
     let stopLeaseHeartbeat = () => {};
     let roundTimer: (() => void) | null = null;
     let stickyTimer: (() => void) | null = null;
@@ -7603,6 +7638,7 @@ export class ProxyForwarder {
         }
       };
       const releaseRequestMemory = retainCurrentRequestMemory("discovery-attempt");
+      let attemptDispatched = false;
       void ProxyForwarder.doForward(
         attempt.session,
         { ...provider, firstByteTimeoutStreamingMs: 0 },
@@ -7612,11 +7648,13 @@ export class ProxyForwarder {
         true,
         controller.signal,
         () => {
+          attemptDispatched = true;
           dispatchedProviders.add(provider.id);
         },
         onLocalAdmissionWait
       )
         .then(async (response) => {
+          attemptDispatched = true;
           dispatchedProviders.add(provider.id);
           const runtime = attempt.session as ProxySessionWithAttemptRuntime;
           attempt.responseController = runtime.responseController ?? null;
@@ -7749,7 +7787,9 @@ export class ProxyForwarder {
           }
         })
         .catch(async (error) => {
-          if (error instanceof ProxyError && error.upstreamError != null) {
+          const isDispatchedAttemptError =
+            attemptDispatched || (error instanceof ProxyError && error.upstreamError != null);
+          if (isDispatchedAttemptError) {
             dispatchedProviders.add(provider.id);
           }
           if (committed || settled || !attempt.pending) return;
@@ -7764,6 +7804,10 @@ export class ProxyForwarder {
           if (stickyWaveForFallback) stickyWaveForFallback.slots = concurrency;
           lastError = error instanceof Error ? error : new Error(String(error));
           lastErrorCategory = await categorizeErrorAsync(lastError);
+          if (isDispatchedAttemptError) {
+            lastDispatchedError = lastError;
+            lastDispatchedErrorCategory = lastErrorCategory;
+          }
           const errorMessage =
             lastError instanceof ProxyError
               ? lastError.getDetailedErrorMessage()
@@ -7967,9 +8011,7 @@ export class ProxyForwarder {
                 await refillCurrentRoundSlots(concurrency);
               }
               if (coordinator.activeAttempts.length === 0 && noMoreCandidates) {
-                await settleFailure(
-                  ProxyForwarder.resolveHedgeTerminalError(lastError, lastErrorCategory)
-                );
+                await settleFailure(resolveDiscoveryTerminalError());
               }
             }
             return;
@@ -8095,13 +8137,7 @@ export class ProxyForwarder {
             await refillCurrentRoundSlots(1);
           }
           if (coordinator.activeAttempts.length === 0 && noMoreCandidates) {
-            await settleFailure(
-              ProxyForwarder.resolveHedgeTerminalError(
-                lastError,
-                lastErrorCategory,
-                dispatchedProviders.size
-              )
-            );
+            await settleFailure(resolveDiscoveryTerminalError());
           }
         })
         .catch((error) => {
@@ -8377,13 +8413,7 @@ export class ProxyForwarder {
           !settled &&
           coordinator.acceptsEpoch(launchEpoch.requestEpoch, launchEpoch.roundEpoch)
         ) {
-          await settleFailure(
-            ProxyForwarder.resolveHedgeTerminalError(
-              lastError,
-              lastErrorCategory,
-              dispatchedProviders.size
-            )
-          );
+          await settleFailure(resolveDiscoveryTerminalError());
           return;
         }
       } finally {
@@ -8585,16 +8615,9 @@ export class ProxyForwarder {
         return;
       }
       if (action.type === "terminal_failure") {
-        await settleFailure(
-          ProxyForwarder.resolveHedgeTerminalError(
-            lastError,
-            lastErrorCategory,
-            dispatchedProviders.size
-          ),
-          {
-            cancellationKind: terminalCancellationKind,
-          }
-        );
+        await settleFailure(resolveDiscoveryTerminalError(), {
+          cancellationKind: terminalCancellationKind,
+        });
         return;
       }
     };

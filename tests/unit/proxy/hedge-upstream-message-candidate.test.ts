@@ -424,5 +424,20 @@ describe("ProxyForwarder terminal safe client message candidate", () => {
     expect(doForward).toHaveBeenCalledTimes(1);
     expect(resolved).toBe(upstream400);
     expect(resolved.statusCode).toBe(400);
+
+    // Also preserves the dispatched error when a subsequent provider fails setup
+    const session2 = createSession();
+    session2.setProvider(provider2);
+    mocks.isVendorTypeCircuitOpen.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    mocks.pickRandomProviderWithExclusion
+      .mockResolvedValueOnce(provider1)
+      .mockResolvedValueOnce(null);
+    doForward.mockRejectedValueOnce(upstream400);
+
+    const resolvedAfterLaterSetupFailure = await ProxyForwarder.send(session2).catch(
+      (rejection) => rejection as ProxyError
+    );
+    expect(resolvedAfterLaterSetupFailure).toBe(upstream400);
+    expect(resolvedAfterLaterSetupFailure.statusCode).toBe(400);
   });
 });
