@@ -475,13 +475,15 @@ export class ProxyError extends Error {
 
       if (resolvedErrorMessage) {
         // Claude 格式：带非空有效 type（排除 "<nil>" 等占位值）
+        const normalizedType = typeof errorObj.type === "string" ? errorObj.type.trim() : "";
         if (
-          typeof errorObj.type === "string" &&
-          errorObj.type.trim() &&
-          errorObj.type !== "<nil>" &&
-          !resolvedErrorMessage.startsWith(`${errorObj.type}: `)
+          normalizedType &&
+          normalizedType.toLowerCase() !== "<nil>" &&
+          normalizedType.toLowerCase() !== "nil" &&
+          normalizedType.toLowerCase() !== "null" &&
+          !resolvedErrorMessage.startsWith(`${normalizedType}: `)
         ) {
-          return `${errorObj.type}: ${resolvedErrorMessage}`;
+          return `${normalizedType}: ${resolvedErrorMessage}`;
         }
         return resolvedErrorMessage;
       }

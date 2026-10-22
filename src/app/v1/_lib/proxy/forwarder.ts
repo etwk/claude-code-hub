@@ -2001,7 +2001,6 @@ export class ProxyForwarder {
         };
 
         try {
-          dispatchedProviderIds.add(currentProvider.id);
           let response = await ProxyForwarder.doForward(
             session,
             currentProvider,
@@ -2011,12 +2010,13 @@ export class ProxyForwarder {
             false,
             undefined,
             () => {
+              dispatchedProviderIds.add(currentProvider.id);
               attemptDispatched = true;
               attemptStartedAtMonotonic = performance.now();
               attemptFirstByteSeen = false;
             }
           );
-
+          dispatchedProviderIds.add(currentProvider.id);
           // ========== 空响应检测（仅非流式）==========
           const contentType = response.headers.get("content-type") || "";
           const normalizedContentType = contentType.toLowerCase();
@@ -2520,7 +2520,12 @@ export class ProxyForwarder {
           return response; // ⭐ 成功：立即返回，结束所有循环
         } catch (error) {
           lastError = error as Error;
-
+          if (
+            attemptDispatched ||
+            (lastError instanceof ProxyError && lastError.upstreamError != null)
+          ) {
+            dispatchedProviderIds.add(currentProvider.id);
+          }
           // ⭐ 1. 分类错误（供应商错误 vs 系统错误 vs 客户端中断）
           // 使用异步版本确保错误规则已加载
           let errorCategory = await categorizeErrorAsync(lastError);
@@ -4936,6 +4941,7 @@ export class ProxyForwarder {
     // 竞速输家计费开关：开启时落败供应商不被直接掐断，而是后台 drain 并计费。
     const billHedgeLosers = settings.billHedgeLosers === true;
     const launchedProviderIds = new Set<number>();
+    const dispatchedProviderIds = new Set<number>();
     let launchedProviderCount = 0;
     let settled = false;
     let winnerCommitted = false;
@@ -5347,7 +5353,7 @@ export class ProxyForwarder {
           ProxyForwarder.resolveHedgeTerminalError(
             lastError,
             lastErrorCategory,
-            launchedProviderCount
+            dispatchedProviderIds.size
           )
         );
       }
@@ -5417,6 +5423,7 @@ export class ProxyForwarder {
         if (dispatchMarked) return;
         dispatchMarked = true;
         attempt.dispatched = true;
+        dispatchedProviderIds.add(attempt.provider.id);
         attempt.startedAtMonotonic = performance.now();
         attempt.healthPausedAtMonotonic = null;
         attempt.healthPausedDurationMs = 0;
@@ -5448,6 +5455,7 @@ export class ProxyForwarder {
         }
       )
         .then(async (response) => {
+          dispatchedProviderIds.add(attempt.provider.id);
           if (settled || winnerCommitted || attempt.settled) {
             const attemptRuntime = attempt.session as ProxySessionWithAttemptRuntime;
             attempt.releaseAgent = attemptRuntime.releaseAgent ?? attempt.releaseAgent;
@@ -5632,6 +5640,9 @@ export class ProxyForwarder {
     };
 
     const handleAttemptFailure = async (attempt: StreamingHedgeAttempt, error: Error) => {
+      if (attempt.dispatched || (error instanceof ProxyError && error.upstreamError != null)) {
+        dispatchedProviderIds.add(attempt.provider.id);
+      }
       if (attempt !== winnerAttempt) {
         session.removeLiveActiveProvider(attempt.provider.id);
       }
@@ -7592,7 +7603,6 @@ export class ProxyForwarder {
         }
       };
       const releaseRequestMemory = retainCurrentRequestMemory("discovery-attempt");
-      dispatchedProviders.add(provider.id);
       void ProxyForwarder.doForward(
         attempt.session,
         { ...provider, firstByteTimeoutStreamingMs: 0 },
@@ -7601,10 +7611,13 @@ export class ProxyForwarder {
         attempt.requestAttemptCount,
         true,
         controller.signal,
-        undefined,
+        () => {
+          dispatchedProviders.add(provider.id);
+        },
         onLocalAdmissionWait
       )
         .then(async (response) => {
+          dispatchedProviders.add(provider.id);
           const runtime = attempt.session as ProxySessionWithAttemptRuntime;
           attempt.responseController = runtime.responseController ?? null;
           attempt.clearResponseTimeout = runtime.clearResponseTimeout ?? null;
@@ -7736,6 +7749,9 @@ export class ProxyForwarder {
           }
         })
         .catch(async (error) => {
+          if (error instanceof ProxyError && error.upstreamError != null) {
+            dispatchedProviders.add(provider.id);
+          }
           if (committed || settled || !attempt.pending) return;
           const stickyWaveForFallback =
             attempt.kind === "fallback"
@@ -9111,7 +9127,6 @@ export class ProxyForwarder {
 
     if (providersAttemptedCount === 1 && lastError instanceof ProxyError) {
       const isInternalSetupOrGateError =
-        lastError.statusCode === 524 ||
         lastError.message === ALL_PROVIDERS_UNAVAILABLE_MESSAGE ||
         lastError.message === "No available provider endpoints" ||
         lastError.message === "Vendor-type circuit is open" ||

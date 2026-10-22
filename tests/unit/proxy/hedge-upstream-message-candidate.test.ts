@@ -333,7 +333,9 @@ describe("ProxyForwarder terminal safe client message candidate", () => {
 
     expect(resolved).not.toBe(concurrencyError);
     expect(resolved.statusCode).toBe(503);
-    expect(resolved.message).toBe("所有供应商暂时不可用，请稍后重试");
+    expect(resolved.message).toBe(
+      "All providers are temporarily unavailable. Please try again later."
+    );
     expect(resolved.upstreamError?.safeClientMessageCandidate).toBeUndefined();
   });
 
@@ -361,8 +363,25 @@ describe("ProxyForwarder terminal safe client message candidate", () => {
 
     expect(resolved).not.toBe(timeoutError);
     expect(resolved.statusCode).toBe(503);
-    expect(resolved.message).toBe("所有供应商暂时不可用，请稍后重试");
+    expect(resolved.message).toBe(
+      "All providers are temporarily unavailable. Please try again later."
+    );
     expect(resolved.upstreamError?.safeClientMessageCandidate).toBeUndefined();
+
+    const upstream524 = await ProxyError.fromUpstreamResponse(
+      new Response(JSON.stringify({ error: { message: "Origin server timed out" } }), {
+        status: 524,
+        headers: { "content-type": "application/json", "x-request-id": "req_cf_524" },
+      }),
+      { id: provider1.id, name: provider1.name }
+    );
+    mocks.pickRandomProviderWithExclusion.mockResolvedValueOnce(null);
+    doForward.mockRejectedValueOnce(upstream524);
+    const resolvedUpstream524 = await ProxyForwarder.send(session).catch(
+      (rejection) => rejection as ProxyError
+    );
+    expect(resolvedUpstream524).toBe(upstream524);
+    expect(resolvedUpstream524.statusCode).toBe(524);
   });
 
   test("passes through upstream error when an earlier provider was skipped before dispatch", async () => {

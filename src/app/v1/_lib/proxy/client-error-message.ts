@@ -51,7 +51,7 @@ const DOMAIN_RE =
 const HOSTLIKE_RE =
   /(?<![\w-]|\.[a-z0-9_-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,}|xn--[a-z0-9-]{2,})(?::\d{2,5})?(?:\/[^\s"'<>]*)?(?![\w-]|\.[a-z0-9_-])/giu;
 const MODEL_IDENTIFIER_RE =
-  /\b(?:claude|gemini|deepseek|qwen|grok|kimi|codex)-(?:[0-9][\w.-]*|(?:opus|sonnet|haiku|pro|flash|ultra|coder|chat|reasoner|math|vl|plus|max|turbo|lite|mini|preview|exp|latest|v\d)[\w.-]*)\b/giu;
+  /\b(?:claude|gemini|deepseek|qwen|grok|kimi|codex)-(?:\d[\d.]*(?:-(?:\d[\d.]*|opus|sonnet|haiku|pro|flash|ultra|coder|chat|reasoner|math|vl|plus|max|turbo|lite|mini|preview|exp|latest|vision|instruct|thinking|fast|v\d+))*|(?:opus|sonnet|haiku|pro|flash|ultra|coder|chat|reasoner|math|vl|plus|max|turbo|lite|mini|preview|exp|latest|v\d+)(?:-(?:\d[\d.]*|opus|sonnet|haiku|pro|flash|ultra|coder|chat|reasoner|math|vl|plus|max|turbo|lite|mini|preview|exp|latest|vision|instruct|thinking|fast|v\d+))*)(?![\w-])/giu;
 // an infrastructure-style qualifier (separator + token, or explicit port), to avoid
 // stripping natural phrases like "Rate limit exceeded for this endpoint".
 const INTERNAL_LABEL_RE =

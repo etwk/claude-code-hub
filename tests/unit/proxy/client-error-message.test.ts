@@ -121,6 +121,11 @@ describe("deriveClientSafeUpstreamErrorMessage", () => {
     ).toBeNull();
     expect(
       deriveClientSafeUpstreamErrorMessage({
+        candidateMessage: "Request failed on gemini-proxy",
+      })
+    ).toBeNull();
+    expect(
+      deriveClientSafeUpstreamErrorMessage({
         candidateMessage: "Connection failed at relay.xyz.",
       })
     ).toBe("Connection failed");
