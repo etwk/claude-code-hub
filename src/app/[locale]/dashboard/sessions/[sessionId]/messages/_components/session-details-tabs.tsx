@@ -53,6 +53,15 @@ interface SessionMessagesDetailsTabsProps {
   isResponseCopied?: boolean;
 }
 
+function EmptyState({ message }: { message: string }) {
+  return (
+    <div className="flex flex-col items-center justify-center py-16 text-muted-foreground bg-muted/20 rounded-lg border border-dashed text-center px-4">
+      <Inbox className="h-10 w-10 mb-3 opacity-20" />
+      <p className="text-sm max-w-lg">{message}</p>
+    </div>
+  );
+}
+
 export function SessionMessagesDetailsTabs({
   snapshots,
   viewMode,
@@ -160,14 +169,6 @@ export function SessionMessagesDetailsTabs({
           requestBodyLabel: t("details.requestBody"),
         })
       : t("details.storageTip");
-
-  // Reusable Empty State Component
-  const EmptyState = ({ message }: { message: string }) => (
-    <div className="flex flex-col items-center justify-center py-16 text-muted-foreground bg-muted/20 rounded-lg border border-dashed text-center px-4">
-      <Inbox className="h-10 w-10 mb-3 opacity-20" />
-      <p className="text-sm max-w-lg">{message}</p>
-    </div>
-  );
 
   return (
     <Tabs

@@ -3887,11 +3887,13 @@ export class ProxyForwarder {
     if (isStreaming) {
       // 流式请求：使用首字节超时（快速失败）
       responseTimeoutMs =
+        // biome-ignore lint/complexity/useMathMinMax: the ternary also maps undefined/NaN to 0
         provider.firstByteTimeoutStreamingMs > 0 ? provider.firstByteTimeoutStreamingMs : 0;
       responseTimeoutType = "streaming_first_byte";
     } else {
       // 非流式请求：使用总超时（防止无限挂起）
       responseTimeoutMs =
+        // biome-ignore lint/complexity/useMathMinMax: the ternary also maps undefined/NaN to 0
         provider.requestTimeoutNonStreamingMs > 0 ? provider.requestTimeoutNonStreamingMs : 0;
       responseTimeoutType = "non_streaming_total";
     }
@@ -6217,6 +6219,7 @@ export class ProxyForwarder {
         responseController: null,
         clearResponseTimeout: null,
         firstByteTimeoutMs:
+          // biome-ignore lint/complexity/useMathMinMax: the ternary also maps undefined/NaN to 0
           provider.firstByteTimeoutStreamingMs > 0 ? provider.firstByteTimeoutStreamingMs : 0,
         attemptId: `legacy-hedge-${launchedProviderCount}-1`,
         startedAtMonotonic: 0,
@@ -6244,6 +6247,7 @@ export class ProxyForwarder {
         thresholdTimer: null,
         thresholdDeadlineAt: null,
         thresholdRemainingMs:
+          // biome-ignore lint/complexity/useMathMinMax: the ternary also maps undefined/NaN to 0
           provider.firstByteTimeoutStreamingMs > 0 ? provider.firstByteTimeoutStreamingMs : 0,
         thresholdPaused: false,
         reader: null,
