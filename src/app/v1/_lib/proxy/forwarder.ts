@@ -9162,7 +9162,10 @@ export class ProxyForwarder {
           lastError.message
         ) ||
         lastError instanceof StreamPrecommitError;
-      if (!isInternalSetupOrGateError && !lastError.isLocalAbort) {
+      // 499 in CCH represents downstream client cancellation; an upstream 499 is a
+      // provider/transport failure that must fall back to 503 rather than telling the
+      // client it cancelled its own request (see connected-non-reader-lifetime.test.ts).
+      if (!isInternalSetupOrGateError && lastError.statusCode !== 499) {
         return lastError;
       }
     }

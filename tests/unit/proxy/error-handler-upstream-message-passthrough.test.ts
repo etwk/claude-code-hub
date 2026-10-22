@@ -283,10 +283,9 @@ describe("ProxyErrorHandler.handle - upstream message passthrough", () => {
     expect(fastApiBody.error.message).toContain("Field required: messages");
   });
 
-  test("prefers sanitized upstream message over built-in default error rule template when passthrough is enabled", async () => {
+  test("keeps explicit error rule override message while falling back to upstream message when override message is empty", async () => {
     mocks.getErrorOverrideAsync.mockResolvedValue({
       statusCode: 400,
-      isDefault: true,
       response: {
         type: "error",
         error: {
@@ -313,57 +312,7 @@ describe("ProxyErrorHandler.handle - upstream message passthrough", () => {
     const res = await ProxyErrorHandler.handle(createSession(), err);
     expect(res.status).toBe(400);
     const body = await res.json();
-    expect(body.error.message).toContain(
-      "Invalid request: tools.0.custom.input_schema is not valid JSON Schema"
-    );
-
-    // When passthrough is disabled, falls back to the default rule's template message
-    mocks.getCachedSystemSettings.mockResolvedValue({
-      verboseProviderError: false,
-      passThroughUpstreamErrorMessage: false,
-    });
-    const resDisabled = await ProxyErrorHandler.handle(createSession(), err);
-    const bodyDisabled = await resDisabled.json();
-    expect(bodyDisabled.error.message).toContain(
-      "Invalid request: Upstream returned 'Invalid request'"
-    );
-
-    // Local ProxyError without upstreamError keeps the default rule's localized message
-    mocks.getCachedSystemSettings.mockResolvedValue({
-      verboseProviderError: false,
-      passThroughUpstreamErrorMessage: true,
-    });
-    const localErr = new ProxyError("Invalid request: image multipart metadata is missing.", 400);
-    const resLocal = await ProxyErrorHandler.handle(createSession(), localErr);
-    const bodyLocal = await resLocal.json();
-    expect(bodyLocal.error.message).toContain(
-      "Invalid request: Upstream returned 'Invalid request'"
-    );
-
-    // Non-English upstream text keeps the default rule's English override message
-    mocks.getErrorOverrideAsync.mockResolvedValue({
-      statusCode: 400,
-      isDefault: true,
-      response: {
-        type: "error",
-        error: {
-          type: "invalid_request_error",
-          message: "Model name cannot be empty. Specify a model parameter in the request.",
-        },
-      },
-    });
-    const nonEnglishUpstreamErr = await ProxyError.fromUpstreamResponse(
-      new Response(JSON.stringify({ error: { message: "模型名称不能为空" } }), {
-        status: 400,
-        headers: { "content-type": "application/json" },
-      }),
-      { id: 1, name: "Anthropic" }
-    );
-    const resNonEnglish = await ProxyErrorHandler.handle(createSession(), nonEnglishUpstreamErr);
-    const bodyNonEnglish = await resNonEnglish.json();
-    expect(bodyNonEnglish.error.message).toContain(
-      "Model name cannot be empty. Specify a model parameter in the request."
-    );
+    expect(body.error.message).toContain("Invalid request: Upstream returned 'Invalid request'");
   });
 
   test("ProxyError.fromUpstreamResponse bounds rawBody to 4096 chars and extracts nested error.detail", async () => {

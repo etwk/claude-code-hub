@@ -39,7 +39,6 @@ const OVERRIDE_STATUS_CODE_MAX = 599;
 type ErrorOverrideForMessageResolver = {
   response?: unknown;
   statusCode?: number | null;
-  isDefault?: boolean;
 } | null;
 
 function stripUpstreamDetailSuffix(message: string): string {
@@ -119,9 +118,6 @@ function getGenericProxyErrorFallbackMessage(
       return "Upstream request failed. Please try again later.";
   }
 }
-const NON_ENGLISH_SCRIPT_RE =
-  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Cyrillic}]/u;
-
 export function resolveFinalClientErrorMessage({
   error,
   currentFallbackMessage,
@@ -133,27 +129,10 @@ export function resolveFinalClientErrorMessage({
   settings?: Pick<SystemSettings, "passThroughUpstreamErrorMessage"> | null;
   override?: ErrorOverrideForMessageResolver;
 }): string {
-  const shouldPassThrough = settings?.passThroughUpstreamErrorMessage ?? true;
-
   if (override?.response) {
-    if (
-      override.isDefault === true &&
-      shouldPassThrough &&
-      error instanceof ProxyError &&
-      error.upstreamError != null
-    ) {
-      const upstreamCandidate = deriveClientSafeUpstreamErrorMessage({
-        rawText: error.upstreamError.rawBody ?? error.upstreamError.body,
-        candidateMessage: error.upstreamError.safeClientMessageCandidate,
-        candidateMessages: [error.upstreamError.body, error.message],
-        providerName: error.upstreamError.providerName ?? null,
-      });
-      if (upstreamCandidate && !NON_ENGLISH_SCRIPT_RE.test(upstreamCandidate)) {
-        return upstreamCandidate;
-      }
-    }
     return currentFallbackMessage;
   }
+  const shouldPassThrough = settings?.passThroughUpstreamErrorMessage ?? true;
 
   const strippedFallback =
     error instanceof ProxyError || isEmptyResponseError(error)
@@ -456,10 +435,7 @@ export class ProxyErrorHandler {
           // 唯一的特殊处理：message 为空时回退到原始错误消息
           const finalClientErrorMessage = resolveFinalClientErrorMessage({
             error,
-            currentFallbackMessage:
-              override.isDefault === true && hasExplicitOverrideMessage
-                ? String(overrideErrorObj.message)
-                : clientErrorMessage,
+            currentFallbackMessage: clientErrorMessage,
             settings,
             override: hasExplicitOverrideMessage ? override : null,
           });
@@ -468,9 +444,7 @@ export class ProxyErrorHandler {
             error: {
               ...overrideErrorObj,
               message:
-                override.isDefault === true || overrideMessage === clientErrorMessage
-                  ? finalClientErrorMessage
-                  : overrideMessage,
+                overrideMessage === clientErrorMessage ? finalClientErrorMessage : overrideMessage,
             },
           };
 

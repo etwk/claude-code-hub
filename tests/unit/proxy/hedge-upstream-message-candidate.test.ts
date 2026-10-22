@@ -382,21 +382,6 @@ describe("ProxyForwarder terminal safe client message candidate", () => {
     );
     expect(resolvedUpstream524).toBe(upstream524);
     expect(resolvedUpstream524.statusCode).toBe(524);
-
-    const upstream499 = await ProxyError.fromUpstreamResponse(
-      new Response(JSON.stringify({ error: { message: "Upstream cancelled request" } }), {
-        status: 499,
-        headers: { "content-type": "application/json", "x-request-id": "req_499" },
-      }),
-      { id: provider1.id, name: provider1.name }
-    );
-    mocks.pickRandomProviderWithExclusion.mockResolvedValueOnce(null);
-    doForward.mockRejectedValueOnce(upstream499);
-    const resolvedUpstream499 = await ProxyForwarder.send(session).catch(
-      (rejection) => rejection as ProxyError
-    );
-    expect(resolvedUpstream499).toBe(upstream499);
-    expect(resolvedUpstream499.statusCode).toBe(499);
   });
 
   test("passes through upstream error when an earlier provider was skipped before dispatch", async () => {
