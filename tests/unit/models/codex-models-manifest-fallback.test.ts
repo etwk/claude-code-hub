@@ -25,20 +25,6 @@ vi.mock("@/app/v1/_lib/proxy/provider-selector", () => ({
   checkProviderGroupMatch: vi.fn().mockReturnValue(true),
 }));
 
-vi.mock("next-intl/server", () => ({
-  getLocale: vi.fn().mockResolvedValue("en"),
-}));
-
-vi.mock("@/lib/utils/error-messages", async () => {
-  const actual = await vi.importActual<typeof import("@/lib/utils/error-messages")>(
-    "@/lib/utils/error-messages"
-  );
-  return {
-    ...actual,
-    getErrorMessageServer: vi.fn(async (_locale: string, code: string) => code),
-  };
-});
-
 import { handleAvailableModels } from "@/app/v1/_lib/models/available-models";
 import { resolveApiKeyAuthOutcome } from "@/repository/key";
 import { findAllProviders } from "@/repository/provider";
@@ -150,7 +136,11 @@ describe("Codex models manifest fallback", () => {
 
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({
-      error: { message: "未提供认证凭据", type: "authentication_error" },
+      error: {
+        message:
+          "No API key provided. Include it in the Authorization header, the x-api-key header, or the x-goog-api-key header.",
+        type: "authentication_error",
+      },
     });
     expect(resolveApiKeyAuthOutcome).not.toHaveBeenCalled();
     expect(findAllProviders).not.toHaveBeenCalled();
@@ -166,7 +156,10 @@ describe("Codex models manifest fallback", () => {
 
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({
-      error: { message: "PROXY_INVALID_API_KEY", type: "invalid_api_key" },
+      error: {
+        message: "Invalid API key. The provided key does not exist or has been deleted.",
+        type: "invalid_api_key",
+      },
     });
     expect(findAllProviders).not.toHaveBeenCalled();
   });

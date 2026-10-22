@@ -169,7 +169,9 @@ describe("ProxyErrorHandler.handle overrides", () => {
     const responseText = await response.text();
 
     expect(response.status).toBe(451);
-    expect(responseText).toContain("上游服务暂时不可用，请稍后重试");
+    expect(responseText).toContain(
+      "Upstream service is temporarily unavailable. Please try again later."
+    );
     expect(responseText).not.toContain("Quota exceeded");
     expect(responseText).not.toContain("raw upstream failure");
   });

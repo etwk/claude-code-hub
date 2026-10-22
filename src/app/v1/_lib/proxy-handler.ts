@@ -11,7 +11,7 @@ import { SessionManager } from "@/lib/session-manager";
 import { SessionTracker } from "@/lib/session-tracker";
 import { ProxyErrorHandler } from "./proxy/error-handler";
 import { attachSessionIdToErrorResponse } from "./proxy/error-session-id";
-import { ProxyError } from "./proxy/errors";
+import { ProxyError, UNKNOWN_PROXY_ERROR_MESSAGE } from "./proxy/errors";
 import { tryFakeStreamingPath } from "./proxy/fake-streaming/proxy-integration";
 import { detectClientFormat, detectFormatByEndpoint } from "./proxy/format-mapper";
 import { ProxyForwarder } from "./proxy/forwarder";
@@ -207,14 +207,14 @@ async function handleOwnedProxyRequest(c: Context): Promise<Response> {
     if (isLocalCapacityError(error)) {
       // 正文准入在认证之前：没有 session 可写库，尽力按请求头归属，不阻塞 429 响应。
       void recordPreAuthLocalCapacityRejection(c, error.message, handlerStartedAt);
-      return await buildLocalCapacityResponse();
+      return buildLocalCapacityResponse();
     }
 
     if (error instanceof ProxyError) {
       return ProxyResponses.buildError(error.statusCode, error.getClientSafeMessage());
     }
 
-    return ProxyResponses.buildError(500, "代理请求发生未知错误");
+    return ProxyResponses.buildError(500, UNKNOWN_PROXY_ERROR_MESSAGE);
   } finally {
     // 11. 减少并发计数（确保无论成功失败都执行）- 跳过 count_tokens
     if (acquiredConcurrencySessionId) {

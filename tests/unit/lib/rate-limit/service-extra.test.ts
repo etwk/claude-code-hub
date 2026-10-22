@@ -237,7 +237,6 @@ describe("RateLimitService - other quota paths", () => {
     const result = await RateLimitService.checkAndTrackKeyUserSession(2, 1, "sess", 2, 10);
     expect(result.allowed).toBe(false);
     expect(result.rejectedBy).toBe("key");
-    expect(result.reasonCode).toBe("RATE_LIMIT_CONCURRENT_SESSIONS_EXCEEDED");
     expect(result.reasonParams).toEqual({ current: 2, limit: 2, target: "key" });
   });
 
@@ -248,7 +247,6 @@ describe("RateLimitService - other quota paths", () => {
     const result = await RateLimitService.checkAndTrackKeyUserSession(2, 1, "sess", 10, 2);
     expect(result.allowed).toBe(false);
     expect(result.rejectedBy).toBe("user");
-    expect(result.reasonCode).toBe("RATE_LIMIT_CONCURRENT_SESSIONS_EXCEEDED");
     expect(result.reasonParams).toEqual({ current: 2, limit: 2, target: "user" });
   });
 

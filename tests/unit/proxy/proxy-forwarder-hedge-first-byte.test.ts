@@ -2263,7 +2263,9 @@ describe("ProxyForwarder - first-byte hedge scheduling", () => {
       expect(mocks.pickRandomProviderWithExclusion).toHaveBeenCalled();
       expect(error).toBeInstanceOf(UpstreamProxyError);
       expect(error.statusCode).toBe(503);
-      expect(error.message).toBe("所有供应商暂时不可用，请稍后重试");
+      expect(error.message).toBe(
+        "All providers are temporarily unavailable. Please try again later."
+      );
       expect(session.getProviderChain()).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -2530,7 +2532,9 @@ describe("ProxyForwarder - first-byte hedge scheduling", () => {
 
         expect(error).toBeInstanceOf(UpstreamProxyError);
         expect(error.statusCode).toBe(503);
-        expect(error.message).toBe("所有供应商暂时不可用，请稍后重试");
+        expect(error.message).toBe(
+          "All providers are temporarily unavailable. Please try again later."
+        );
         expect(error.message).not.toContain("invalid key");
         expect(error.message).not.toContain("model not found");
         expect(mocks.clearSessionProviders).toHaveBeenCalledWith(

@@ -41,23 +41,11 @@ vi.mock("@/lib/security/login-abuse-policy", () => ({
   },
 }));
 
-// Bypass next-intl's request-context lookup so the proxy guard can run
-// outside a real Next.js request. The mocked helper returns the i18n code
-// itself so message assertions can pin on the key, not on translation
-// content (which lives in messages/<locale>/errors.json).
+// Gateway messages are English only: a Chinese request locale must not leak
+// into API client responses.
 vi.mock("next-intl/server", () => ({
-  getLocale: vi.fn().mockResolvedValue("en"),
+  getLocale: vi.fn().mockResolvedValue("zh-CN"),
 }));
-
-vi.mock("@/lib/utils/error-messages", async () => {
-  const actual = await vi.importActual<typeof import("@/lib/utils/error-messages")>(
-    "@/lib/utils/error-messages"
-  );
-  return {
-    ...actual,
-    getErrorMessageServer: vi.fn(async (_locale: string, code: string) => code),
-  };
-});
 
 function makeSession(ip: string, apiKey: string) {
   return {
@@ -106,9 +94,9 @@ describe("ProxyAuthenticator account-state failures", () => {
     const error = await readErrorBody(response as Response);
     expect(error.type).toBe("key_disabled");
     expect(error.code).toBe("key_disabled");
-    // Message is the i18n key (mocked); the actual localized text lives in
-    // messages/<locale>/errors.json under this key.
-    expect(error.message).toBe("PROXY_API_KEY_DISABLED");
+    expect(error.message).toBe(
+      "This API key has been disabled. Please contact your administrator to re-enable it, or use a different key."
+    );
 
     expect(policyRecordFailure).not.toHaveBeenCalled();
     expect(policyRecordSuccess).not.toHaveBeenCalled();
@@ -126,7 +114,9 @@ describe("ProxyAuthenticator account-state failures", () => {
     const error = await readErrorBody(response as Response);
     expect(error.type).toBe("key_expired");
     expect(error.code).toBe("key_expired");
-    expect(error.message).toBe("PROXY_API_KEY_EXPIRED");
+    expect(error.message).toBe(
+      "This API key has expired. Please contact your administrator to renew it or rotate to a new key."
+    );
 
     expect(policyRecordFailure).not.toHaveBeenCalled();
   });
@@ -146,7 +136,9 @@ describe("ProxyAuthenticator account-state failures", () => {
 
     const error = await readErrorBody(response as Response);
     expect(error.type).toBe("user_disabled");
-    expect(error.message).toMatch(/账户已被禁用/);
+    expect(error.message).toBe(
+      "This user account has been disabled. Please contact your administrator."
+    );
 
     expect(policyRecordFailure).not.toHaveBeenCalled();
   });
@@ -167,7 +159,9 @@ describe("ProxyAuthenticator account-state failures", () => {
 
     const error = await readErrorBody(response as Response);
     expect(error.type).toBe("user_expired");
-    expect(error.message).toMatch(/已于.*过期/);
+    expect(error.message).toBe(
+      `This user account expired on ${yesterday.toISOString().split("T")[0]}. Please renew your subscription.`
+    );
 
     expect(markUserExpired).toHaveBeenCalledWith(8);
     expect(policyRecordFailure).not.toHaveBeenCalled();
@@ -184,7 +178,9 @@ describe("ProxyAuthenticator account-state failures", () => {
 
     const error = await readErrorBody(response as Response);
     expect(error.type).toBe("invalid_api_key");
-    expect(error.message).toBe("PROXY_INVALID_API_KEY");
+    expect(error.message).toBe(
+      "Invalid API key. The provided key does not exist or has been deleted."
+    );
 
     expect(policyRecordFailure).toHaveBeenCalledWith("203.0.113.24", "sk-doesnotexist");
   });
@@ -206,6 +202,9 @@ describe("ProxyAuthenticator account-state failures", () => {
 
     const error = await readErrorBody(response as Response);
     expect(error.type).toBe("authentication_error");
+    expect(error.message).toBe(
+      "No API key provided. Include it in the Authorization header, the x-api-key header, or the x-goog-api-key header."
+    );
 
     expect(resolveApiKeyAuthOutcome).not.toHaveBeenCalled();
     expect(policyRecordFailure).toHaveBeenCalledWith("203.0.113.25", undefined);

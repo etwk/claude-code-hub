@@ -101,10 +101,10 @@ describe("resolveFinalClientErrorMessage", () => {
   });
 
   test.each([
-    [400, "上游请求参数无效，请检查后重试"],
-    [401, "上游鉴权失败，请稍后重试"],
-    [429, "上游服务当前限流，请稍后重试"],
-    [503, "上游服务暂时不可用，请稍后重试"],
+    [400, "Upstream rejected the request as invalid. Please check the request and try again."],
+    [401, "Upstream authentication failed. Please try again later."],
+    [429, "Upstream service is rate limited. Please try again later."],
+    [503, "Upstream service is temporarily unavailable. Please try again later."],
   ])("maps status %i to a generic message when pass-through is disabled", (status, expected) => {
     const error = new ProxyError("sensitive upstream failure", status, {
       body: "sensitive upstream failure",
@@ -134,7 +134,7 @@ describe("resolveFinalClientErrorMessage", () => {
       override: null,
     });
 
-    expect(message).toBe("上游服务暂时不可用，请稍后重试");
+    expect(message).toBe("Upstream service is temporarily unavailable. Please try again later.");
   });
 
   test("preserves an explicit override message", () => {

@@ -1,5 +1,4 @@
 {
-  "LOCAL_CAPACITY_EXCEEDED": "Недостаточно локальных ресурсов для обработки запроса. Повторите попытку позже.",
   "_comment": "Error messages for Russian",
 
   "REQUIRED_FIELD": "{field} обязательно для заполнения",
@@ -33,13 +32,9 @@
   "INVALID_TOKEN": "Недействительный токен аутентификации",
   "SESSION_REQUEST_SOURCE_MISMATCH": "Источник запроса не относится к этой сессии",
   "SESSION_REQUEST_SELECTOR_INCOMPLETE": "Для запроса префиксной Session необходимо указать физический источник и порядковый номер запроса",
-  "PROXY_INVALID_API_KEY": "Неверный API-ключ. Указанный ключ не существует или был удалён.",
-  "PROXY_API_KEY_DISABLED": "Этот API-ключ отключён. Обратитесь к администратору, чтобы повторно включить его, или используйте другой ключ.",
-  "PROXY_API_KEY_EXPIRED": "Срок действия этого API-ключа истёк. Обратитесь к администратору, чтобы продлить срок, или замените ключ.",
 
   "INTERNAL_ERROR": "Внутренняя ошибка сервера, попробуйте позже",
   "DATABASE_ERROR": "Ошибка базы данных",
-  "INVALID_NORMALIZED_BODY": "Нормализованное тело запроса невозможно сериализовать",
   "NOT_FOUND": "Ресурс не найден",
   "OPERATION_FAILED": "Операция не удалась",
   "USER_5H_FIXED_RESET_REQUIRES_REDIS": "Для сброса фиксированного лимита 5H требуется доступный Redis",
@@ -54,22 +49,12 @@
   "DELETE_FAILED": "Не удалось удалить, попробуйте позже",
 
   "CONNECTION_FAILED": "Ошибка подключения",
-  "CLIENT_ABORTED": "Клиент прервал запрос",
   "TIMEOUT": "Время ожидания истекло",
   "NETWORK_ERROR": "Сетевая ошибка",
 
   "QUOTA_EXCEEDED": "Квота исчерпана",
   "BATCH_SIZE_EXCEEDED": "Пакетная операция не может превышать {max} элементов",
   "RATE_LIMIT_EXCEEDED": "Слишком много запросов, попробуйте позже",
-  "RATE_LIMIT_RPM_EXCEEDED": "Превышен лимит запросов: {current} запросов в минуту (лимит: {limit}). Сброс в {resetTime}",
-  "RATE_LIMIT_5H_EXCEEDED": "Превышен 5-часовой лимит расходов: ${current} USD (лимит: ${limit} USD). Сброс в {resetTime}",
-  "RATE_LIMIT_5H_ROLLING_EXCEEDED": "Превышен лимит скользящего окна 5 часов: ${current} USD (лимит: ${limit} USD). Использование постепенно освобождается за последние 5 часов",
-  "RATE_LIMIT_DAILY_QUOTA_EXCEEDED": "Превышена дневная квота: ${current} USD (лимит: ${limit} USD). Сброс в {resetTime}",
-  "RATE_LIMIT_DAILY_ROLLING_EXCEEDED": "Превышен лимит скользящего окна 24 часа: ${current} USD (лимит: ${limit} USD). Использование постепенно освобождается за последние 24 часа",
-  "RATE_LIMIT_WEEKLY_EXCEEDED": "Превышен недельный лимит расходов: ${current} USD (лимит: ${limit} USD). Сброс в {resetTime}",
-  "RATE_LIMIT_MONTHLY_EXCEEDED": "Превышен месячный лимит расходов: ${current} USD (лимит: ${limit} USD). Сброс в {resetTime}",
-  "RATE_LIMIT_TOTAL_EXCEEDED": "Превышен общий лимит расходов: ${current} / ${limit} USD",
-  "RATE_LIMIT_CONCURRENT_SESSIONS_EXCEEDED": "Превышен лимит одновременных сессий: {current} сессий (лимит: {limit}). Пожалуйста, дождитесь завершения активных сессий",
   "RESOURCE_BUSY": "Ресурс в настоящее время используется",
   "INVALID_STATE": "Операция не разрешена в текущем состоянии",
   "CONFLICT": "Конфликт операции",

@@ -1,4 +1,3 @@
-import { ERROR_CODES, getErrorMessageServer } from "@/lib/utils/error-messages";
 import { normalizeEndpointPath, V1_ENDPOINT_PATHS } from "./endpoint-paths";
 import { ProxyResponses } from "./responses";
 import type { ProxySession } from "./session";
@@ -23,11 +22,7 @@ export class ProxyModelGuard {
     ) {
       const model = session.request.message.model;
       if (typeof model !== "string" || model.trim() === "") {
-        const { getLocale } = await import("next-intl/server");
-        const message = await getErrorMessageServer(await getLocale(), ERROR_CODES.REQUIRED_FIELD, {
-          field: "model",
-        });
-        return ProxyResponses.buildError(400, message, "invalid_request_error");
+        return ProxyResponses.buildError(400, "model is required", "invalid_request_error");
       }
     }
 

@@ -1,4 +1,3 @@
-import { getLocale } from "next-intl/server";
 import { findSafeDatabaseError } from "@/drizzle/admitted-client";
 import { getCachedSystemSettings } from "@/lib/config/system-settings-cache";
 import {
@@ -12,7 +11,6 @@ import { logger } from "@/lib/logger";
 import { isLocalCapacityError } from "@/lib/memory/governor";
 import { buildLocalCapacityResponse } from "@/lib/memory/http";
 import { ProxyStatusTracker } from "@/lib/proxy-status-tracker";
-import { ERROR_CODES, getErrorMessageServer } from "@/lib/utils/error-messages";
 import { sanitizeErrorTextForDetail } from "@/lib/utils/upstream-error-detection";
 import { updateMessageRequestDetailsDurably } from "@/repository/message";
 import type { SystemSettings } from "@/types/system-config";
@@ -27,6 +25,7 @@ import {
   isRateLimitError,
   ProxyError,
   type RateLimitError,
+  UNKNOWN_PROXY_ERROR_MESSAGE,
 } from "./errors";
 import { recordLocalCapacityRejection } from "./local-capacity-log";
 import { ProxyResponses } from "./responses";
@@ -86,34 +85,34 @@ function getGenericProxyErrorFallbackMessage(
 
   switch (statusCode) {
     case 400:
-      return "上游请求参数无效，请检查后重试";
+      return "Upstream rejected the request as invalid. Please check the request and try again.";
     case 401:
-      return "上游鉴权失败，请稍后重试";
+      return "Upstream authentication failed. Please try again later.";
     case 402:
-      return "上游服务当前无法处理该请求";
+      return "Upstream service cannot process this request right now.";
     case 403:
-      return "上游拒绝了本次请求";
+      return "Upstream refused this request.";
     case 404:
-      return "上游资源不存在";
+      return "Upstream resource not found.";
     case 408:
     case 504:
     case 524:
-      return "上游服务响应超时，请稍后重试";
+      return "Upstream service timed out. Please try again later.";
     case 409:
-      return "上游请求发生冲突，请稍后重试";
+      return "Upstream request conflict. Please try again later.";
     case 413:
-      return "请求内容过大，上游无法处理";
+      return "Request is too large for the upstream to process.";
     case 415:
-      return "上游不支持当前请求格式";
+      return "Upstream does not support the request format.";
     case 422:
-      return "上游无法处理当前请求";
+      return "Upstream could not process the request.";
     case 429:
-      return "上游服务当前限流，请稍后重试";
+      return "Upstream service is rate limited. Please try again later.";
     default:
       if (statusCode >= 500) {
-        return "上游服务暂时不可用，请稍后重试";
+        return "Upstream service is temporarily unavailable. Please try again later.";
       }
-      return "请求上游服务失败，请稍后重试";
+      return "Upstream request failed. Please try again later.";
   }
 }
 
@@ -178,7 +177,7 @@ function getRateLimitStatusCode(limitType: string): number {
 export class ProxyErrorHandler {
   static async handle(session: ProxySession, error: unknown): Promise<Response> {
     if (isLocalCapacityError(error)) {
-      const response = await buildLocalCapacityResponse();
+      const response = buildLocalCapacityResponse();
       ProxyErrorHandler.emitErrorTrace(session, {
         error,
         errorMessage: error.message,
@@ -274,14 +273,7 @@ export class ProxyErrorHandler {
     // Native transport aborts have no HTTP status; preserve the local-abort
     // classification already used by the forwarder instead of recording 500.
     if (error instanceof Error && isClientAbortError(error)) {
-      try {
-        clientErrorMessage = await getErrorMessageServer(
-          await getLocale(),
-          ERROR_CODES.CLIENT_ABORTED
-        );
-      } catch {
-        clientErrorMessage = "An error occurred";
-      }
+      clientErrorMessage = "Client aborted request";
       logErrorMessage = "CLIENT_ABORTED";
       statusCode = 499;
     } else if (error instanceof ProxyError) {
@@ -299,22 +291,14 @@ export class ProxyErrorHandler {
       clientErrorMessage = error.message;
       logErrorMessage = error.message;
     } else {
-      clientErrorMessage = "代理请求发生未知错误";
-      logErrorMessage = "代理请求发生未知错误";
+      clientErrorMessage = UNKNOWN_PROXY_ERROR_MESSAGE;
+      logErrorMessage = UNKNOWN_PROXY_ERROR_MESSAGE;
     }
 
     if (databaseError) {
       // Drizzle wraps the admission cause with SQL text and bound parameters.
       // Never let that wrapper cross the public, log, or observability boundary.
-      try {
-        const { getLocale } = await import("next-intl/server");
-        clientErrorMessage = await getErrorMessageServer(
-          await getLocale(),
-          ERROR_CODES.DATABASE_ERROR
-        );
-      } catch {
-        clientErrorMessage = "An error occurred";
-      }
+      clientErrorMessage = "Database error";
       logErrorMessage = databaseError.message;
       statusCode = databaseError.kind === "admission" ? 503 : 500;
     }
