@@ -15,6 +15,7 @@ import { sanitizeErrorTextForDetail } from "@/lib/utils/upstream-error-detection
 import type { ErrorOverrideResponse } from "@/repository/error-rules";
 import type { ProviderChainItem } from "@/types/message";
 import { RESERVED_INTERNAL_HEADERS } from "../responses-ws/internal-secret";
+import { isJsonResponseContentType } from "./response-content-type";
 import type { ProxySession } from "./session";
 
 /** Marker message for the synthetic terminal error emitted when every provider fails. */
@@ -108,10 +109,17 @@ export class ProxyError extends Error {
       body = `Failed to read response body: ${(error as Error).message}`;
     }
 
-    // 2. 尝试解析 JSON
-    if (contentType.includes("application/json") && body) {
+    // 2. 尝试解析 JSON（支持标准/扩展 JSON Content-Type 及以 {/ [ 开头的 JSON 响应体）
+    const rawBodyMaxChars = 4096;
+    const trimmedBody = body.trim();
+    if (
+      trimmedBody &&
+      (isJsonResponseContentType(contentType) ||
+        (trimmedBody.length <= rawBodyMaxChars &&
+          (trimmedBody.startsWith("{") || trimmedBody.startsWith("["))))
+    ) {
       try {
-        parsed = JSON.parse(body);
+        parsed = JSON.parse(trimmedBody);
       } catch {
         // 不是有效 JSON，保留原始文本
       }
@@ -130,12 +138,21 @@ export class ProxyError extends Error {
       ProxyError.extractRequestIdFromBody(parsed) ||
       ProxyError.extractRequestIdFromHeaders(response.headers);
 
+    const rawBody = body.length > rawBodyMaxChars ? body.slice(0, rawBodyMaxChars) : body;
+    const rawBodyTruncated = body.length > rawBodyMaxChars;
+
     return new ProxyError(message, response.status, {
       body: truncatedBody,
       parsed,
       providerId: provider.id,
       providerName: provider.name,
       requestId,
+      ...(rawBody
+        ? {
+            rawBody,
+            rawBodyTruncated,
+          }
+        : {}),
     });
   }
 
@@ -379,17 +396,37 @@ export class ProxyError extends Error {
    * - request_id: "xxx"
    * - "request_id": "xxx"
    */
+  private static normalizeSafeRequestId(value: string | undefined | null): string | undefined {
+    if (typeof value !== "string") return undefined;
+    const trimmed = value.trim();
+    if (!trimmed || trimmed.length > 128) return undefined;
+    if (!/^[A-Za-z0-9._:-]+$/.test(trimmed)) return undefined;
+    if (/^(?:sk|rk|pk)-/i.test(trimmed) || /^(?:AIza|eyJ)/i.test(trimmed)) return undefined;
+    if (sanitizeErrorTextForDetail(trimmed) !== trimmed) return undefined;
+    return trimmed;
+  }
+
+  private static isEnglishErrorDetail(value: string): boolean {
+    const trimmed = value.trim();
+    if (!trimmed || !/^[\x20-\x7E\r\n\t]+$/.test(trimmed)) {
+      return false;
+    }
+    return /\b(?:the|is|are|was|were|be|been|to|of|in|for|on|with|by|at|from|or|and|not|no|only|can|cannot|may|must|should|will|does|did|has|have|had|error|errors|invalid|missing|required|field|fields|value|values|parameter|parameters|input|inputs|request|response|model|token|tokens|limit|exceeded|quota|rate|unauthorized|forbidden|found|allowed|supported|unsupported|failed|failure|timeout|timed|unavailable|denied|expired|empty|disabled|unknown|unexpected|bad|type|string|number|integer|boolean|array|object|length|maximum|minimum|between|expected|received|null|none|msg|detail|status|code|header|headers|body|message|messages)\b/i.test(
+      trimmed
+    );
+  }
+
   private static extractRequestIdFromText(str: string): string | undefined {
     // 模式 1: (request id: xxx) 或 (request_id: xxx) - 括号内格式
     const parenMatch = str.match(/\(request[_ ]id:\s*([^)]+)\)/i);
     if (parenMatch?.[1]) {
-      return parenMatch[1].trim();
+      return ProxyError.normalizeSafeRequestId(parenMatch[1]);
     }
 
     // 模式 2: "request_id": "xxx" - JSON 字段格式（用于部分损坏的 JSON）
     const jsonFieldMatch = str.match(/"request_id"\s*:\s*"([^"]+)"/);
     if (jsonFieldMatch?.[1]) {
-      return jsonFieldMatch[1].trim();
+      return ProxyError.normalizeSafeRequestId(jsonFieldMatch[1]);
     }
 
     return undefined;
@@ -402,9 +439,9 @@ export class ProxyError extends Error {
     // 常见的 request_id 响应头名称
     const headerNames = ["x-request-id", "request-id", "x-amzn-requestid"];
     for (const name of headerNames) {
-      const value = headers.get(name);
-      if (value?.trim()) {
-        return value.trim();
+      const normalized = ProxyError.normalizeSafeRequestId(headers.get(name));
+      if (normalized) {
+        return normalized;
       }
     }
     return undefined;
@@ -417,36 +454,131 @@ export class ProxyError extends Error {
    * - OpenAI API: { "error": { "message": "..." } }
    * - Generic: { "message": "..." } 或 { "error": "..." }
    */
-  private static extractErrorMessage(parsed: unknown): string | null {
-    if (!parsed || typeof parsed !== "object") return null;
+  private static extractErrorMessage(parsed: unknown, remainingDepth: number = 2): string | null {
+    if (!parsed || typeof parsed !== "object" || remainingDepth < 0) return null;
+
+    if (Array.isArray(parsed)) {
+      for (const item of parsed) {
+        const itemMessage = ProxyError.extractErrorMessage(item, remainingDepth - 1);
+        if (itemMessage) {
+          return itemMessage;
+        }
+      }
+      return null;
+    }
 
     const obj = parsed as Record<string, unknown>;
 
     // Claude/OpenAI 格式：{ "error": { "message": "..." } }
     if (obj.error && typeof obj.error === "object") {
       const errorObj = obj.error as Record<string, unknown>;
+      const rawErrorMessage = typeof errorObj.message === "string" ? errorObj.message.trim() : "";
+      let resolvedErrorMessage: string | null = rawErrorMessage
+        ? (errorObj.message as string)
+        : null;
 
-      // Claude 格式：带 type
-      if (typeof errorObj.message === "string" && typeof errorObj.type === "string") {
-        return `${errorObj.type}: ${errorObj.message}`;
+      if (
+        rawErrorMessage &&
+        remainingDepth > 0 &&
+        (rawErrorMessage.startsWith("{") || rawErrorMessage.startsWith("["))
+      ) {
+        try {
+          const nestedParsed = JSON.parse(rawErrorMessage);
+          const nestedMessage = ProxyError.extractErrorMessage(nestedParsed, remainingDepth - 1);
+          if (nestedMessage) {
+            resolvedErrorMessage = nestedMessage;
+          }
+        } catch {
+          // Ignore malformed nested JSON string
+        }
       }
 
-      // OpenAI 格式：仅 message
-      if (typeof errorObj.message === "string") {
-        return errorObj.message;
+      if (resolvedErrorMessage) {
+        // Claude 格式：带非空有效 type（排除 "<nil>" 等占位值）
+        const normalizedType = typeof errorObj.type === "string" ? errorObj.type.trim() : "";
+        if (
+          normalizedType &&
+          normalizedType.toLowerCase() !== "<nil>" &&
+          normalizedType.toLowerCase() !== "nil" &&
+          normalizedType.toLowerCase() !== "null" &&
+          !resolvedErrorMessage.startsWith(`${normalizedType}: `)
+        ) {
+          return `${normalizedType}: ${resolvedErrorMessage}`;
+        }
+        return resolvedErrorMessage;
+      }
+
+      if (errorObj.upstream_error && typeof errorObj.upstream_error === "object") {
+        const upstreamMessage = ProxyError.extractErrorMessage(
+          errorObj.upstream_error,
+          remainingDepth - 1
+        );
+        if (upstreamMessage) {
+          return upstreamMessage;
+        }
+      }
+
+      const nestedErrorFieldsMessage = ProxyError.extractErrorMessage(
+        {
+          detail: errorObj.detail,
+          details: errorObj.details,
+          errors: errorObj.errors,
+        },
+        remainingDepth - 1
+      );
+      if (nestedErrorFieldsMessage) {
+        return nestedErrorFieldsMessage;
       }
     }
 
     // 通用格式：{ "message": "..." }
-    if (typeof obj.message === "string") {
+    if (typeof obj.message === "string" && obj.message.trim()) {
+      const trimmedMsg = obj.message.trim();
+      if (remainingDepth > 0 && (trimmedMsg.startsWith("{") || trimmedMsg.startsWith("["))) {
+        try {
+          const nestedParsed = JSON.parse(trimmedMsg);
+          const nestedMessage = ProxyError.extractErrorMessage(nestedParsed, remainingDepth - 1);
+          if (nestedMessage) {
+            return nestedMessage;
+          }
+        } catch {
+          // Ignore malformed nested JSON string
+        }
+      }
       return obj.message;
     }
 
     // 简单格式：{ "error": "..." }
-    if (typeof obj.error === "string") {
+    if (typeof obj.error === "string" && obj.error.trim()) {
       return obj.error;
     }
 
+    // FastAPI / Python / 通用嵌套字段：{ "detail": ... } / { "details": ... } / { "errors": ... }
+    for (const field of [obj.detail, obj.details, obj.errors]) {
+      if (typeof field === "string" && ProxyError.isEnglishErrorDetail(field)) {
+        return field.trim();
+      }
+      if (Array.isArray(field)) {
+        for (const item of field) {
+          if (typeof item === "string" && ProxyError.isEnglishErrorDetail(item)) {
+            return item.trim();
+          }
+          if (item && typeof item === "object") {
+            if (
+              "msg" in item &&
+              typeof item.msg === "string" &&
+              ProxyError.isEnglishErrorDetail(item.msg)
+            ) {
+              return item.msg.trim();
+            }
+            const itemMessage = ProxyError.extractErrorMessage(item, remainingDepth - 1);
+            if (itemMessage && ProxyError.isEnglishErrorDetail(itemMessage)) {
+              return itemMessage;
+            }
+          }
+        }
+      }
+    }
     return null;
   }
 
@@ -637,6 +769,29 @@ export function isRetryableUpstreamStorageCapacityError(error: Error): boolean {
 }
 
 /**
+ * Determine whether a ProxyError categorized as PROVIDER_ERROR should be retried
+ * on the exact same provider before failing over to an alternative provider.
+ *
+ * - 5xx (>= 500) and transient 4xx (408 timeout, 409 conflict, 429 rate limit) can recover on retry.
+ * - Upstream storage-capacity 400 can also recover on retry.
+ * - Other 4xx statuses (400, 401, 402, 403, 404, 413, 415, 422, etc.) will not succeed by resending
+ *   the identical unmodified request to the same provider; skip same-provider retry and fail over.
+ */
+export function isRetryableSameProviderHttpError(error: ProxyError): boolean {
+  const status = error.statusCode;
+  if (status >= 500) {
+    return true;
+  }
+  if (status === 408 || status === 409 || status === 429) {
+    return true;
+  }
+  if (isRetryableUpstreamStorageCapacityError(error)) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * 检测错误规则（异步版本，带缓存）
  *
  * 同一个 Error 对象只执行一次规则匹配，后续调用直接返回缓存结果
@@ -718,6 +873,8 @@ export interface ErrorOverrideResult {
   response: ErrorOverrideResponse | null;
   /** 覆写的状态码（可选，null 表示透传上游状态码） */
   statusCode: number | null;
+  /** 是否来自内置默认错误规则 */
+  isDefault?: boolean;
 }
 
 /**
@@ -745,6 +902,7 @@ export async function getErrorOverrideAsync(
     return {
       response: result.overrideResponse ?? null,
       statusCode: result.overrideStatusCode ?? null,
+      isDefault: result.isDefault,
     };
   }
 
@@ -1001,8 +1159,8 @@ export async function categorizeErrorAsync(error: Error): Promise<ErrorCategory>
   if (
     error instanceof ProxyError &&
     error.upstreamError?.isSyntheticFake200 !== true &&
-    error.statusCode >= 500 &&
-    error.statusCode < 600
+    ((error.statusCode >= 500 && error.statusCode < 600) ||
+      (error.statusCode === 499 && !error.isLocalAbort))
   ) {
     return ErrorCategory.PROVIDER_ERROR;
   }

@@ -36,7 +36,10 @@ const OVERRIDE_STATUS_CODE_MIN = 400;
 /** 覆写状态码最大值 */
 const OVERRIDE_STATUS_CODE_MAX = 599;
 
-type ErrorOverrideForMessageResolver = { response?: unknown; statusCode?: number | null } | null;
+type ErrorOverrideForMessageResolver = {
+  response?: unknown;
+  statusCode?: number | null;
+} | null;
 
 function stripUpstreamDetailSuffix(message: string): string {
   return message.replace(/\s+Upstream detail:\s*[\s\S]*$/u, "").trim() || message;
@@ -115,7 +118,6 @@ function getGenericProxyErrorFallbackMessage(
       return "Upstream request failed. Please try again later.";
   }
 }
-
 export function resolveFinalClientErrorMessage({
   error,
   currentFallbackMessage,
@@ -130,6 +132,7 @@ export function resolveFinalClientErrorMessage({
   if (override?.response) {
     return currentFallbackMessage;
   }
+  const shouldPassThrough = settings?.passThroughUpstreamErrorMessage ?? true;
 
   const strippedFallback =
     error instanceof ProxyError || isEmptyResponseError(error)
@@ -140,7 +143,6 @@ export function resolveFinalClientErrorMessage({
     error,
     strippedFallback
   );
-  const shouldPassThrough = settings?.passThroughUpstreamErrorMessage ?? true;
   if (!shouldPassThrough) {
     return fallback;
   }
@@ -148,16 +150,13 @@ export function resolveFinalClientErrorMessage({
   if (error instanceof ProxyError) {
     return (
       deriveClientSafeUpstreamErrorMessage({
-        rawText: error.upstreamError?.rawBody,
-        candidateMessage:
-          error.upstreamError?.safeClientMessageCandidate ??
-          error.upstreamError?.body ??
-          error.message,
+        rawText: error.upstreamError?.rawBody ?? error.upstreamError?.body,
+        candidateMessage: error.upstreamError?.safeClientMessageCandidate,
+        candidateMessages: [error.upstreamError?.body, error.message],
         providerName: error.upstreamError?.providerName ?? null,
       }) ?? fallback
     );
   }
-
   if (isEmptyResponseError(error)) {
     return fallback;
   }
@@ -524,7 +523,10 @@ export class ProxyErrorHandler {
     // - rawBody 仅用于本次错误响应回传（受系统设置控制），不写入数据库/决策链；
     // - 出于安全考虑，这里会对 rawBody 做基础脱敏（Bearer/key/JWT/email 等），避免上游错误页意外回显敏感信息。
     let details: Record<string, unknown> | undefined;
-    let upstreamRequestId: string | undefined;
+    let upstreamRequestId =
+      error instanceof ProxyError && !error.message.startsWith("FAKE_200_")
+        ? error.upstreamError?.requestId
+        : undefined;
     const shouldAttachVerboseDetails =
       (error instanceof ProxyError && error.message.startsWith("FAKE_200_")) ||
       isEmptyResponseError(error);
@@ -574,11 +576,23 @@ export class ProxyErrorHandler {
       }
     }
 
-    const safeRequestId =
-      typeof upstreamRequestId === "string" && upstreamRequestId.trim()
-        ? upstreamRequestId.trim()
-        : undefined;
     const settings = databaseError ? null : await getSettings();
+    const canExposeUpstreamRequestId =
+      Boolean(settings?.verboseProviderError) ||
+      (settings?.passThroughUpstreamErrorMessage ?? true);
+    const trimmedRequestId =
+      canExposeUpstreamRequestId && typeof upstreamRequestId === "string"
+        ? upstreamRequestId.trim()
+        : "";
+    const safeRequestId =
+      trimmedRequestId &&
+      trimmedRequestId.length <= 128 &&
+      /^[A-Za-z0-9._:-]+$/.test(trimmedRequestId) &&
+      !/^(?:sk|rk|pk)-/i.test(trimmedRequestId) &&
+      !/^(?:AIza|eyJ)/i.test(trimmedRequestId) &&
+      sanitizeErrorTextForDetail(trimmedRequestId) === trimmedRequestId
+        ? trimmedRequestId
+        : undefined;
     const finalClientErrorMessage = resolveFinalClientErrorMessage({
       error,
       currentFallbackMessage: clientErrorMessage,

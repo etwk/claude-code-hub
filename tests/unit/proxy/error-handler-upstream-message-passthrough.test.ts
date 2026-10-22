@@ -226,4 +226,146 @@ describe("ProxyErrorHandler.handle - upstream message passthrough", () => {
     );
     expect(body.error.message).not.toContain("Quota exceeded");
   });
+
+  test("passes through message from ProxyError.fromUpstreamResponse across Claude, Gemini array, and FastAPI formats", async () => {
+    const claudeError = await ProxyError.fromUpstreamResponse(
+      new Response(
+        JSON.stringify({
+          type: "error",
+          error: {
+            type: "invalid_request_error",
+            message:
+              "model 'claude-3-5-sonnet-20241022' temperature must be between 0 and 1. See https://docs.anthropic.com/en/api/messages",
+          },
+        }),
+        { status: 400, headers: { "content-type": "application/json" } }
+      ),
+      { id: 1, name: "Anthropic" }
+    );
+    const claudeRes = await ProxyErrorHandler.handle(createSession(), claudeError);
+    expect(claudeRes.status).toBe(400);
+    const claudeBody = await claudeRes.json();
+    expect(claudeBody.error.message).toContain(
+      "model 'claude-3-5-sonnet-20241022' temperature must be between 0 and 1."
+    );
+    expect(claudeBody.error.message).not.toContain("anthropic.com");
+
+    const geminiArrayError = await ProxyError.fromUpstreamResponse(
+      new Response(
+        JSON.stringify([
+          {
+            error: {
+              code: 400,
+              message: "Invalid argument: thinking_budget must be >= 1024",
+              status: "INVALID_ARGUMENT",
+            },
+          },
+        ]),
+        { status: 400, headers: { "content-type": "text/plain" } }
+      ),
+      { id: 2, name: "Gemini" }
+    );
+    const geminiRes = await ProxyErrorHandler.handle(createSession(), geminiArrayError);
+    expect(geminiRes.status).toBe(400);
+    const geminiBody = await geminiRes.json();
+    expect(geminiBody.error.message).toContain("Invalid argument: thinking_budget must be >= 1024");
+
+    const fastApiError = await ProxyError.fromUpstreamResponse(
+      new Response(JSON.stringify({ detail: [{ msg: "Field required: messages" }] }), {
+        status: 422,
+        headers: { "content-type": "application/problem+json" },
+      }),
+      { id: 3, name: "Relay" }
+    );
+    const fastApiRes = await ProxyErrorHandler.handle(createSession(), fastApiError);
+    expect(fastApiRes.status).toBe(422);
+    const fastApiBody = await fastApiRes.json();
+    expect(fastApiBody.error.message).toContain("Field required: messages");
+  });
+
+  test("keeps explicit error rule override message while falling back to upstream message when override message is empty", async () => {
+    mocks.getErrorOverrideAsync.mockResolvedValue({
+      statusCode: 400,
+      response: {
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message:
+            "Invalid request: Upstream returned 'Invalid request' (invalid parameters or format). Check the request content.",
+        },
+      },
+    });
+
+    const err = await ProxyError.fromUpstreamResponse(
+      new Response(
+        JSON.stringify({
+          error: {
+            type: "invalid_request_error",
+            message: "Invalid request: tools.0.custom.input_schema is not valid JSON Schema",
+          },
+        }),
+        { status: 400, headers: { "content-type": "application/json" } }
+      ),
+      { id: 1, name: "Anthropic" }
+    );
+
+    const res = await ProxyErrorHandler.handle(createSession(), err);
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain("Invalid request: Upstream returned 'Invalid request'");
+  });
+
+  test("ProxyError.fromUpstreamResponse bounds rawBody to 4096 chars and extracts nested error.detail", async () => {
+    const largeBody = `plain error prefix ${"x".repeat(5000)}`;
+    const err = await ProxyError.fromUpstreamResponse(new Response(largeBody, { status: 502 }), {
+      id: 1,
+      name: "Anthropic",
+    });
+
+    expect(err.upstreamError?.rawBody?.length).toBe(4096);
+    expect(err.upstreamError?.rawBodyTruncated).toBe(true);
+
+    const largeSniffedJsonBody = JSON.stringify({
+      error: { message: `bad ${"x".repeat(5000)}` },
+    });
+    const largeSniffedErr = await ProxyError.fromUpstreamResponse(
+      new Response(largeSniffedJsonBody, {
+        status: 502,
+        headers: { "content-type": "text/plain" },
+      }),
+      { id: 1, name: "Anthropic" }
+    );
+    expect(largeSniffedErr.upstreamError?.parsed).toBeUndefined();
+    expect(largeSniffedErr.upstreamError?.body.length).toBe(503);
+    const nestedDetailErr = await ProxyError.fromUpstreamResponse(
+      new Response(JSON.stringify({ error: { detail: "invalid field" } }), {
+        status: 422,
+        headers: { "content-type": "application/json", "x-request-id": "req_nested_422" },
+      }),
+      { id: 1, name: "Anthropic" }
+    );
+    const resNested = await ProxyErrorHandler.handle(createSession(), nestedDetailErr);
+    const bodyNested = await resNested.json();
+    expect(resNested.status).toBe(422);
+    expect(bodyNested.error.message).toContain("invalid field");
+    expect(bodyNested.request_id).toBe("req_nested_422");
+
+    const nonEnglishDetailErr = await ProxyError.fromUpstreamResponse(
+      new Response(JSON.stringify({ error: { detail: "参数错误" } }), {
+        status: 422,
+        headers: {
+          "content-type": "application/json",
+          "x-request-id": "sk-secret-1234567890abcdef1234567890",
+        },
+      }),
+      { id: 1, name: "Anthropic" }
+    );
+    const resNonEnglishDetail = await ProxyErrorHandler.handle(
+      createSession(),
+      nonEnglishDetailErr
+    );
+    const bodyNonEnglishDetail = await resNonEnglishDetail.json();
+    expect(bodyNonEnglishDetail.error.message).not.toContain("参数错误");
+    expect(bodyNonEnglishDetail.request_id).toBeUndefined();
+  });
 });

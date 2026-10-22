@@ -281,4 +281,183 @@ describe("ProxyForwarder terminal safe client message candidate", () => {
     expect(error.statusCode).toBe(503);
     expect(error.upstreamError?.safeClientMessageCandidate).toBeUndefined();
   });
+
+  test("passes through the original upstream ProxyError when only one provider is available", async () => {
+    const provider1 = createProvider({ id: 1, name: "p1", maxRetryAttempts: 3 });
+    const session = createSession();
+    session.setProvider(provider1);
+
+    mocks.pickRandomProviderWithExclusion.mockResolvedValueOnce(null);
+    mocks.categorizeErrorAsync.mockResolvedValue(ErrorCategory.PROVIDER_ERROR);
+
+    const doForward = vi.spyOn(
+      ProxyForwarder as unknown as { doForward: (...args: unknown[]) => Promise<Response> },
+      "doForward"
+    );
+
+    const upstream400 = new ProxyError("Invalid value for temperature", 400, {
+      body: JSON.stringify({ error: { message: "Invalid value for temperature" } }),
+      rawBody: JSON.stringify({ error: { message: "Invalid value for temperature" } }),
+      providerId: provider1.id,
+      providerName: provider1.name,
+    });
+    doForward.mockRejectedValue(upstream400);
+
+    const error = await ProxyForwarder.send(session).catch((rejection) => rejection as ProxyError);
+
+    expect(doForward).toHaveBeenCalledTimes(1);
+    expect(error).toBe(upstream400);
+    expect(error.statusCode).toBe(400);
+    expect(error.message).toBe("Invalid value for temperature");
+    expect(mocks.recordFailure).toHaveBeenCalledTimes(1);
+  });
+
+  test("keeps generic 503 fallback when single-provider failure is an internal concurrency or discovery error", async () => {
+    const provider1 = createProvider({ id: 1, name: "p1", maxRetryAttempts: 1 });
+    const session = createSession();
+    session.setProvider(provider1);
+
+    mocks.pickRandomProviderWithExclusion.mockResolvedValueOnce(null);
+    mocks.categorizeErrorAsync.mockResolvedValue(ErrorCategory.PROVIDER_ERROR);
+
+    const doForward = vi.spyOn(
+      ProxyForwarder as unknown as { doForward: (...args: unknown[]) => Promise<Response> },
+      "doForward"
+    );
+    const concurrencyError = new ProxyError("供应商并发 Session 上限已达到（10/10）", 503);
+    doForward.mockRejectedValueOnce(concurrencyError);
+
+    const resolved = await ProxyForwarder.send(session).catch(
+      (rejection) => rejection as ProxyError
+    );
+
+    expect(resolved).not.toBe(concurrencyError);
+    expect(resolved.statusCode).toBe(503);
+    expect(resolved.message).toBe(
+      "All providers are temporarily unavailable. Please try again later."
+    );
+    expect(resolved.upstreamError?.safeClientMessageCandidate).toBeUndefined();
+  });
+
+  test("keeps generic 503 fallback when single-provider failure is a local 524 timeout error", async () => {
+    const provider1 = createProvider({ id: 1, name: "p1", maxRetryAttempts: 1 });
+    const session = createSession();
+    session.setProvider(provider1);
+
+    mocks.pickRandomProviderWithExclusion.mockResolvedValueOnce(null);
+    mocks.categorizeErrorAsync.mockResolvedValue(ErrorCategory.SYSTEM_ERROR);
+
+    const doForward = vi.spyOn(
+      ProxyForwarder as unknown as { doForward: (...args: unknown[]) => Promise<Response> },
+      "doForward"
+    );
+    const timeoutError = new ProxyError(
+      "Provider response timeout: closed after 30s without completing response",
+      524
+    );
+    doForward.mockRejectedValueOnce(timeoutError);
+
+    const resolved = await ProxyForwarder.send(session).catch(
+      (rejection) => rejection as ProxyError
+    );
+
+    expect(resolved).not.toBe(timeoutError);
+    expect(resolved.statusCode).toBe(503);
+    expect(resolved.message).toBe(
+      "All providers are temporarily unavailable. Please try again later."
+    );
+    expect(resolved.upstreamError?.safeClientMessageCandidate).toBeUndefined();
+
+    const upstream524 = await ProxyError.fromUpstreamResponse(
+      new Response(
+        JSON.stringify({
+          error: { message: "Provider response timeout: origin did not answer" },
+        }),
+        {
+          status: 524,
+          headers: { "content-type": "application/json", "x-request-id": "req_cf_524" },
+        }
+      ),
+      { id: provider1.id, name: provider1.name }
+    );
+    mocks.pickRandomProviderWithExclusion.mockResolvedValueOnce(null);
+    doForward.mockRejectedValueOnce(upstream524);
+    const resolvedUpstream524 = await ProxyForwarder.send(session).catch(
+      (rejection) => rejection as ProxyError
+    );
+    expect(resolvedUpstream524).toBe(upstream524);
+    expect(resolvedUpstream524.statusCode).toBe(524);
+
+    const upstream499 = await ProxyError.fromUpstreamResponse(
+      new Response(JSON.stringify({ error: { message: "invalid request" } }), {
+        status: 499,
+        headers: { "content-type": "application/json" },
+      }),
+      { id: provider1.id, name: provider1.name }
+    );
+    mocks.pickRandomProviderWithExclusion.mockResolvedValueOnce(null);
+    mocks.categorizeErrorAsync.mockResolvedValueOnce(ErrorCategory.NON_RETRYABLE_CLIENT_ERROR);
+    doForward.mockRejectedValueOnce(upstream499);
+    const resolvedUpstream499 = await ProxyForwarder.send(session).catch(
+      (rejection) => rejection as ProxyError
+    );
+    expect(resolvedUpstream499.statusCode).toBe(503);
+  });
+
+  test("passes through upstream error when an earlier provider was skipped before dispatch", async () => {
+    const provider1 = createProvider({
+      id: 1,
+      name: "p1",
+      providerVendorId: 10,
+      maxRetryAttempts: 1,
+    });
+    const provider2 = createProvider({
+      id: 2,
+      name: "p2",
+      maxRetryAttempts: 1,
+    });
+    const session = createSession();
+    session.setProvider(provider1);
+
+    mocks.isVendorTypeCircuitOpen.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    mocks.pickRandomProviderWithExclusion
+      .mockResolvedValueOnce(provider2)
+      .mockResolvedValueOnce(null);
+    mocks.categorizeErrorAsync.mockResolvedValue(ErrorCategory.PROVIDER_ERROR);
+
+    const doForward = vi.spyOn(
+      ProxyForwarder as unknown as { doForward: (...args: unknown[]) => Promise<Response> },
+      "doForward"
+    );
+    const upstream400 = new ProxyError("Invalid value for temperature", 400, {
+      body: JSON.stringify({ error: { message: "Invalid value for temperature" } }),
+      rawBody: JSON.stringify({ error: { message: "Invalid value for temperature" } }),
+      providerId: provider2.id,
+      providerName: provider2.name,
+    });
+    doForward.mockRejectedValueOnce(upstream400);
+
+    const resolved = await ProxyForwarder.send(session).catch(
+      (rejection) => rejection as ProxyError
+    );
+
+    expect(doForward).toHaveBeenCalledTimes(1);
+    expect(resolved).toBe(upstream400);
+    expect(resolved.statusCode).toBe(400);
+
+    // Also preserves the dispatched error when a subsequent provider fails setup
+    const session2 = createSession();
+    session2.setProvider(provider2);
+    mocks.isVendorTypeCircuitOpen.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    mocks.pickRandomProviderWithExclusion
+      .mockResolvedValueOnce(provider1)
+      .mockResolvedValueOnce(null);
+    doForward.mockRejectedValueOnce(upstream400);
+
+    const resolvedAfterLaterSetupFailure = await ProxyForwarder.send(session2).catch(
+      (rejection) => rejection as ProxyError
+    );
+    expect(resolvedAfterLaterSetupFailure).toBe(upstream400);
+    expect(resolvedAfterLaterSetupFailure.statusCode).toBe(400);
+  });
 });
