@@ -224,4 +224,106 @@ describe("ProxyErrorHandler.handle - upstream message passthrough", () => {
     expect(body.error.message).toContain("上游服务当前限流，请稍后重试");
     expect(body.error.message).not.toContain("Quota exceeded");
   });
+
+  test("passes through message from ProxyError.fromUpstreamResponse across Claude, Gemini array, and FastAPI formats", async () => {
+    const claudeError = await ProxyError.fromUpstreamResponse(
+      new Response(
+        JSON.stringify({
+          type: "error",
+          error: {
+            type: "invalid_request_error",
+            message:
+              "model 'claude-3-5-sonnet-20241022' temperature must be between 0 and 1. See https://docs.anthropic.com/en/api/messages",
+          },
+        }),
+        { status: 400, headers: { "content-type": "application/json" } }
+      ),
+      { id: 1, name: "Anthropic" }
+    );
+    const claudeRes = await ProxyErrorHandler.handle(createSession(), claudeError);
+    expect(claudeRes.status).toBe(400);
+    const claudeBody = await claudeRes.json();
+    expect(claudeBody.error.message).toContain(
+      "model 'claude-3-5-sonnet-20241022' temperature must be between 0 and 1."
+    );
+    expect(claudeBody.error.message).not.toContain("anthropic.com");
+
+    const geminiArrayError = await ProxyError.fromUpstreamResponse(
+      new Response(
+        JSON.stringify([
+          {
+            error: {
+              code: 400,
+              message: "Invalid argument: thinking_budget must be >= 1024",
+              status: "INVALID_ARGUMENT",
+            },
+          },
+        ]),
+        { status: 400, headers: { "content-type": "text/plain" } }
+      ),
+      { id: 2, name: "Gemini" }
+    );
+    const geminiRes = await ProxyErrorHandler.handle(createSession(), geminiArrayError);
+    expect(geminiRes.status).toBe(400);
+    const geminiBody = await geminiRes.json();
+    expect(geminiBody.error.message).toContain("Invalid argument: thinking_budget must be >= 1024");
+
+    const fastApiError = await ProxyError.fromUpstreamResponse(
+      new Response(JSON.stringify({ detail: [{ msg: "Field required: messages" }] }), {
+        status: 422,
+        headers: { "content-type": "application/problem+json" },
+      }),
+      { id: 3, name: "Relay" }
+    );
+    const fastApiRes = await ProxyErrorHandler.handle(createSession(), fastApiError);
+    expect(fastApiRes.status).toBe(422);
+    const fastApiBody = await fastApiRes.json();
+    expect(fastApiBody.error.message).toContain("Field required: messages");
+  });
+
+  test("prefers sanitized upstream message over built-in default error rule template when passthrough is enabled", async () => {
+    mocks.getErrorOverrideAsync.mockResolvedValue({
+      statusCode: 400,
+      isDefault: true,
+      response: {
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message:
+            "Invalid request: Upstream returned 'Invalid request' (invalid parameters or format). Check the request content.",
+        },
+      },
+    });
+
+    const err = await ProxyError.fromUpstreamResponse(
+      new Response(
+        JSON.stringify({
+          error: {
+            type: "invalid_request_error",
+            message: "Invalid request: tools.0.custom.input_schema is not valid JSON Schema",
+          },
+        }),
+        { status: 400, headers: { "content-type": "application/json" } }
+      ),
+      { id: 1, name: "Anthropic" }
+    );
+
+    const res = await ProxyErrorHandler.handle(createSession(), err);
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.message).toContain(
+      "Invalid request: tools.0.custom.input_schema is not valid JSON Schema"
+    );
+
+    // When passthrough is disabled, falls back to the default rule's template message
+    mocks.getCachedSystemSettings.mockResolvedValue({
+      verboseProviderError: false,
+      passThroughUpstreamErrorMessage: false,
+    });
+    const resDisabled = await ProxyErrorHandler.handle(createSession(), err);
+    const bodyDisabled = await resDisabled.json();
+    expect(bodyDisabled.error.message).toContain(
+      "Invalid request: Upstream returned 'Invalid request'"
+    );
+  });
 });

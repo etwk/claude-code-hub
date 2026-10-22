@@ -84,4 +84,78 @@ describe("deriveClientSafeUpstreamErrorMessage", () => {
       })
     ).toBeNull();
   });
+
+  test("allows hyphenated model names while still rejecting standalone provider labels", () => {
+    expect(
+      deriveClientSafeUpstreamErrorMessage({
+        candidateMessage:
+          "The model 'claude-3-5-sonnet-20241022' does not support this parameter; try gemini-2.5-pro or deepseek-reasoner.",
+        providerName: "Anthropic",
+      })
+    ).toBe(
+      "The model 'claude-3-5-sonnet-20241022' does not support this parameter, try gemini-2.5-pro or deepseek-reasoner."
+    );
+
+    expect(
+      deriveClientSafeUpstreamErrorMessage({
+        candidateMessage: "Claude upstream rejected the request",
+      })
+    ).toBeNull();
+    expect(
+      deriveClientSafeUpstreamErrorMessage({
+        candidateMessage: "Request rejected by Acme-prod",
+        providerName: "Acme",
+      })
+    ).toBeNull();
+    expect(
+      deriveClientSafeUpstreamErrorMessage({
+        candidateMessage: "Connection failed at relay.xyz.",
+      })
+    ).toBe("Connection failed");
+    expect(
+      deriveClientSafeUpstreamErrorMessage({
+        candidateMessage: "Connection failed at service.xn--p1ai.",
+      })
+    ).toBe("Connection failed");
+  });
+
+  test("strips documentation URLs before checking forbidden provider labels", () => {
+    const message = deriveClientSafeUpstreamErrorMessage({
+      candidateMessage:
+        "Invalid value for 'temperature': must be <= 1.0. See https://docs.anthropic.com/en/api/messages for details.",
+    });
+
+    expect(message).toContain("Invalid value for 'temperature': must be <= 1.0.");
+    expect(message).not.toContain("anthropic.com");
+    expect(message).not.toContain("https://");
+  });
+
+  test("falls back through candidateMessages when earlier candidates are raw JSON or internal prefixes", () => {
+    expect(
+      deriveClientSafeUpstreamErrorMessage({
+        candidateMessages: [
+          '{"detail":"Invalid temperature value"}',
+          "Provider returned 400: Bad Request",
+          "Invalid temperature value",
+        ],
+      })
+    ).toBe("Invalid temperature value");
+  });
+
+  test("rejects internal concurrency, discovery, timeout, and gate messages", () => {
+    for (const internalMessage of [
+      "供应商并发 Session 上限已达到（10/10）",
+      "Provider concurrent session limit reached (10/10)",
+      "Invalid upstream discovery response",
+      "MALFORMED_BUFFERED_JSON",
+      "Provider failed to respond within 30000ms",
+      "Stream content gate rejected upstream before first valid content (gate_error)",
+    ]) {
+      expect(
+        deriveClientSafeUpstreamErrorMessage({
+          candidateMessage: internalMessage,
+        })
+      ).toBeNull();
+    }
+  });
 });

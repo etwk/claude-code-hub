@@ -279,4 +279,59 @@ describe("ProxyForwarder terminal safe client message candidate", () => {
     expect(error.statusCode).toBe(503);
     expect(error.upstreamError?.safeClientMessageCandidate).toBeUndefined();
   });
+
+  test("passes through the original upstream ProxyError when only one provider is available", async () => {
+    const provider1 = createProvider({ id: 1, name: "p1", maxRetryAttempts: 3 });
+    const session = createSession();
+    session.setProvider(provider1);
+
+    mocks.pickRandomProviderWithExclusion.mockResolvedValueOnce(null);
+    mocks.categorizeErrorAsync.mockResolvedValue(ErrorCategory.PROVIDER_ERROR);
+
+    const doForward = vi.spyOn(
+      ProxyForwarder as unknown as { doForward: (...args: unknown[]) => Promise<Response> },
+      "doForward"
+    );
+
+    const upstream400 = new ProxyError("Invalid value for temperature", 400, {
+      body: JSON.stringify({ error: { message: "Invalid value for temperature" } }),
+      rawBody: JSON.stringify({ error: { message: "Invalid value for temperature" } }),
+      providerId: provider1.id,
+      providerName: provider1.name,
+    });
+    doForward.mockRejectedValue(upstream400);
+
+    const error = await ProxyForwarder.send(session).catch((rejection) => rejection as ProxyError);
+
+    expect(doForward).toHaveBeenCalledTimes(1);
+    expect(error).toBe(upstream400);
+    expect(error.statusCode).toBe(400);
+    expect(error.message).toBe("Invalid value for temperature");
+    expect(mocks.recordFailure).toHaveBeenCalledTimes(1);
+  });
+
+  test("keeps generic 503 fallback when single-provider failure is an internal concurrency or discovery error", async () => {
+    const provider1 = createProvider({ id: 1, name: "p1", maxRetryAttempts: 1 });
+    const session = createSession();
+    session.setProvider(provider1);
+
+    mocks.pickRandomProviderWithExclusion.mockResolvedValueOnce(null);
+    mocks.categorizeErrorAsync.mockResolvedValue(ErrorCategory.PROVIDER_ERROR);
+
+    const doForward = vi.spyOn(
+      ProxyForwarder as unknown as { doForward: (...args: unknown[]) => Promise<Response> },
+      "doForward"
+    );
+    const concurrencyError = new ProxyError("供应商并发 Session 上限已达到（10/10）", 503);
+    doForward.mockRejectedValueOnce(concurrencyError);
+
+    const resolved = await ProxyForwarder.send(session).catch(
+      (rejection) => rejection as ProxyError
+    );
+
+    expect(resolved).not.toBe(concurrencyError);
+    expect(resolved.statusCode).toBe(503);
+    expect(resolved.message).toBe("所有供应商暂时不可用，请稍后重试");
+    expect(resolved.upstreamError?.safeClientMessageCandidate).toBeUndefined();
+  });
 });

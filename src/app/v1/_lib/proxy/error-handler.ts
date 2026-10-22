@@ -37,7 +37,11 @@ const OVERRIDE_STATUS_CODE_MIN = 400;
 /** 覆写状态码最大值 */
 const OVERRIDE_STATUS_CODE_MAX = 599;
 
-type ErrorOverrideForMessageResolver = { response?: unknown; statusCode?: number | null } | null;
+type ErrorOverrideForMessageResolver = {
+  response?: unknown;
+  statusCode?: number | null;
+  isDefault?: boolean;
+} | null;
 
 function stripUpstreamDetailSuffix(message: string): string {
   return message.replace(/\s+Upstream detail:\s*[\s\S]*$/u, "").trim() || message;
@@ -128,7 +132,20 @@ export function resolveFinalClientErrorMessage({
   settings?: Pick<SystemSettings, "passThroughUpstreamErrorMessage"> | null;
   override?: ErrorOverrideForMessageResolver;
 }): string {
+  const shouldPassThrough = settings?.passThroughUpstreamErrorMessage ?? true;
+
   if (override?.response) {
+    if (override.isDefault === true && shouldPassThrough && error instanceof ProxyError) {
+      const upstreamCandidate = deriveClientSafeUpstreamErrorMessage({
+        rawText: error.upstreamError?.rawBody ?? error.upstreamError?.body,
+        candidateMessage: error.upstreamError?.safeClientMessageCandidate,
+        candidateMessages: [error.upstreamError?.body, error.message],
+        providerName: error.upstreamError?.providerName ?? null,
+      });
+      if (upstreamCandidate) {
+        return upstreamCandidate;
+      }
+    }
     return currentFallbackMessage;
   }
 
@@ -141,7 +158,6 @@ export function resolveFinalClientErrorMessage({
     error,
     strippedFallback
   );
-  const shouldPassThrough = settings?.passThroughUpstreamErrorMessage ?? true;
   if (!shouldPassThrough) {
     return fallback;
   }
@@ -149,16 +165,13 @@ export function resolveFinalClientErrorMessage({
   if (error instanceof ProxyError) {
     return (
       deriveClientSafeUpstreamErrorMessage({
-        rawText: error.upstreamError?.rawBody,
-        candidateMessage:
-          error.upstreamError?.safeClientMessageCandidate ??
-          error.upstreamError?.body ??
-          error.message,
+        rawText: error.upstreamError?.rawBody ?? error.upstreamError?.body,
+        candidateMessage: error.upstreamError?.safeClientMessageCandidate,
+        candidateMessages: [error.upstreamError?.body, error.message],
         providerName: error.upstreamError?.providerName ?? null,
       }) ?? fallback
     );
   }
-
   if (isEmptyResponseError(error)) {
     return fallback;
   }
@@ -452,7 +465,10 @@ export class ProxyErrorHandler {
           // 唯一的特殊处理：message 为空时回退到原始错误消息
           const finalClientErrorMessage = resolveFinalClientErrorMessage({
             error,
-            currentFallbackMessage: clientErrorMessage,
+            currentFallbackMessage:
+              override.isDefault === true && hasExplicitOverrideMessage
+                ? String(overrideErrorObj.message)
+                : clientErrorMessage,
             settings,
             override: hasExplicitOverrideMessage ? override : null,
           });
@@ -461,7 +477,9 @@ export class ProxyErrorHandler {
             error: {
               ...overrideErrorObj,
               message:
-                overrideMessage === clientErrorMessage ? finalClientErrorMessage : overrideMessage,
+                override.isDefault === true || overrideMessage === clientErrorMessage
+                  ? finalClientErrorMessage
+                  : overrideMessage,
             },
           };
 

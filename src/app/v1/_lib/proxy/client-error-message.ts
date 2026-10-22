@@ -7,6 +7,7 @@ import { ALL_PROVIDERS_UNAVAILABLE_MESSAGE } from "./errors";
 export interface DeriveClientSafeUpstreamErrorMessageInput {
   rawText?: string;
   candidateMessage?: string;
+  candidateMessages?: Array<string | undefined | null>;
   providerName?: string | null;
   forbiddenProviderLabels?: string[];
 }
@@ -33,10 +34,11 @@ const DEFAULT_FORBIDDEN_PROVIDER_LABELS = [
 ];
 
 const INTERNAL_ONLY_RE = new RegExp(
-  `^(?:FAKE_200_[A-Z0-9_]+|EMPTY_RESPONSE|HTTP\\s+\\d{3}|No available providers?|No available provider endpoints|${ALL_PROVIDERS_UNAVAILABLE_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})$`,
+  `^(?:FAKE_200_[A-Z0-9_]+|MALFORMED_BUFFERED_JSON|EMPTY_RESPONSE|HTTP\\s+\\d{3}|No available providers?|No available provider endpoints|Vendor-type circuit is open|Provider concurrent (?:session )?limit reached(?:\\s*\\([^)]*\\))?|(?:供应商)?并发\\s*Session\\s*上限已达到[^\\n]*|Invalid upstream discovery response|Service temporarily unavailable|Internal configuration error|Stream content gate rejected upstream before first valid content(?:\\s*\\([^)]*\\))?|${ALL_PROVIDERS_UNAVAILABLE_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})$`,
   "iu"
 );
-const PROVIDER_PREFIX_RE = /\bProvider\s+[\w.-]+(?:\s+returned|\s*:|\s+-)/iu;
+const PROVIDER_PREFIX_RE =
+  /\bProvider\s+(?:returned\s+\d{3}\b|failed\s+to\s+respond\b|(?:streaming\s+response\s+idle|first\s+content|first-byte|response)\s+timeout\s*:|[\w.-]+(?:\s+returned|\s*:|\s+-))|供应商(?:流式响应静默|首个有效内容|首字节响应|响应)超时\s*:/iu;
 // Reject both anchored-at-start and embedded raw JSON blobs; embedded JSON would otherwise
 // leak provider-shaped payloads (e.g. `Bad request: {"error":{"message":"..."}}`).
 const RAW_JSON_BLOB_ANCHORED_RE = /^[[{]/u;
@@ -45,10 +47,11 @@ const RAW_JSON_BLOB_EMBEDDED_RE = /[[{]\s*"[^"\n]{1,80}"\s*:/u;
 // `String.prototype.replace` resets `lastIndex`, so these stay safe during normalization.
 const URL_RE = /\bhttps?:\/\/[^\s"'<>]+/giu;
 const DOMAIN_RE =
-  /\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|ai|app|dev|cloud|cn|co|uk|jp|ru|de|fr|us|example)(?:\b|\/[^\s"'<>]*)/giu;
+  /(?<![\w-]|\.[a-z0-9_-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|ai|app|dev|cloud|cn|co|uk|jp|ru|de|fr|us|example)(?![\w-]|\.[a-z0-9_-])(?:\b|\/[^\s"'<>]*)/giu;
 const HOSTLIKE_RE =
-  /\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?::\d{2,5})?(?:\/[^\s"'<>]*)?\b/giu;
-// Narrowed: bare common nouns like "endpoint"/"node"/"route" only trigger when followed by
+  /(?<![\w-]|\.[a-z0-9_-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,}|xn--[a-z0-9-]{2,})(?::\d{2,5})?(?:\/[^\s"'<>]*)?(?![\w-]|\.[a-z0-9_-])/giu;
+const MODEL_IDENTIFIER_RE =
+  /\b(?:claude|gemini|deepseek|qwen|grok|kimi|codex)-(?:[0-9][\w.-]*|(?:opus|sonnet|haiku|pro|flash|ultra|coder|chat|reasoner|math|vl|plus|max|turbo|lite|mini|preview|exp|latest|v\d)[\w.-]*)\b/giu;
 // an infrastructure-style qualifier (separator + token, or explicit port), to avoid
 // stripping natural phrases like "Rate limit exceeded for this endpoint".
 const INTERNAL_LABEL_RE =
@@ -66,9 +69,9 @@ const API_KEY_SHAPE_RE = /\b(?:sk|rk|pk)-[A-Za-z0-9_-]{8,}\b/iu;
 // Non-global counterparts used by `.test()` to avoid the lastIndex-state hazard of `/g` regexes.
 const URL_TEST_RE = /\bhttps?:\/\/[^\s"'<>]+/iu;
 const DOMAIN_TEST_RE =
-  /\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|ai|app|dev|cloud|cn|co|uk|jp|ru|de|fr|us|example)(?:\b|\/[^\s"'<>]*)/iu;
+  /(?<![\w-]|\.[a-z0-9_-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|ai|app|dev|cloud|cn|co|uk|jp|ru|de|fr|us|example)(?![\w-]|\.[a-z0-9_-])(?:\b|\/[^\s"'<>]*)/iu;
 const HOSTLIKE_TEST_RE =
-  /\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?::\d{2,5})?(?:\/[^\s"'<>]*)?\b/iu;
+  /(?<![\w-]|\.[a-z0-9_-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,}|xn--[a-z0-9-]{2,})(?::\d{2,5})?(?:\/[^\s"'<>]*)?(?![\w-]|\.[a-z0-9_-])/iu;
 const IPV4_TEST_RE = /\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{2,5})?\b/;
 const IPV6_TEST_RE =
   /(?:\[[0-9a-fA-F:]+\](?::\d{2,5})?|(?:\b[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}\b)/;
@@ -90,10 +93,8 @@ function containsRawJsonBlob(text: string): boolean {
   return RAW_JSON_BLOB_ANCHORED_RE.test(text) || RAW_JSON_BLOB_EMBEDDED_RE.test(text);
 }
 
-function hasForbiddenProviderLabel(message: string, labels: string[]): boolean {
+function hasForbiddenLabelInList(message: string, labels: string[]): boolean {
   const normalized = message.toLocaleLowerCase();
-  if (PROVIDER_PREFIX_RE.test(message)) return true;
-
   return labels.some((label) => {
     const trimmed = label.trim();
     if (!trimmed) return false;
@@ -106,6 +107,17 @@ function hasForbiddenProviderLabel(message: string, labels: string[]): boolean {
         : null;
     return boundary ? boundary.test(message) : normalized.includes(lower);
   });
+}
+
+function hasForbiddenProviderLabel(
+  message: string,
+  explicitLabels: string[],
+  defaultLabels: string[]
+): boolean {
+  if (PROVIDER_PREFIX_RE.test(message)) return true;
+  if (hasForbiddenLabelInList(message, explicitLabels)) return true;
+  const messageWithoutModelIdentifiers = message.replace(MODEL_IDENTIFIER_RE, " ");
+  return hasForbiddenLabelInList(messageWithoutModelIdentifiers, defaultLabels);
 }
 
 function normalizeClientMessage(text: string): string {
@@ -157,28 +169,34 @@ function isUnsafeAfterRedaction(text: string): boolean {
 function deriveCandidateFromRawText(rawText: string | undefined): string | null {
   if (typeof rawText !== "string" || !rawText.trim()) return null;
   const detected = detectUpstreamErrorFromSseOrJsonText(rawText);
-  if (!detected.isError || !detected.detail) return null;
+  if (!detected.isError || !detected.detail || detected.code === "FAKE_200_HTML_BODY") {
+    return null;
+  }
   return detected.detail;
 }
 
 export function deriveClientSafeUpstreamErrorMessage(
   input: DeriveClientSafeUpstreamErrorMessageInput
 ): string | null {
-  const labels = [
+  const explicitLabels = [
     input.providerName ?? "",
-    ...DEFAULT_FORBIDDEN_PROVIDER_LABELS,
     ...(input.forbiddenProviderLabels ?? []),
   ].filter(Boolean);
-  const candidates = [deriveCandidateFromRawText(input.rawText), input.candidateMessage].filter(
-    (value): value is string => typeof value === "string" && value.trim().length > 0
-  );
+  const candidates = [
+    deriveCandidateFromRawText(input.rawText),
+    input.candidateMessage,
+    ...(input.candidateMessages ?? []),
+  ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
 
   for (const candidate of candidates) {
     const trimmed = candidate.trim();
     if (!trimmed || INTERNAL_ONLY_RE.test(trimmed) || containsRawJsonBlob(trimmed)) {
       continue;
     }
-    if (hasForbiddenProviderLabel(trimmed, labels)) {
+    const textWithoutUrls = trimmed.replace(URL_RE, " ");
+    if (
+      hasForbiddenProviderLabel(textWithoutUrls, explicitLabels, DEFAULT_FORBIDDEN_PROVIDER_LABELS)
+    ) {
       continue;
     }
 
@@ -186,7 +204,10 @@ export function deriveClientSafeUpstreamErrorMessage(
     if (!normalized || INTERNAL_ONLY_RE.test(normalized) || containsRawJsonBlob(normalized)) {
       continue;
     }
-    if (hasForbiddenProviderLabel(normalized, labels) || isUnsafeAfterRedaction(normalized)) {
+    if (
+      hasForbiddenProviderLabel(normalized, explicitLabels, DEFAULT_FORBIDDEN_PROVIDER_LABELS) ||
+      isUnsafeAfterRedaction(normalized)
+    ) {
       continue;
     }
 

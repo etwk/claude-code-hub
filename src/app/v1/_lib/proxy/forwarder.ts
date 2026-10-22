@@ -119,6 +119,7 @@ import {
   isEmptyResponseError,
   isHttp2Error,
   isProviderLocalModelUnavailableError,
+  isRetryableSameProviderHttpError,
   isRetryableUpstreamStorageCapacityError,
   isSSLCertificateError,
   ProxyError,
@@ -2902,8 +2903,7 @@ export class ProxyForwarder {
           if (errorCategory === ErrorCategory.RESOURCE_NOT_FOUND) {
             const proxyError = lastError as ProxyError;
             const providerLocalModelUnavailable = isProviderLocalModelUnavailableError(proxyError);
-            const willRetry =
-              !providerLocalModelUnavailable && attemptCount < maxAttemptsPerProvider;
+            const willRetry = false;
 
             logger.warn("ProxyForwarder: Upstream 404 error", {
               providerId: currentProvider.id,
@@ -3048,7 +3048,8 @@ export class ProxyForwarder {
             // 常规 ProxyError 处理
             const proxyError = lastError as ProxyError;
             const statusCode = proxyError.statusCode;
-            const willRetry = attemptCount < maxAttemptsPerProvider;
+            const willRetry =
+              attemptCount < maxAttemptsPerProvider && isRetryableSameProviderHttpError(proxyError);
 
             if (
               !isMcpRequest &&
@@ -3252,7 +3253,7 @@ export class ProxyForwarder {
     const attemptedProviderIds = new Set(failedProviderIds);
     if (session.provider?.id != null) attemptedProviderIds.add(session.provider.id);
     await ProxyForwarder.clearSessionProviderBindings(session, attemptedProviderIds);
-    throw ProxyForwarder.buildAllProvidersUnavailableError(lastError); // Service Unavailable
+    throw ProxyForwarder.resolveHedgeTerminalError(lastError, null, totalProvidersAttempted);
   }
 
   /**
@@ -5339,7 +5340,13 @@ export class ProxyForwarder {
 
     const finishIfExhausted = async () => {
       if (!settled && noMoreProviders && attempts.size === 0) {
-        await settleFailure(ProxyForwarder.resolveHedgeTerminalError(lastError, lastErrorCategory));
+        await settleFailure(
+          ProxyForwarder.resolveHedgeTerminalError(
+            lastError,
+            lastErrorCategory,
+            launchedProviderCount
+          )
+        );
       }
     };
 
@@ -8066,7 +8073,7 @@ export class ProxyForwarder {
           }
           if (coordinator.activeAttempts.length === 0 && noMoreCandidates) {
             await settleFailure(
-              ProxyForwarder.resolveHedgeTerminalError(lastError, lastErrorCategory)
+              ProxyForwarder.resolveHedgeTerminalError(lastError, lastErrorCategory, launched.size)
             );
           }
         })
@@ -8343,7 +8350,9 @@ export class ProxyForwarder {
           !settled &&
           coordinator.acceptsEpoch(launchEpoch.requestEpoch, launchEpoch.roundEpoch)
         ) {
-          await settleFailure(ProxyForwarder.buildAllProvidersUnavailableError(lastError));
+          await settleFailure(
+            ProxyForwarder.resolveHedgeTerminalError(lastError, lastErrorCategory, launched.size)
+          );
           return;
         }
       } finally {
@@ -8545,9 +8554,12 @@ export class ProxyForwarder {
         return;
       }
       if (action.type === "terminal_failure") {
-        await settleFailure(ProxyForwarder.buildAllProvidersUnavailableError(lastError), {
-          cancellationKind: terminalCancellationKind,
-        });
+        await settleFailure(
+          ProxyForwarder.resolveHedgeTerminalError(lastError, lastErrorCategory, launched.size),
+          {
+            cancellationKind: terminalCancellationKind,
+          }
+        );
         return;
       }
     };
@@ -9049,13 +9061,12 @@ export class ProxyForwarder {
       finalError instanceof ProxyError &&
       (finalError.upstreamError?.rawBody ||
         finalError.upstreamError?.safeClientMessageCandidate ||
-        finalError.upstreamError?.body)
+        finalError.upstreamError?.body ||
+        finalError.message)
         ? (deriveClientSafeUpstreamErrorMessage({
             rawText: finalError.upstreamError?.rawBody ?? finalError.upstreamError?.body,
-            candidateMessage:
-              finalError.upstreamError?.safeClientMessageCandidate ??
-              finalError.upstreamError?.body ??
-              finalError.message,
+            candidateMessage: finalError.upstreamError?.safeClientMessageCandidate,
+            candidateMessages: [finalError.upstreamError?.body, finalError.message],
             providerName: finalError.upstreamError?.providerName ?? null,
           }) ?? undefined)
         : undefined;
@@ -9068,7 +9079,8 @@ export class ProxyForwarder {
 
   private static resolveHedgeTerminalError(
     lastError: Error | null,
-    lastErrorCategory: ErrorCategory | null
+    lastErrorCategory: ErrorCategory | null,
+    providersAttemptedCount: number = 0
   ): Error {
     if (
       lastError &&
@@ -9076,6 +9088,25 @@ export class ProxyForwarder {
         lastErrorCategory === ErrorCategory.NON_RETRYABLE_CLIENT_ERROR)
     ) {
       return lastError;
+    }
+
+    if (providersAttemptedCount === 1 && lastError instanceof ProxyError) {
+      const isInternalSetupOrGateError =
+        lastError.message === ALL_PROVIDERS_UNAVAILABLE_MESSAGE ||
+        lastError.message === "No available provider endpoints" ||
+        lastError.message === "Vendor-type circuit is open" ||
+        lastError.message === "Provider concurrent limit reached" ||
+        lastError.message === "Invalid upstream discovery response" ||
+        lastError.message === "MALFORMED_BUFFERED_JSON" ||
+        lastError.message === "Service temporarily unavailable" ||
+        lastError.message === "Internal configuration error" ||
+        /(?:供应商)?并发\s*Session\s*上限已达到|Provider concurrent (?:session )?limit reached/iu.test(
+          lastError.message
+        ) ||
+        lastError instanceof StreamPrecommitError;
+      if (!isInternalSetupOrGateError && lastError.statusCode !== 499) {
+        return lastError;
+      }
     }
 
     return ProxyForwarder.buildAllProvidersUnavailableError(lastError);

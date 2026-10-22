@@ -1584,4 +1584,92 @@ describe("NON_RETRYABLE_CLIENT_ERROR regression tests", () => {
     );
     expect(session.getProviderChain()[0].errorDetails?.matchedRule?.ruleId).toBe(42);
   });
+
+  test("does not retry the same provider on HTTP 400/422 before failing over", async () => {
+    const provider1 = createProvider({
+      id: 1,
+      name: "p1",
+      providerType: "claude",
+      providerVendorId: 1,
+      maxRetryAttempts: 3,
+    });
+    const provider2 = createProvider({
+      id: 2,
+      name: "p2",
+      providerType: "claude",
+      providerVendorId: 2,
+      maxRetryAttempts: 3,
+    });
+    mocks.findAllProviders.mockResolvedValue([provider1, provider2]);
+    mocks.getCachedProviders.mockResolvedValue([provider1, provider2]);
+    mocks.getPreferredProviderEndpoints.mockImplementation(async ({ vendorId }) => [
+      { id: vendorId * 10 + 1, url: `https://ep-${vendorId}-1.example.com` },
+      { id: vendorId * 10 + 2, url: `https://ep-${vendorId}-2.example.com` },
+      { id: vendorId * 10 + 3, url: `https://ep-${vendorId}-3.example.com` },
+    ]);
+
+    vi.spyOn(
+      ProxyForwarder as unknown as { selectAlternative: (...args: unknown[]) => unknown },
+      "selectAlternative"
+    )
+      .mockResolvedValueOnce(provider2)
+      .mockResolvedValueOnce(null);
+    const doForward = vi.spyOn(ProxyForwarder as unknown as { doForward: unknown }, "doForward");
+    doForward
+      .mockRejectedValueOnce(
+        new ProxyError("Bad request parameter", 400, {
+          body: '{"error":{"message":"Bad request parameter"}}',
+          providerId: 1,
+          providerName: "p1",
+        })
+      )
+      .mockResolvedValueOnce(new Response("ok", { status: 200 }));
+
+    vi.mocked(categorizeErrorAsync).mockResolvedValue(ErrorCategory.PROVIDER_ERROR);
+    vi.mocked(getErrorDetectionResultAsync).mockResolvedValue({ matched: false });
+
+    const session = createSession(new URL("https://example.com/v1/messages"));
+    session.setProvider(provider1);
+
+    const response = await ProxyForwarder.send(session);
+    expect(response.status).toBe(200);
+    // 1 attempt on provider 1 (no same-provider retry on 400), then 1 attempt on provider 2
+    expect(doForward).toHaveBeenCalledTimes(2);
+    expect(mocks.recordFailure).toHaveBeenCalledTimes(1);
+  });
+
+  test("records circuit breaker failure on provider-fault 400 (insufficient quota / invalid api key) without retrying same provider", async () => {
+    const provider1 = createProvider({
+      id: 1,
+      name: "p1",
+      providerType: "claude",
+      providerVendorId: 1,
+      maxRetryAttempts: 3,
+    });
+    mocks.findAllProviders.mockResolvedValue([provider1]);
+    mocks.getCachedProviders.mockResolvedValue([provider1]);
+    mocks.getPreferredProviderEndpoints.mockResolvedValue([
+      { id: 11, url: "https://ep-1-1.example.com" },
+      { id: 12, url: "https://ep-1-2.example.com" },
+    ]);
+
+    const quotaError = new ProxyError("Your credit balance is too low to access the API", 400, {
+      body: '{"error":{"message":"Your credit balance is too low to access the API"}}',
+      providerId: 1,
+      providerName: "p1",
+    });
+    const doForward = vi.spyOn(ProxyForwarder as unknown as { doForward: unknown }, "doForward");
+    doForward.mockRejectedValue(quotaError);
+
+    vi.mocked(categorizeErrorAsync).mockResolvedValue(ErrorCategory.PROVIDER_ERROR);
+    vi.mocked(getErrorDetectionResultAsync).mockResolvedValue({ matched: false });
+
+    const session = createSession(new URL("https://example.com/v1/messages"));
+    session.setProvider(provider1);
+
+    await expect(ProxyForwarder.send(session)).rejects.toBe(quotaError);
+    expect(doForward).toHaveBeenCalledTimes(1);
+    expect(mocks.recordFailure).toHaveBeenCalledTimes(1);
+    expect(mocks.recordFailure).toHaveBeenCalledWith(1, quotaError);
+  });
 });
