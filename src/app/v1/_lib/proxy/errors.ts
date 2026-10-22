@@ -491,6 +491,18 @@ export class ProxyError extends Error {
           return upstreamMessage;
         }
       }
+
+      const nestedErrorFieldsMessage = ProxyError.extractErrorMessage(
+        {
+          detail: errorObj.detail,
+          details: errorObj.details,
+          errors: errorObj.errors,
+        },
+        remainingDepth - 1
+      );
+      if (nestedErrorFieldsMessage) {
+        return nestedErrorFieldsMessage;
+      }
     }
 
     // 通用格式：{ "message": "..." }
@@ -515,19 +527,28 @@ export class ProxyError extends Error {
       return obj.error;
     }
 
-    // FastAPI / Python 上游格式：{ "detail": "..." } 或 { "detail": [{ "msg": "..." }] }
-    if (typeof obj.detail === "string" && obj.detail.trim()) {
-      return obj.detail;
-    }
-    if (Array.isArray(obj.detail)) {
-      for (const item of obj.detail) {
-        if (item && typeof item === "object" && "msg" in item && typeof item.msg === "string") {
-          const msg = item.msg.trim();
-          if (msg) return msg;
+    // FastAPI / Python / 通用嵌套字段：{ "detail": ... } / { "details": ... } / { "errors": ... }
+    for (const field of [obj.detail, obj.details, obj.errors]) {
+      if (typeof field === "string" && field.trim()) {
+        return field;
+      }
+      if (Array.isArray(field)) {
+        for (const item of field) {
+          if (typeof item === "string" && item.trim()) {
+            return item;
+          }
+          if (item && typeof item === "object") {
+            if ("msg" in item && typeof item.msg === "string" && item.msg.trim()) {
+              return item.msg.trim();
+            }
+            const itemMessage = ProxyError.extractErrorMessage(item, remainingDepth - 1);
+            if (itemMessage) {
+              return itemMessage;
+            }
+          }
         }
       }
     }
-
     return null;
   }
 

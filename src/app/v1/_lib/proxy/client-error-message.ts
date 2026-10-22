@@ -115,11 +115,17 @@ function hasForbiddenProviderLabel(
   defaultLabels: string[]
 ): boolean {
   if (PROVIDER_PREFIX_RE.test(message)) return true;
-  if (hasForbiddenLabelInList(message, explicitLabels)) return true;
-  const messageWithoutModelIdentifiers = message.replace(MODEL_IDENTIFIER_RE, " ");
-  return hasForbiddenLabelInList(messageWithoutModelIdentifiers, defaultLabels);
+  const explicitLowerSet = new Set(
+    explicitLabels.map((label) => label.trim().toLocaleLowerCase()).filter(Boolean)
+  );
+  const messageWithoutModelIdentifiers = message.replace(MODEL_IDENTIFIER_RE, (match) =>
+    explicitLowerSet.has(match.toLocaleLowerCase()) ? match : " "
+  );
+  return (
+    hasForbiddenLabelInList(messageWithoutModelIdentifiers, explicitLabels) ||
+    hasForbiddenLabelInList(messageWithoutModelIdentifiers, defaultLabels)
+  );
 }
-
 function normalizeClientMessage(text: string): string {
   let sanitized = sanitizeErrorTextForDetail(text);
 

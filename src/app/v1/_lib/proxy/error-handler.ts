@@ -135,12 +135,17 @@ export function resolveFinalClientErrorMessage({
   const shouldPassThrough = settings?.passThroughUpstreamErrorMessage ?? true;
 
   if (override?.response) {
-    if (override.isDefault === true && shouldPassThrough && error instanceof ProxyError) {
+    if (
+      override.isDefault === true &&
+      shouldPassThrough &&
+      error instanceof ProxyError &&
+      error.upstreamError != null
+    ) {
       const upstreamCandidate = deriveClientSafeUpstreamErrorMessage({
-        rawText: error.upstreamError?.rawBody ?? error.upstreamError?.body,
-        candidateMessage: error.upstreamError?.safeClientMessageCandidate,
-        candidateMessages: [error.upstreamError?.body, error.message],
-        providerName: error.upstreamError?.providerName ?? null,
+        rawText: error.upstreamError.rawBody ?? error.upstreamError.body,
+        candidateMessage: error.upstreamError.safeClientMessageCandidate,
+        candidateMessages: [error.upstreamError.body, error.message],
+        providerName: error.upstreamError.providerName ?? null,
       });
       if (upstreamCandidate) {
         return upstreamCandidate;
@@ -558,7 +563,10 @@ export class ProxyErrorHandler {
     // - rawBody 仅用于本次错误响应回传（受系统设置控制），不写入数据库/决策链；
     // - 出于安全考虑，这里会对 rawBody 做基础脱敏（Bearer/key/JWT/email 等），避免上游错误页意外回显敏感信息。
     let details: Record<string, unknown> | undefined;
-    let upstreamRequestId: string | undefined;
+    let upstreamRequestId =
+      error instanceof ProxyError && !error.message.startsWith("FAKE_200_")
+        ? error.upstreamError?.requestId
+        : undefined;
     const shouldAttachVerboseDetails =
       (error instanceof ProxyError && error.message.startsWith("FAKE_200_")) ||
       isEmptyResponseError(error);

@@ -325,9 +325,21 @@ describe("ProxyErrorHandler.handle - upstream message passthrough", () => {
     expect(bodyDisabled.error.message).toContain(
       "Invalid request: Upstream returned 'Invalid request'"
     );
+
+    // Local ProxyError without upstreamError keeps the default rule's localized message
+    mocks.getCachedSystemSettings.mockResolvedValue({
+      verboseProviderError: false,
+      passThroughUpstreamErrorMessage: true,
+    });
+    const localErr = new ProxyError("Invalid request: image multipart metadata is missing.", 400);
+    const resLocal = await ProxyErrorHandler.handle(createSession(), localErr);
+    const bodyLocal = await resLocal.json();
+    expect(bodyLocal.error.message).toContain(
+      "Invalid request: Upstream returned 'Invalid request'"
+    );
   });
 
-  test("ProxyError.fromUpstreamResponse bounds rawBody to 4096 chars and sets rawBodyTruncated", async () => {
+  test("ProxyError.fromUpstreamResponse bounds rawBody to 4096 chars and extracts nested error.detail", async () => {
     const largeBody = `plain error prefix ${"x".repeat(5000)}`;
     const err = await ProxyError.fromUpstreamResponse(new Response(largeBody, { status: 502 }), {
       id: 1,
@@ -336,5 +348,18 @@ describe("ProxyErrorHandler.handle - upstream message passthrough", () => {
 
     expect(err.upstreamError?.rawBody?.length).toBe(4096);
     expect(err.upstreamError?.rawBodyTruncated).toBe(true);
+
+    const nestedDetailErr = await ProxyError.fromUpstreamResponse(
+      new Response(JSON.stringify({ error: { detail: "invalid field" } }), {
+        status: 422,
+        headers: { "content-type": "application/json", "x-request-id": "req_nested_422" },
+      }),
+      { id: 1, name: "Anthropic" }
+    );
+    const resNested = await ProxyErrorHandler.handle(createSession(), nestedDetailErr);
+    const bodyNested = await resNested.json();
+    expect(resNested.status).toBe(422);
+    expect(bodyNested.error.message).toContain("invalid field");
+    expect(bodyNested.request_id).toBe("req_nested_422");
   });
 });

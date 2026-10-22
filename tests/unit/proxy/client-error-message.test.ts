@@ -109,6 +109,18 @@ describe("deriveClientSafeUpstreamErrorMessage", () => {
     ).toBeNull();
     expect(
       deriveClientSafeUpstreamErrorMessage({
+        candidateMessage: "Model gemini-2.5-pro does not support this parameter",
+        providerName: "Gemini",
+      })
+    ).toBe("Model gemini-2.5-pro does not support this parameter");
+    expect(
+      deriveClientSafeUpstreamErrorMessage({
+        candidateMessage: "Request rejected by claude-pro",
+        providerName: "claude-pro",
+      })
+    ).toBeNull();
+    expect(
+      deriveClientSafeUpstreamErrorMessage({
         candidateMessage: "Connection failed at relay.xyz.",
       })
     ).toBe("Connection failed");
