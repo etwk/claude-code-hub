@@ -119,6 +119,8 @@ function getGenericProxyErrorFallbackMessage(
       return "Upstream request failed. Please try again later.";
   }
 }
+const NON_ENGLISH_SCRIPT_RE =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Cyrillic}]/u;
 
 export function resolveFinalClientErrorMessage({
   error,
@@ -146,7 +148,7 @@ export function resolveFinalClientErrorMessage({
         candidateMessages: [error.upstreamError.body, error.message],
         providerName: error.upstreamError.providerName ?? null,
       });
-      if (upstreamCandidate) {
+      if (upstreamCandidate && !NON_ENGLISH_SCRIPT_RE.test(upstreamCandidate)) {
         return upstreamCandidate;
       }
     }

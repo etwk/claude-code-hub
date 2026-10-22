@@ -339,6 +339,31 @@ describe("ProxyErrorHandler.handle - upstream message passthrough", () => {
     expect(bodyLocal.error.message).toContain(
       "Invalid request: Upstream returned 'Invalid request'"
     );
+
+    // Non-English upstream text keeps the default rule's English override message
+    mocks.getErrorOverrideAsync.mockResolvedValue({
+      statusCode: 400,
+      isDefault: true,
+      response: {
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message: "Model name cannot be empty. Specify a model parameter in the request.",
+        },
+      },
+    });
+    const nonEnglishUpstreamErr = await ProxyError.fromUpstreamResponse(
+      new Response(JSON.stringify({ error: { message: "模型名称不能为空" } }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      }),
+      { id: 1, name: "Anthropic" }
+    );
+    const resNonEnglish = await ProxyErrorHandler.handle(createSession(), nonEnglishUpstreamErr);
+    const bodyNonEnglish = await resNonEnglish.json();
+    expect(bodyNonEnglish.error.message).toContain(
+      "Model name cannot be empty. Specify a model parameter in the request."
+    );
   });
 
   test("ProxyError.fromUpstreamResponse bounds rawBody to 4096 chars and extracts nested error.detail", async () => {
