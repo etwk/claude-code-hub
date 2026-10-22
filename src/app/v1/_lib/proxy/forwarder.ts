@@ -8080,7 +8080,11 @@ export class ProxyForwarder {
           }
           if (coordinator.activeAttempts.length === 0 && noMoreCandidates) {
             await settleFailure(
-              ProxyForwarder.resolveHedgeTerminalError(lastError, lastErrorCategory, launched.size)
+              ProxyForwarder.resolveHedgeTerminalError(
+                lastError,
+                lastErrorCategory,
+                dispatchedProviders.size
+              )
             );
           }
         })
@@ -8358,7 +8362,11 @@ export class ProxyForwarder {
           coordinator.acceptsEpoch(launchEpoch.requestEpoch, launchEpoch.roundEpoch)
         ) {
           await settleFailure(
-            ProxyForwarder.resolveHedgeTerminalError(lastError, lastErrorCategory, launched.size)
+            ProxyForwarder.resolveHedgeTerminalError(
+              lastError,
+              lastErrorCategory,
+              dispatchedProviders.size
+            )
           );
           return;
         }
