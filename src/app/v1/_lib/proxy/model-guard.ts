@@ -34,7 +34,7 @@ export class ProxyModelGuard {
     }
 
     // Restrictions exist - now model is required
-    const requestedModel = session.request.model;
+    const requestedModel = session.getOriginalModel();
 
     // Missing or null model when restrictions exist
     if (!requestedModel || requestedModel.trim() === "") {

@@ -11,7 +11,7 @@ import {
   buildFakeStreamingNonStreamResponse,
   buildFakeStreamingResponse,
 } from "./runner";
-import { cloneRequestForInternalNonStreamAttempt, detectClientStreamIntent } from "./stream-intent";
+import { detectClientStreamIntent } from "./stream-intent";
 
 const HEARTBEAT_INTERVAL_MS = 5000;
 // The underlying ProxyForwarder runs its own multi-provider loop with fake-200
@@ -75,7 +75,7 @@ export async function tryFakeStreamingPath(
   // Convert the session request to a non-stream upstream attempt before the
   // forwarder runs. We never let upstream open a streaming response because
   // we need to fully buffer + validate before emitting anything.
-  applyNonStreamMutation(session);
+  session.requireNonStreamUpstream();
 
   const performAttempt = buildAttemptPerformer(session);
   if (session.clientAbortSignal === null) {
@@ -115,32 +115,6 @@ export async function tryFakeStreamingPath(
     abortSignal,
     maxAttempts: MAX_ATTEMPTS,
   });
-}
-
-function applyNonStreamMutation(session: ProxySession): void {
-  const cloned = cloneRequestForInternalNonStreamAttempt({
-    format: session.originalFormat,
-    pathname: session.requestUrl.pathname,
-    search: session.requestUrl.search,
-    body: session.request.message,
-  });
-  if (cloned.body) {
-    // Mutate in place so downstream forwarder uses the non-stream body.
-    for (const key of Object.keys(session.request.message)) {
-      delete (session.request.message as Record<string, unknown>)[key];
-    }
-    Object.assign(session.request.message, cloned.body);
-  }
-
-  if (
-    cloned.pathname !== session.requestUrl.pathname ||
-    cloned.search !== session.requestUrl.search
-  ) {
-    const next = new URL(session.requestUrl.toString());
-    next.pathname = cloned.pathname;
-    next.search = cloned.search;
-    session.requestUrl = next;
-  }
 }
 
 function buildAttemptPerformer(session: ProxySession): AttemptPerformer {

@@ -88,6 +88,7 @@ import { markResponsesWsUnsupported } from "../responses-ws/unsupported-cache";
 import { tryResponsesWebsocketUpstream } from "../responses-ws/upstream-adapter";
 import { buildProxyUrl } from "../url";
 import { recordAffinityWinner, tombstoneAffinityOnFailure } from "./affinity/affinity-recorder";
+import { serializeAudioMultipartBody } from "./audio-compat";
 import { rectifyBillingHeader } from "./billing-header-rectifier";
 import { BufferedByteChunks } from "./buffered-byte-chunks";
 import { bindClientAbortListener } from "./client-abort-listener";
@@ -143,6 +144,7 @@ import {
   syncOpenAIImageMultipartFromLogicalBody,
   validateOpenAIImageRequest,
 } from "./openai-image-compat";
+import { ProxyProviderRequestFilter } from "./provider-request-filter";
 import { ProxyProviderResolver } from "./provider-selector";
 import { abortReplayOwnership, releaseReplayOwnership } from "./replay/replay-spool";
 import { isJsonResponseContentType, isMalformedJsonResponseBody } from "./response-content-type";
@@ -1503,6 +1505,7 @@ async function tryApplyReactiveRectifier(params: {
         trigger,
       };
     }
+    requestSession.registerProviderRetryRectifier(provider.id, descriptor.rectify);
 
     descriptor.markRetried(params.retryState);
     return {
@@ -3345,6 +3348,11 @@ export class ProxyForwarder {
     }
     const retainForwardedBody = session.shouldPersistSessionDebugArtifacts() || isLangfuseEnabled();
 
+    session.beginProviderAttempt();
+    await ProxyProviderRequestFilter.ensure(session);
+    session.applyProviderRetryRectifiers(provider.id);
+    session.enforceUpstreamRequestMode();
+
     const resolvedCacheTtl = resolveCacheTtlPreference(
       session.authState?.key?.cacheTtlPreference,
       provider.cacheTtlPreference
@@ -3358,14 +3366,17 @@ export class ProxyForwarder {
       session.setContext1mApplied(true);
     }
 
-    // Apply model redirect (if configured) - skip for raw passthrough endpoints
-    if (!ProxyForwarder.getEndpointPolicy(session).bypassForwarderPreprocessing) {
-      const wasRedirected = ModelRedirector.apply(session, provider);
-      if (wasRedirected) {
-        logger.debug("ProxyForwarder: Model redirected", {
-          providerId: provider.id,
-        });
-      }
+    // Alias routing applies to raw endpoints too; payload preprocessing remains policy-gated.
+    const originalRequestBuffer = session.request.buffer;
+    const wasRedirected = ModelRedirector.apply(
+      session,
+      provider,
+      session.request.model ?? undefined
+    );
+    if (wasRedirected) {
+      logger.debug("ProxyForwarder: Model redirected", {
+        providerId: provider.id,
+      });
     }
 
     let processedHeaders: Headers;
@@ -3419,8 +3430,6 @@ export class ProxyForwarder {
             ? GEMINI_PROTOCOL.OFFICIAL_ENDPOINT
             : GEMINI_PROTOCOL.CLI_ENDPOINT);
 
-        proxyUrl = buildProxyUrl(effectiveBaseUrl, session.requestUrl);
-
         // 4. Headers 处理：默认透传 session.headers（含请求过滤器修改），但移除代理认证头并覆盖上游鉴权
         // 说明：之前 Gemini 分支使用 new Headers() 重建 headers，会导致 user-agent 丢失且过滤器不生效
         processedHeaders = ProxyForwarder.buildGeminiHeaders(
@@ -3439,6 +3448,9 @@ export class ProxyForwarder {
           await requestFilterEngine.applyFinal(session, bodyForFinal, processedHeaders);
           bodyToSerialize = bodyForFinal;
         }
+        session.enforceUpstreamRequestMode(bodyToSerialize);
+        session.synchronizeRequestModel(bodyToSerialize);
+        proxyUrl = buildProxyUrl(effectiveBaseUrl, session.requestUrl);
 
         externalAbortSignal?.throwIfAborted();
         session.recordNativeThinkingForwarded(
@@ -3717,6 +3729,8 @@ export class ProxyForwarder {
             const { requestFilterEngine } = await import("@/lib/request-filter-engine");
             await requestFilterEngine.applyFinal(session, logicalBody, processedHeaders);
           }
+          session.enforceUpstreamRequestMode(logicalBody);
+          session.synchronizeRequestModel(logicalBody);
 
           syncOpenAIImageMultipartFromLogicalBody(imageRequestMetadata, logicalBody);
 
@@ -3764,10 +3778,11 @@ export class ProxyForwarder {
           // 将 metadata.user_id 注入放在私有参数过滤之后，避免受过滤逻辑影响。
           let messageToSend: Record<string, unknown> = filteredMessage;
           const systemOneMultipart = session.request.systemOneMultipart;
-          if (systemOneMultipart) {
-            if (!session.request.buffer)
-              throw new Error("Missing System One multipart request buffer");
-            processedHeaders.set("content-type", systemOneMultipart.contentType);
+          const audioMultipart = session.request.audioMultipart;
+          const multipartMetadata = systemOneMultipart ?? audioMultipart;
+          if (multipartMetadata) {
+            if (!session.request.buffer) throw new Error("Missing multipart request buffer");
+            processedHeaders.set("content-type", multipartMetadata.contentType);
           }
           if (provider.providerType === "claude" || provider.providerType === "claude-auth") {
             const settings = await getCachedSystemSettings();
@@ -3790,6 +3805,8 @@ export class ProxyForwarder {
             const { requestFilterEngine } = await import("@/lib/request-filter-engine");
             await requestFilterEngine.applyFinal(session, messageToSend, processedHeaders);
           }
+          session.enforceUpstreamRequestMode(messageToSend);
+          session.synchronizeRequestModel(messageToSend);
 
           if (requestPath === "/v1/images/generations") {
             sanitizeGenerationsRequestForProvider(messageToSend, provider);
@@ -3815,15 +3832,26 @@ export class ProxyForwarder {
             );
           }
           const bodyString = JSON.stringify(messageToSend);
-          requestBody = systemOneMultipart
-            ? serializeSystemOneMultipartBody(
-                session.request.buffer!,
-                systemOneMultipart,
-                bodyString
-              )
-            : bodyString;
+          if (audioMultipart) {
+            requestBody = serializeAudioMultipartBody(
+              session.request.buffer!,
+              audioMultipart,
+              messageToSend
+            );
+          } else if (systemOneMultipart) {
+            requestBody = serializeSystemOneMultipartBody(
+              session.request.buffer!,
+              systemOneMultipart,
+              bodyString
+            );
+          } else {
+            requestBody = bodyString;
+          }
           session.forwardedRequestBody = retainForwardedBody ? bodyString : null;
-          isStreaming = !isSystemOneEndpointPath(requestPath) && messageToSend.stream === true;
+          isStreaming =
+            !isSystemOneEndpointPath(requestPath) &&
+            (messageToSend.stream === true ||
+              (audioMultipart != null && messageToSend.stream === "true"));
           if (isAnthropicProvider) void persistSpecialSettings(session);
 
           if (process.env.NODE_ENV === "development") {
@@ -3854,7 +3882,8 @@ export class ProxyForwarder {
 
     if (
       requestBody !== undefined &&
-      !ProxyForwarder.getEndpointPolicy(session).bypassForwarderPreprocessing &&
+      (!ProxyForwarder.getEndpointPolicy(session).bypassForwarderPreprocessing ||
+        session.request.buffer !== originalRequestBuffer) &&
       processedHeaders.has("content-encoding")
     ) {
       const previousContentEncoding = processedHeaders.get("content-encoding");
@@ -8945,7 +8974,6 @@ export class ProxyForwarder {
       providerChain: ProviderChainItem[];
       specialSettings: unknown[];
       originalModelName: string | null;
-      originalUrlPathname: string | null;
       currentModelRedirect: {
         providerId: number;
         redirect: NonNullable<ProviderChainItem["modelRedirect"]>;
@@ -8959,7 +8987,6 @@ export class ProxyForwarder {
       providerChain: ProviderChainItem[];
       specialSettings: unknown[];
       originalModelName: string | null;
-      originalUrlPathname: string | null;
       currentModelRedirect: {
         providerId: number;
         redirect: NonNullable<ProviderChainItem["modelRedirect"]>;
@@ -8984,7 +9011,6 @@ export class ProxyForwarder {
     shadowState.providerChain = [...sourceState.providerChain];
     shadowState.specialSettings = [...sourceState.specialSettings];
     shadowState.originalModelName = sourceState.originalModelName;
-    shadowState.originalUrlPathname = sourceState.originalUrlPathname;
     shadowState.currentModelRedirect = sourceState.currentModelRedirect
       ? {
           providerId: sourceState.currentModelRedirect.providerId,
@@ -9010,6 +9036,7 @@ export class ProxyForwarder {
     target.request.note = source.request.note;
     target.request.model = source.request.model;
     target.request.systemOneMultipart = source.request.systemOneMultipart;
+    target.request.audioMultipart = source.request.audioMultipart;
     target.request.imageRequestMetadata = cloneOpenAIImageRequestMetadata(
       source.request.imageRequestMetadata
     );
@@ -9022,7 +9049,10 @@ export class ProxyForwarder {
       providerChain: ProviderChainItem[];
       specialSettings: SpecialSetting[];
       originalModelName: string | null;
-      originalUrlPathname: string | null;
+      originalModelCaptured: boolean;
+      routingBaseline: unknown;
+      providerRetryRectifiers: unknown;
+      routingModelName: string | null | undefined;
       currentModelRedirect: {
         providerId: number;
         redirect: NonNullable<ProviderChainItem["modelRedirect"]>;
@@ -9032,7 +9062,10 @@ export class ProxyForwarder {
       providerChain: ProviderChainItem[];
       specialSettings: SpecialSetting[];
       originalModelName: string | null;
-      originalUrlPathname: string | null;
+      originalModelCaptured: boolean;
+      routingBaseline: unknown;
+      providerRetryRectifiers: unknown;
+      routingModelName: string | null | undefined;
       currentModelRedirect: {
         providerId: number;
         redirect: NonNullable<ProviderChainItem["modelRedirect"]>;
@@ -9065,7 +9098,10 @@ export class ProxyForwarder {
       sourceState.specialSettings,
     ]);
     targetState.originalModelName = sourceState.originalModelName;
-    targetState.originalUrlPathname = sourceState.originalUrlPathname;
+    targetState.originalModelCaptured = sourceState.originalModelCaptured;
+    targetState.routingBaseline = sourceState.routingBaseline;
+    targetState.providerRetryRectifiers = sourceState.providerRetryRectifiers;
+    targetState.routingModelName = sourceState.routingModelName;
     targetState.currentModelRedirect = sourceState.currentModelRedirect
       ? {
           providerId: sourceState.currentModelRedirect.providerId,

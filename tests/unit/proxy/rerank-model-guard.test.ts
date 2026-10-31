@@ -10,6 +10,7 @@ function createSession(model: unknown, allowedModels: string[] = [], pathname = 
   return {
     authState: { user: { allowedModels } },
     requestUrl: new URL(pathname, "https://gateway.example.com"),
+    getOriginalModel: () => (typeof model === "string" ? model : null),
     request: {
       model: typeof model === "string" ? model : null,
       message: { model },

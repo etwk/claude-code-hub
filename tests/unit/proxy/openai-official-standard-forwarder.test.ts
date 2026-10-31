@@ -20,6 +20,7 @@ vi.mock("@/lib/logger", () => ({
 
 vi.mock("@/lib/request-filter-engine", () => ({
   requestFilterEngine: {
+    applyForProvider: vi.fn(async () => {}),
     applyFinal: vi.fn(async () => {}),
   },
 }));
@@ -77,7 +78,6 @@ function createSession(
     originalFormat: providerType === "codex" ? "response" : "openai",
     providerType: null,
     originalModelName: null,
-    originalUrlPathname: null,
     providerChain: [],
     cacheTtlResolved: null,
     context1mApplied: false,

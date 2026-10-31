@@ -76,15 +76,6 @@ vi.mock("@/app/v1/_lib/proxy/request-filter", () => ({
   },
 }));
 
-vi.mock("@/app/v1/_lib/proxy/provider-request-filter", () => ({
-  ProxyProviderRequestFilter: {
-    ensure: async () => {
-      callOrder.push("providerRequestFilter");
-      return null;
-    },
-  },
-}));
-
 vi.mock("@/app/v1/_lib/proxy/session-guard", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/app/v1/_lib/proxy/session-guard")>();
   return {
@@ -228,7 +219,6 @@ function createProxySession(pathname: string) {
     originalFormat: "claude",
     providerType: null,
     originalModelName: null,
-    originalUrlPathname: null,
     providerChain: [],
     cacheTtlResolved: null,
     context1mApplied: false,
@@ -330,7 +320,6 @@ describe("non-chat endpoint session context", () => {
       expect(callOrder).not.toContain("warmup");
       expect(callOrder).not.toContain("requestFilter");
       expect(callOrder).not.toContain("rateLimit");
-      expect(callOrder).not.toContain("providerRequestFilter");
       expect(session.sessionId).toBe("session_assigned");
       expect(session.requestSequence).toBe(2);
       expect(session.messageContext?.id).toBe(501);

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
-  cloneRequestForInternalNonStreamAttempt,
+  applyNonStreamRequestMode,
   detectClientStreamIntent,
 } from "@/app/v1/_lib/proxy/fake-streaming/stream-intent";
 import type { ClientFormat } from "@/app/v1/_lib/proxy/format-mapper";
@@ -144,6 +144,13 @@ describe("detectClientStreamIntent", () => {
       }
     );
 
+    test.each([
+      "/v1beta/models/gemini%2D2.5%2Dflash:STREAMGENERATECONTENT/",
+      "/V1/projects/demo/locations/global/publishers/google/models/gemini-2.5-flash:StreamGenerateContent/",
+    ])("detects catalog-native action variants without body/query flags: %s", (pathname) => {
+      expect(detectClientStreamIntent(inputs({ format: "gemini", pathname, body: {} }))).toBe(true);
+    });
+
     test("gemini search supports object form", () => {
       expect(
         detectClientStreamIntent(
@@ -159,8 +166,8 @@ describe("detectClientStreamIntent", () => {
   });
 });
 
-describe("cloneRequestForInternalNonStreamAttempt", () => {
-  test("standard format clones body with stream: false without mutating original", () => {
+describe("applyNonStreamRequestMode", () => {
+  test("standard format enforces stream: false while preserving model and content", () => {
     const original = {
       format: "openai" as ClientFormat,
       pathname: "/v1/chat/completions",
@@ -168,14 +175,11 @@ describe("cloneRequestForInternalNonStreamAttempt", () => {
       body: { stream: true, model: "gpt-4o-mini", messages: [] } as Record<string, unknown>,
     };
 
-    const clone = cloneRequestForInternalNonStreamAttempt(original);
+    const clone = applyNonStreamRequestMode(original);
 
     expect(clone.pathname).toBe("/v1/chat/completions");
     expect(clone.search).toBe("");
     expect(clone.body).toEqual({ stream: false, model: "gpt-4o-mini", messages: [] });
-    // Original must not have been mutated
-    expect(original.body).toEqual({ stream: true, model: "gpt-4o-mini", messages: [] });
-    expect(clone.body).not.toBe(original.body);
   });
 
   test("standard format adds stream: false even when missing", () => {
@@ -186,7 +190,7 @@ describe("cloneRequestForInternalNonStreamAttempt", () => {
       body: { model: "claude-3-5", messages: [] } as Record<string, unknown>,
     };
 
-    const clone = cloneRequestForInternalNonStreamAttempt(original);
+    const clone = applyNonStreamRequestMode(original);
     expect(clone.body).toEqual({ model: "claude-3-5", messages: [], stream: false });
   });
 
@@ -198,15 +202,26 @@ describe("cloneRequestForInternalNonStreamAttempt", () => {
       body: { contents: [] } as Record<string, unknown>,
     };
 
-    const clone = cloneRequestForInternalNonStreamAttempt(original);
+    const clone = applyNonStreamRequestMode(original);
     expect(clone.pathname).toBe("/v1beta/models/gemini-3-pro-image-preview:generateContent");
     expect(clone.search.includes("alt=sse")).toBe(false);
     expect(clone.search.includes("key=abc")).toBe(true);
-    // Original is not mutated
-    expect(original.pathname).toBe(
-      "/v1beta/models/gemini-3-pro-image-preview:streamGenerateContent"
+  });
+
+  test.each([
+    "/v1beta/models/gemini%2D2.5%2Dflash:STREAMGENERATECONTENT/",
+    "/V1/projects/demo/locations/global/publishers/google/models/gemini-2.5-flash:StreamGenerateContent/",
+  ])("normalizes only the terminal native action while preserving its path: %s", (pathname) => {
+    const cloned = applyNonStreamRequestMode({
+      format: "gemini",
+      pathname,
+      search: "?alt=sse&clientName=test",
+      body: {},
+    });
+    expect(cloned.pathname).toBe(
+      `${pathname.slice(0, pathname.lastIndexOf(":"))}:generateContent/`
     );
-    expect(original.search).toBe("?alt=sse&key=abc");
+    expect(cloned.search).toBe("?clientName=test");
   });
 
   test("gemini drops alt=sse but keeps other query params", () => {
@@ -217,7 +232,7 @@ describe("cloneRequestForInternalNonStreamAttempt", () => {
       body: {} as Record<string, unknown>,
     };
 
-    const clone = cloneRequestForInternalNonStreamAttempt(original);
+    const clone = applyNonStreamRequestMode(original);
     expect(clone.pathname).toBe("/v1internal/models/gemini-3-pro-image-preview:generateContent");
     expect(clone.search).toBe("?clientName=cli");
   });
@@ -230,9 +245,8 @@ describe("cloneRequestForInternalNonStreamAttempt", () => {
       body: { stream: true, contents: [] } as Record<string, unknown>,
     };
 
-    const clone = cloneRequestForInternalNonStreamAttempt(original);
+    const clone = applyNonStreamRequestMode(original);
     expect(clone.body).toEqual({ stream: false, contents: [] });
-    expect(original.body).toEqual({ stream: true, contents: [] });
   });
 
   test("preserves null body for gemini without body", () => {
@@ -243,7 +257,7 @@ describe("cloneRequestForInternalNonStreamAttempt", () => {
       body: null as Record<string, unknown> | null,
     };
 
-    const clone = cloneRequestForInternalNonStreamAttempt(original);
+    const clone = applyNonStreamRequestMode(original);
     expect(clone.body).toBeNull();
     expect(clone.pathname).toBe("/v1beta/models/gemini-1.5-pro:generateContent");
     expect(clone.search).toBe("");
@@ -259,7 +273,7 @@ describe("cloneRequestForInternalNonStreamAttempt", () => {
     const intent = detectClientStreamIntent(original);
     expect(intent).toBe(true);
 
-    const clone = cloneRequestForInternalNonStreamAttempt(original);
+    const clone = applyNonStreamRequestMode(original);
     // Only `alt=sse` should be removed; `alt=json` and `key` are preserved.
     const params = new URLSearchParams(clone.search.replace(/^\?/, ""));
     expect(params.getAll("alt")).toEqual(["json"]);

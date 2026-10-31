@@ -203,7 +203,6 @@ function createSession(requestUrl: URL = new URL("https://example.com/v1/message
     originalFormat: "claude",
     providerType: null,
     originalModelName: null,
-    originalUrlPathname: null,
     providerChain: [],
     endpointPolicy: resolveEndpointPolicy(requestUrl.pathname),
     cacheTtlResolved: null,

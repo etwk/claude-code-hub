@@ -160,6 +160,7 @@ function makeSession(overrides: Record<string, unknown> = {}): any {
     getEndpointPolicy: () => ({ kind: "default" }),
     shouldReuseProvider: () => false,
     getOriginalModel: () => "claude-sonnet-4-5",
+    getRoutingModel: () => "claude-sonnet-4-5",
     getCurrentModel: () => null,
     setProvider(p: Provider) {
       session.provider = p;
