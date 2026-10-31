@@ -1,5 +1,6 @@
 import { Readable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
+import { ProxyForwarder } from "@/app/v1/_lib/proxy/forwarder";
 
 const undiciMocks = vi.hoisted(() => {
   return {
@@ -15,14 +16,12 @@ vi.mock("undici", () => undiciMocks);
 
 describe("ProxyForwarder - statusText", () => {
   it("标准状态码应写入对应的 statusText（例如 200 -> OK）", async () => {
-    vi.resetModules();
     undiciMocks.request.mockResolvedValue({
       statusCode: 200,
       headers: { "content-type": "text/plain" },
       body: Readable.from(["ok"]),
     });
 
-    const { ProxyForwarder } = await import("@/app/v1/_lib/proxy/forwarder");
     const fetchWithoutAutoDecode = (ProxyForwarder as any).fetchWithoutAutoDecode as (
       url: string,
       init: RequestInit,
@@ -42,14 +41,12 @@ describe("ProxyForwarder - statusText", () => {
   });
 
   it("未知/非标准状态码不应兜底为 OK（避免误导）", async () => {
-    vi.resetModules();
     undiciMocks.request.mockResolvedValue({
       statusCode: 499,
       headers: { "content-type": "text/plain" },
       body: Readable.from(["unknown"]),
     });
 
-    const { ProxyForwarder } = await import("@/app/v1/_lib/proxy/forwarder");
     const fetchWithoutAutoDecode = (ProxyForwarder as any).fetchWithoutAutoDecode as (
       url: string,
       init: RequestInit,

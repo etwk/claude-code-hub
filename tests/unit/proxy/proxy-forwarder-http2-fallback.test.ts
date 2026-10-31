@@ -136,7 +136,6 @@ function createSession(provider: Provider, content = "hello"): ProxySession {
     originalFormat: "response",
     providerType: provider.providerType,
     originalModelName: null,
-    originalUrlPathname: null,
     providerChain: [],
     cacheTtlResolved: null,
     context1mApplied: false,

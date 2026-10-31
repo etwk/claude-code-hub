@@ -41,6 +41,7 @@ vi.mock("@/lib/logger", () => ({
 type SessionInput = {
   readonly stream?: boolean;
   readonly url?: string;
+  readonly model?: string;
 };
 
 async function createSession(input: SessionInput = {}): Promise<ProxySession> {
@@ -48,7 +49,7 @@ async function createSession(input: SessionInput = {}): Promise<ProxySession> {
     method: "POST",
     headers: { "content-type": "application/json", "user-agent": "vitest" },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
+      model: input.model ?? "claude-sonnet-4-20250514",
       messages: [{ role: "user", content: "hello" }],
       stream: input.stream ?? false,
     }),
@@ -166,6 +167,7 @@ describe("ProxyErrorHandler.handle Langfuse traces", () => {
   test("detects a Gemini SSE URL as streaming on an early error", async () => {
     const session = await createSession({
       url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:streamGenerateContent?alt=sse",
+      model: "gemini-pro",
     });
 
     await ProxyErrorHandler.handle(session, new Error("fetch failed"));

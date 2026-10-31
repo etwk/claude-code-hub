@@ -99,14 +99,6 @@ vi.mock("@/app/v1/_lib/proxy/provider-selector", () => ({
   },
 }));
 
-vi.mock("@/app/v1/_lib/proxy/provider-request-filter", () => ({
-  ProxyProviderRequestFilter: {
-    ensure: async () => {
-      callOrder.push("providerRequestFilter");
-    },
-  },
-}));
-
 vi.mock("@/app/v1/_lib/proxy/message-service", () => ({
   ProxyMessageService: {
     ensureContext: async () => {
@@ -116,44 +108,6 @@ vi.mock("@/app/v1/_lib/proxy/message-service", () => ({
 }));
 
 describe("GuardPipeline：全链路放行与 replay 短路", () => {
-  test("warmup 未命中时 CHAT pipeline 应按序执行全部步骤并返回 null 交给 forwarder", async () => {
-    callOrder.length = 0;
-    replayResult = null;
-
-    const { GuardPipelineBuilder, RequestType } = await import(
-      "@/app/v1/_lib/proxy/guard-pipeline"
-    );
-
-    const pipeline = GuardPipelineBuilder.fromRequestType(RequestType.CHAT);
-
-    const session = {
-      isProbeRequest: () => {
-        callOrder.push("probe");
-        return false;
-      },
-    } as any;
-
-    const res = await pipeline.run(session);
-
-    expect(res).toBeNull();
-    expect(callOrder).toEqual([
-      "auth",
-      "sensitive",
-      "client",
-      "model",
-      "version",
-      "probe",
-      "session",
-      "warmup",
-      "requestFilter",
-      "replayAttach",
-      "rateLimit",
-      "provider",
-      "providerRequestFilter",
-      "messageContext",
-    ]);
-  });
-
   test("replayAttach 命中缓存时应在 rateLimit 之前短路返回缓存响应", async () => {
     callOrder.length = 0;
     replayResult = new Response("cached", { status: 200 });

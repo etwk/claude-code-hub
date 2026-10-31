@@ -3,6 +3,8 @@ import type * as ConfigModule from "@/lib/config";
 import type { SpecialSetting, ThinkingConfigValue } from "@/types/special-settings";
 
 const mocks = vi.hoisted(() => ({
+  applyGlobal: vi.fn(async (_session: ProxySession) => {}),
+  applyForProvider: vi.fn(async (_session: ProxySession) => {}),
   applyFinal: vi.fn(
     async (_session: unknown, _body: Record<string, unknown>, _headers: Headers) => {}
   ),
@@ -28,7 +30,11 @@ vi.mock("@/lib/proxy-agent", () => ({
   getGlobalAgentPool: vi.fn(),
 }));
 vi.mock("@/lib/request-filter-engine", () => ({
-  requestFilterEngine: { applyFinal: mocks.applyFinal },
+  requestFilterEngine: {
+    applyGlobal: mocks.applyGlobal,
+    applyForProvider: mocks.applyForProvider,
+    applyFinal: mocks.applyFinal,
+  },
 }));
 vi.mock("@/repository/message", () => ({
   updateMessageRequestDetails: mocks.updateMessageRequestDetails,
@@ -79,6 +85,7 @@ vi.mock("@/app/v1/_lib/gemini/auth", () => ({
 
 import { tryFakeStreamingPath } from "@/app/v1/_lib/proxy/fake-streaming/proxy-integration";
 import { ProxyForwarder } from "@/app/v1/_lib/proxy/forwarder";
+import { ProxyRequestFilter } from "@/app/v1/_lib/proxy/request-filter";
 import { ProxySession } from "@/app/v1/_lib/proxy/session";
 import { extractThinkingEffortInfo } from "@/lib/utils/thinking-effort";
 import type { Provider } from "@/types/provider";
@@ -193,6 +200,10 @@ function release(session: ProxySession): void {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.applyGlobal.mockReset();
+  mocks.applyGlobal.mockResolvedValue(undefined);
+  mocks.applyForProvider.mockReset();
+  mocks.applyForProvider.mockResolvedValue(undefined);
   mocks.applyFinal.mockReset();
   mocks.applyFinal.mockResolvedValue(undefined);
   mocks.updateMessageRequestDetails.mockReset();
@@ -430,6 +441,101 @@ describe("ProxyForwarder final native thinking observations", () => {
       expect.objectContaining({ type: "thinking_budget_rectifier", hit: true })
     );
   });
+
+  test.each([
+    { providerType: "claude", phase: "guard" },
+    { providerType: "claude", phase: "final" },
+    { providerType: "claude", phase: "both" },
+    { providerType: "gemini", phase: "guard" },
+    { providerType: "gemini", phase: "final" },
+    { providerType: "gemini", phase: "both" },
+  ] as const)(
+    "$providerType keeps internal non-stream forwarding against $phase filters and later attempts",
+    async ({ providerType, phase }) => {
+      const provider = createProvider(providerType);
+      const session = createSession(
+        providerType === "gemini"
+          ? { stream: true, contents: [{ role: "user", parts: [{ text: "hi" }] }] }
+          : { model: "native-test", stream: true, messages: [{ role: "user", content: "hi" }] },
+        provider
+      );
+      if (providerType === "gemini") {
+        session.requestUrl = new URL(
+          "https://proxy.example.com/v1beta/models/gemini-test:streamGenerateContent?alt=sse&clientName=test"
+        );
+      }
+      mocks.applyGlobal.mockImplementationOnce(async (value) => {
+        value.request.message.model = "routing-test";
+      });
+      if (phase !== "final") {
+        mocks.applyForProvider.mockImplementation(async (value) => {
+          value.request.message.stream = true;
+        });
+      }
+      if (phase !== "guard") {
+        mocks.applyFinal.mockImplementation(async (_value, body) => {
+          body.stream = true;
+        });
+      }
+
+      await ProxyRequestFilter.ensure(session);
+      expect(session.getOriginalModel()).toBe("native-test");
+      expect(session.getRoutingModel()).toBe("routing-test");
+      expect(session.request.message.stream).toBe(true);
+
+      const transport = vi.spyOn(internals, "fetchWithoutAutoDecode");
+      transport.mockImplementation(async (url, init) => {
+        const outgoing = JSON.parse(String(init.body));
+        expect(outgoing.stream).toBe(false);
+        expect(outgoing.model).toBe("routing-test");
+        expect(outgoing.providerOnly).toBeUndefined();
+        expect(new Headers(init.headers).has("x-provider-only")).toBe(false);
+        if (providerType === "gemini") {
+          const target = new URL(url);
+          expect(target.pathname).toBe("/v1beta/models/routing-test:generateContent");
+          expect(target.searchParams.has("alt")).toBe(false);
+          expect(target.searchParams.get("clientName")).toBe("test");
+          return new Response(
+            JSON.stringify({
+              candidates: [
+                {
+                  content: { role: "model", parts: [{ text: "ok" }] },
+                  finishReason: "STOP",
+                },
+              ],
+            }),
+            { headers: { "content-type": "application/json" } }
+          );
+        }
+        return okResponse();
+      });
+
+      const response = await tryFakeStreamingPath(session, {
+        fakeStreamingWhitelist: [{ model: "routing-test", groupTags: [] }],
+      } as unknown as SystemSettings);
+      expect(response).not.toBeNull();
+      expect(response?.headers.get("content-type")).toContain("text/event-stream");
+      expect(await response?.text()).toContain("ok");
+
+      // Exercise the same real preparation boundary used by retry/fallback, without re-running
+      // fake-streaming conversion: provider-local mutations must not enter the saved payload.
+      session.request.message.stream = true;
+      session.request.message.model = "provider-only";
+      session.request.message.providerOnly = "must not survive";
+      session.headers.set("x-provider-only", "must not survive");
+      if (providerType === "gemini") {
+        session.requestUrl.pathname = "/v1beta/models/provider-only:streamGenerateContent";
+      }
+      const nextProvider = createProvider(providerType, 2);
+      session.setProvider(nextProvider);
+      const retried = await internals.doForward(session, nextProvider, nextProvider.url);
+      expect(await retried.text()).toContain("ok");
+      release(session);
+      expect(transport).toHaveBeenCalledTimes(2);
+      expect(session.getRoutingModel()).toBe("routing-test");
+      expect(session.getOriginalModel()).toBe("native-test");
+    }
+  );
 
   test("fake streaming persists the final native body through the same forwarder", async () => {
     const provider = createProvider();

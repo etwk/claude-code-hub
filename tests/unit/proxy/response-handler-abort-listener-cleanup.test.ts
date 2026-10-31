@@ -194,7 +194,6 @@ function makeSession(clientAbortSignal: AbortSignal | null, stream: boolean): Pr
     originalFormat: "openai",
     providerType: "openai",
     originalModelName: "gpt-5.5",
-    originalUrlPathname: "/v1/chat/completions",
     providerChain: [],
     cacheTtlResolved: null,
     context1mApplied: false,
@@ -232,7 +231,6 @@ function makeCodexResponsesSession(stream = true): ProxySession {
   session.provider = makeProvider({ providerType: "codex" });
   session.providerType = "codex";
   session.originalFormat = "response";
-  session.originalUrlPathname = "/v1/responses";
   session.requestUrl = new URL("http://localhost/v1/responses");
   session.endpointPolicy = endpointPolicy;
   session.getEndpointPolicy = () => endpointPolicy;

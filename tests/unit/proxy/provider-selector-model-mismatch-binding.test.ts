@@ -108,6 +108,7 @@ describe("findReusable - model mismatch clears stale binding", () => {
       sessionId: "sess_disable_reuse",
       shouldReuseProvider: () => true,
       getOriginalModel: () => "claude-haiku-4-5-20251001",
+      getRoutingModel: () => "claude-haiku-4-5-20251001",
       authState: null,
       getCurrentModel: () => null,
     } as any;
@@ -133,6 +134,7 @@ describe("findReusable - model mismatch clears stale binding", () => {
       sessionId: "4c25cf92",
       shouldReuseProvider: () => true,
       getOriginalModel: () => "claude-opus-4-6",
+      getRoutingModel: () => "claude-opus-4-6",
       authState: null,
       getCurrentModel: () => null,
     } as any;
@@ -166,6 +168,7 @@ describe("findReusable - model mismatch clears stale binding", () => {
       sessionId: snapshot.sessionId,
       shouldReuseProvider: () => true,
       getOriginalModel: () => "claude-opus-4-6",
+      getRoutingModel: () => "claude-opus-4-6",
       authState: { key: { id: snapshot.keyId } },
       getCurrentModel: () => null,
       setSessionBindingSnapshot,
@@ -194,6 +197,7 @@ describe("findReusable - model mismatch clears stale binding", () => {
       shouldReuseProvider: () => true,
       originalFormat: "response",
       getOriginalModel: () => null,
+      getRoutingModel: () => null,
       authState: null,
       getCurrentModel: () => null,
     } as any;
@@ -226,6 +230,7 @@ describe("findReusable - model mismatch clears stale binding", () => {
       sessionId: "sess_ok",
       shouldReuseProvider: () => true,
       getOriginalModel: () => "claude-opus-4-6",
+      getRoutingModel: () => "claude-opus-4-6",
       authState: null,
       getCurrentModel: () => null,
     } as any;
@@ -246,6 +251,7 @@ describe("findReusable - model mismatch clears stale binding", () => {
       sessionId: "sess_short",
       shouldReuseProvider: () => false,
       getOriginalModel: () => "claude-opus-4-6",
+      getRoutingModel: () => "claude-opus-4-6",
       authState: null,
     } as any;
 
@@ -270,6 +276,7 @@ describe("findReusable - model mismatch clears stale binding", () => {
       sessionId: "sess_variant",
       shouldReuseProvider: () => true,
       getOriginalModel: () => "claude-sonnet-4-5-20250929",
+      getRoutingModel: () => "claude-sonnet-4-5-20250929",
       authState: null,
       getCurrentModel: () => null,
     } as any;

@@ -125,7 +125,7 @@ async function resolveGroupCostMultiplierForProvider(session: ProxySession): Pro
  *
  * 核心逻辑（统一所有供应商类型）：
  * 1. 未设置 allowedModels（null 或空数组）：接受任意模型（格式兼容性由 checkFormatProviderTypeCompatibility 保证）
- * 2. 设置了 allowedModels：仅当原始请求模型命中 allowedModels 时才支持
+ * 2. 设置了 allowedModels：仅当全局过滤后的调度模型命中 allowedModels 时才支持
  * 3. modelRedirects 仅在供应商已被选中后用于改写上游模型，不参与调度放行
  *
  * 注意：allowedModels 是声明性列表（用户可填写任意字符串），用于调度器匹配，不是真实模型校验。
@@ -141,7 +141,7 @@ function providerSupportsModel(provider: Provider, requestedModel: string): bool
     return true;
   }
 
-  // 2. 设置了 allowedModels：只按原始请求模型做白名单匹配
+  // 2. 设置了 allowedModels：按稳定的全局调度模型做白名单匹配
   return matchesAllowedModelRules(requestedModel, provider.allowedModels);
 }
 
@@ -237,7 +237,7 @@ export class ProxyProviderResolver {
             targetType: reusedProvider.providerType as NonNullable<
               ProviderChainItem["decisionContext"]
             >["targetType"],
-            requestedModel: session.getOriginalModel() || "",
+            requestedModel: session.getRoutingModel() || "",
             groupFilterApplied: false,
             beforeHealthCheck: 0,
             afterHealthCheck: 0,
@@ -364,7 +364,7 @@ export class ProxyProviderResolver {
                   targetType: session.provider.providerType as NonNullable<
                     ProviderChainItem["decisionContext"]
                   >["targetType"],
-                  requestedModel: session.getOriginalModel() || "",
+                  requestedModel: session.getRoutingModel() || "",
                   groupFilterApplied: false,
                   beforeHealthCheck: 0,
                   afterHealthCheck: 0,
@@ -433,7 +433,7 @@ export class ProxyProviderResolver {
               targetType: session.provider.providerType as NonNullable<
                 ProviderChainItem["decisionContext"]
               >["targetType"],
-              requestedModel: session.getOriginalModel() || "",
+              requestedModel: session.getRoutingModel() || "",
               groupFilterApplied: false,
               beforeHealthCheck: 0,
               afterHealthCheck: 0,
@@ -664,7 +664,7 @@ export class ProxyProviderResolver {
           targetType: provider.providerType as NonNullable<
             ProviderChainItem["decisionContext"]
           >["targetType"],
-          requestedModel: session.getOriginalModel() || "",
+          requestedModel: session.getRoutingModel() || "",
           groupFilterApplied: false,
           beforeHealthCheck: 0,
           afterHealthCheck: 0,
@@ -752,7 +752,7 @@ export class ProxyProviderResolver {
     ) {
       return null;
     }
-    const requestedModel = session.getOriginalModel();
+    const requestedModel = session.getRoutingModel();
     if (requestedModel && !providerSupportsModel(provider, requestedModel)) return null;
 
     const clientResult = isClientAllowedDetailed(
@@ -944,7 +944,7 @@ export class ProxyProviderResolver {
     }
 
     // 检查模型支持
-    const requestedModel = session.getOriginalModel();
+    const requestedModel = session.getRoutingModel();
     if (requestedModel && !providerSupportsModel(provider, requestedModel)) {
       logger.debug("ProviderSelector: Session provider does not support requested model", {
         sessionId: session.sessionId,
@@ -989,7 +989,7 @@ export class ProxyProviderResolver {
           targetType: provider.providerType as NonNullable<
             ProviderChainItem["decisionContext"]
           >["targetType"],
-          requestedModel: session.getOriginalModel() || "",
+          requestedModel: session.getRoutingModel() || "",
           groupFilterApplied: false,
           beforeHealthCheck: 0,
           afterHealthCheck: 0,
@@ -1113,7 +1113,7 @@ export class ProxyProviderResolver {
     // 使用 Session 快照保证故障迁移期间数据一致性
     // 如果没有 session，回退到 findAllProviders（内部已使用缓存）
     const allProviders = session ? await session.getProvidersSnapshot() : await findAllProviders();
-    const requestedModel = session?.getOriginalModel() || "";
+    const requestedModel = session?.getRoutingModel() || "";
 
     // === Step 1: 分组预过滤（静默，用户只能看到自己分组内的供应商）===
     const effectiveGroupPick = getEffectiveProviderGroup(session);

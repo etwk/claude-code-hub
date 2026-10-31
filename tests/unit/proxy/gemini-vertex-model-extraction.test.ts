@@ -1,6 +1,91 @@
-import { describe, expect, it } from "vitest";
-import { extractModelFromPath } from "@/app/v1/_lib/proxy/session";
+import type { Context } from "hono";
+import { describe, expect, it, vi } from "vitest";
+import { extractModelFromPath, ProxySession } from "@/app/v1/_lib/proxy/session";
 import { detectFormatByEndpoint } from "@/app/v1/_lib/proxy/format-mapper";
+import { ProxyModelGuard } from "@/app/v1/_lib/proxy/model-guard";
+
+vi.mock("@/repository/model-price", () => ({ findLatestPriceByModel: vi.fn() }));
+vi.mock("@/repository/system-config", () => ({ getSystemSettings: vi.fn() }));
+
+function nativeSession(path: string, message: Record<string, unknown> = {}) {
+  const request = new Request(`https://hub.test${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(message),
+  });
+  return ProxySession.fromContext({
+    req: {
+      method: request.method,
+      url: request.url,
+      raw: request,
+      header: (name?: string) =>
+        name === undefined
+          ? Object.fromEntries(request.headers)
+          : (request.headers.get(name) ?? undefined),
+    },
+  } as unknown as Context);
+}
+
+describe("native Gemini session path identity", () => {
+  it.each([
+    "/v1beta/models/gemini%2D2.5%2Dpro:generateContent",
+    "/v1beta/models/gemini-2.5-pro:generateContent/",
+    "/v1/publishers/google/models/gemini%2D2.5%2Dpro:generateContent/",
+    "/v1/projects/p/locations/l/publishers/google/models/gemini-2.5-pro:countTokens/",
+  ])("routes and authorizes the actual URL model instead of a fallback for %s", async (path) => {
+    const session = await nativeSession(path, { model: "models/gemini-2.5-pro", contents: [] });
+    expect(extractModelFromPath(path)).toBe("gemini-2.5-pro");
+    expect(session.request.model).toBe("gemini-2.5-pro");
+    expect(session.getOriginalModel()).toBe("gemini-2.5-pro");
+    expect(session.getRoutingModel()).toBe("gemini-2.5-pro");
+    const user = { allowedModels: ["gemini-2.5-flash"] };
+    session.authState = {
+      user,
+    } as unknown as NonNullable<ProxySession["authState"]>;
+    expect((await ProxyModelGuard.ensure(session))?.status).toBe(400);
+    user.allowedModels = ["gemini-2.5-pro"];
+    expect(await ProxyModelGuard.ensure(session)).toBeNull();
+    session.beginProviderAttempt();
+    expect(session.request.model).toBe("gemini-2.5-pro");
+    expect(session.requestUrl.pathname).toBe(path);
+  });
+
+  it("uses a path-only trailing-slash model rather than the default fallback model", async () => {
+    const session = await nativeSession("/v1beta/models/gemini-2.5-pro:generateContent/", {
+      contents: [],
+    });
+    expect(session.request.model).toBe("gemini-2.5-pro");
+    expect(session.getOriginalModel()).toBe("gemini-2.5-pro");
+    expect(session.request.message).not.toHaveProperty("model");
+  });
+
+  it.each(["gemini%GG", "gemini%2Fpro", "gemini%3Apro", "gemini%20pro"])(
+    "rejects malformed or non-segment URL IDs with 400 rather than fallback: %s",
+    async (model) => {
+      await expect(
+        nativeSession(`/v1beta/models/${model}:generateContent/`, { contents: [] })
+      ).rejects.toMatchObject({ statusCode: 400 });
+    }
+  );
+
+  it.each([
+    ["batchEmbedContents", { requests: [{ model: "models/gemini-2.5-flash" }] }],
+    ["countTokens", { generateContentRequest: { model: "models/gemini-2.5-flash" } }],
+  ] as const)("validates nested %s models even with a trailing slash", async (action, message) => {
+    await expect(
+      nativeSession(`/v1beta/models/gemini-2.5-pro:${action}/`, message)
+    ).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  it("keeps percent sequences literal on OpenAI model IDs", async () => {
+    const session = await nativeSession("/v1/chat/completions", {
+      model: "vendor/gemini%2Dpro",
+      messages: [],
+    });
+    expect(session.request.model).toBe("vendor/gemini%2Dpro");
+    expect(session.getOriginalModel()).toBe("vendor/gemini%2Dpro");
+  });
+});
 
 describe("extractModelFromPath - Vertex AI publishers path", () => {
   it("extracts model from /v1/publishers/google/models/{model}:generateContent", () => {
