@@ -74,6 +74,22 @@ async function createMultipartMetadata(parts: {
 }
 
 describe("openai-image-compat - generations constraints", () => {
+  it("accepts GPT image variant rendering options", async () => {
+    const result = await validateOpenAIImageRequest({
+      pathname: "/v1/images/generations",
+      body: {
+        model: "gpt-image-2.6-flare",
+        prompt: "otter",
+        output_format: "png",
+        quality: "low",
+        size: "1024x1024",
+        stream: true,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+  });
+
   it("rejects GPT models with response_format", async () => {
     const result = await validateOpenAIImageRequest({
       pathname: "/v1/images/generations",
@@ -281,7 +297,7 @@ describe("openai-image-compat - edits constraints", () => {
     const metadata = await createMultipartMetadata({
       pathname: "/v1/images/edits",
       fields: [
-        ["model", "gpt-image-1.5"],
+        ["model", "gpt-image-2.6-sunburst"],
         ["prompt", "edit this"],
         ["output_format", "png"],
         ["size", "1024x1024"],
