@@ -31,18 +31,6 @@ export interface OpenAIImageValidationResult {
   message?: string;
 }
 
-const GENERATION_GPT_MODELS = new Set([
-  "gpt-image-1",
-  "gpt-image-1-mini",
-  "gpt-image-1.5",
-  "chatgpt-image-latest",
-]);
-const EDIT_GPT_MODELS = new Set([
-  "gpt-image-1",
-  "gpt-image-1-mini",
-  "gpt-image-1.5",
-  "chatgpt-image-latest",
-]);
 const VARIATION_MODEL = "dall-e-2";
 
 const GPT_ONLY_GENERATION_PARAMS = new Set([
@@ -167,14 +155,15 @@ function success(): OpenAIImageValidationResult {
 }
 
 function isGptImageModel(model: string): boolean {
-  return GENERATION_GPT_MODELS.has(model) || EDIT_GPT_MODELS.has(model);
+  return model.startsWith("gpt-image-") || model === "chatgpt-image-latest";
 }
 
 function getKnownModelFamily(
   endpoint: OpenAIImageEndpoint,
   model: string | null
 ): OpenAIImageModelFamily | null {
-  if (!model) return null;
+  // gpt-image-2 keeps its explicit fail-open path until its capability matrix is documented.
+  if (!model || model === "gpt-image-2") return null;
   if (model === "dall-e-2") return "dall-e-2";
   if (model === "dall-e-3") return "dall-e-3";
   if (

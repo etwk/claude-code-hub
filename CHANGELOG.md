@@ -32,6 +32,9 @@
 
 ### 修复
 
+- 修复 GPT Image 新版本及 Flare / Sunburst 变体被误判为未知模型：统一按 `gpt-image-`
+  家族前缀识别，生成与编辑请求可使用标准 GPT 图片参数，保留现有参数校验与模型访问控制
+  （`gpt-image-2` 继续沿用既有能力透传例外，JSON / multipart 编辑请求不套用旧版 16 张图片上限）
 - 修复原生辅助端点跳过模型重定向：`/v1/messages/count_tokens`、`/v1/responses/compact`
   及 remote compaction v2 的 `/v1/responses` 同样解析供应商别名；仍跳过请求过滤器与生成参数覆写，
   未改写模型的请求保留原始字节与编码，改写时仅替换模型 token，避免工具 schema 大整数或小数精度丢失
