@@ -162,7 +162,8 @@ function getKnownModelFamily(
   endpoint: OpenAIImageEndpoint,
   model: string | null
 ): OpenAIImageModelFamily | null {
-  if (!model) return null;
+  // gpt-image-2 keeps its explicit fail-open path until its capability matrix is documented.
+  if (!model || model === "gpt-image-2") return null;
   if (model === "dall-e-2") return "dall-e-2";
   if (model === "dall-e-3") return "dall-e-3";
   if (

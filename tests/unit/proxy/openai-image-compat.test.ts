@@ -217,18 +217,31 @@ describe("openai-image-compat - edits constraints", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("rejects edit requests without images", async () => {
+  it("preserves the gpt-image-2 fail-open exception for JSON edit image counts", async () => {
     const result = await validateOpenAIImageRequest({
       pathname: "/v1/images/edits",
       body: {
-        model: "gpt-image-1.5",
+        model: "gpt-image-2",
         prompt: "edit this",
+        images: Array.from({ length: 17 }, (_, index) => ({ file_id: `file-${index}` })),
       },
     });
 
-    expect(result.ok).toBe(false);
-    expect(result.message).toContain("images");
+    expect(result.ok).toBe(true);
   });
+
+  it.each(["gpt-image-1.5", "gpt-image-2"])(
+    "rejects %s JSON edit requests without images",
+    async (model) => {
+      const result = await validateOpenAIImageRequest({
+        pathname: "/v1/images/edits",
+        body: { model, prompt: "edit this" },
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain("images");
+    }
+  );
 
   it("rejects masks that provide both file_id and image_url", async () => {
     const result = await validateOpenAIImageRequest({
@@ -279,24 +292,27 @@ describe("openai-image-compat - edits constraints", () => {
     }
   );
 
-  it("rejects multipart edits without input images", async () => {
-    const metadata = await createMultipartMetadata({
-      pathname: "/v1/images/edits",
-      fields: [
-        ["model", "gpt-image-1.5"],
-        ["prompt", "edit this"],
-      ],
-    });
+  it.each(["gpt-image-1.5", "gpt-image-2"])(
+    "rejects %s multipart edits without input images",
+    async (model) => {
+      const metadata = await createMultipartMetadata({
+        pathname: "/v1/images/edits",
+        fields: [
+          ["model", model],
+          ["prompt", "edit this"],
+        ],
+      });
 
-    const result = await validateOpenAIImageRequest({
-      pathname: "/v1/images/edits",
-      body: {},
-      imageRequestMetadata: metadata,
-    });
+      const result = await validateOpenAIImageRequest({
+        pathname: "/v1/images/edits",
+        body: {},
+        imageRequestMetadata: metadata,
+      });
 
-    expect(result.ok).toBe(false);
-    expect(result.message).toContain("image");
-  });
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain("image");
+    }
+  );
 
   it("rejects repeated multipart prompt fields", async () => {
     const metadata = await createMultipartMetadata({
@@ -343,6 +359,28 @@ describe("openai-image-compat - edits constraints", () => {
       expect(result.ok).toBe(true);
     }
   );
+
+  it("preserves the gpt-image-2 fail-open exception for multipart edit image counts", async () => {
+    const metadata = await createMultipartMetadata({
+      pathname: "/v1/images/edits",
+      fields: [
+        ["model", "gpt-image-2"],
+        ["prompt", "edit this"],
+      ],
+      files: Array.from({ length: 17 }, (_, index) => [
+        "image[]",
+        createPngFile(`source-${index}.png`, 32, 32),
+      ]),
+    });
+
+    const result = await validateOpenAIImageRequest({
+      pathname: "/v1/images/edits",
+      body: {},
+      imageRequestMetadata: metadata,
+    });
+
+    expect(result.ok).toBe(true);
+  });
 
   it("rejects multipart GPT image variants with more than 16 input images", async () => {
     const metadata = await createMultipartMetadata({
