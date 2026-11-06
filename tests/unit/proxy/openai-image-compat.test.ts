@@ -74,19 +74,47 @@ async function createMultipartMetadata(parts: {
 }
 
 describe("openai-image-compat - generations constraints", () => {
-  it("rejects GPT models with response_format", async () => {
+  it("accepts GPT image variant rendering options", async () => {
     const result = await validateOpenAIImageRequest({
       pathname: "/v1/images/generations",
       body: {
-        model: "gpt-image-1.5",
+        model: "gpt-image-2.6-flare",
         prompt: "otter",
-        response_format: "url",
+        output_format: "png",
+        quality: "low",
+        size: "1024x1024",
+        stream: true,
       },
     });
 
-    expect(result.ok).toBe(false);
-    expect(result.message).toContain("response_format");
+    expect(result.ok).toBe(true);
   });
+
+  it.each(["gpt-image", "vendor-gpt-image-2.6"])(
+    "does not grant GPT rendering options to %s",
+    async (model) => {
+      const result = await validateOpenAIImageRequest({
+        pathname: "/v1/images/generations",
+        body: { model, prompt: "otter", output_format: "png" },
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain("output_format");
+    }
+  );
+
+  it.each(["gpt-image-1.5", "gpt-image-2.6-flare"])(
+    "rejects %s generations with response_format",
+    async (model) => {
+      const result = await validateOpenAIImageRequest({
+        pathname: "/v1/images/generations",
+        body: { model, prompt: "otter", response_format: "url" },
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain("response_format");
+    }
+  );
 
   it("rejects transparent background with jpeg output", async () => {
     const result = await validateOpenAIImageRequest({
@@ -174,6 +202,21 @@ describe("openai-image-compat - generations constraints", () => {
 });
 
 describe("openai-image-compat - edits constraints", () => {
+  it("accepts JSON edits rendering options for a new GPT image version", async () => {
+    const result = await validateOpenAIImageRequest({
+      pathname: "/v1/images/edits",
+      body: {
+        model: "gpt-image-2.6",
+        prompt: "edit this",
+        images: [{ file_id: "file-1" }],
+        output_format: "webp",
+        quality: "high",
+      },
+    });
+
+    expect(result.ok).toBe(true);
+  });
+
   it("rejects edit requests without images", async () => {
     const result = await validateOpenAIImageRequest({
       pathname: "/v1/images/edits",
@@ -219,23 +262,22 @@ describe("openai-image-compat - edits constraints", () => {
     expect(result.message).toContain("dall-e-3");
   });
 
-  it("rejects GPT edits with more than 16 input images", async () => {
-    const images = Array.from({ length: 17 }, (_, index) => ({
-      image_url: `https://example.com/${index}.png`,
-    }));
+  it.each(["gpt-image-1.5", "gpt-image-2.6-sunburst"])(
+    "rejects %s JSON edits with more than 16 input images",
+    async (model) => {
+      const images = Array.from({ length: 17 }, (_, index) => ({
+        image_url: `https://example.com/${index}.png`,
+      }));
 
-    const result = await validateOpenAIImageRequest({
-      pathname: "/v1/images/edits",
-      body: {
-        model: "gpt-image-1.5",
-        prompt: "edit this",
-        images,
-      },
-    });
+      const result = await validateOpenAIImageRequest({
+        pathname: "/v1/images/edits",
+        body: { model, prompt: "edit this", images },
+      });
 
-    expect(result.ok).toBe(false);
-    expect(result.message).toContain("16");
-  });
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain("16");
+    }
+  );
 
   it("rejects multipart edits without input images", async () => {
     const metadata = await createMultipartMetadata({
@@ -277,17 +319,42 @@ describe("openai-image-compat - edits constraints", () => {
     expect(result.message).toContain('multipart field "prompt"');
   });
 
-  it("accepts valid multipart GPT edits requests", async () => {
+  it.each(["gpt-image-1.5", "gpt-image-2.6-sunburst"])(
+    "accepts valid multipart edits for %s",
+    async (model) => {
+      const metadata = await createMultipartMetadata({
+        pathname: "/v1/images/edits",
+        fields: [
+          ["model", model],
+          ["prompt", "edit this"],
+          ["output_format", "png"],
+          ["size", "1024x1024"],
+          ["stream", "true"],
+        ],
+        files: [["image[]", createPngFile("source.png", 32, 32)]],
+      });
+
+      const result = await validateOpenAIImageRequest({
+        pathname: "/v1/images/edits",
+        body: {},
+        imageRequestMetadata: metadata,
+      });
+
+      expect(result.ok).toBe(true);
+    }
+  );
+
+  it("rejects multipart GPT image variants with more than 16 input images", async () => {
     const metadata = await createMultipartMetadata({
       pathname: "/v1/images/edits",
       fields: [
-        ["model", "gpt-image-1.5"],
+        ["model", "gpt-image-2.6-sunburst"],
         ["prompt", "edit this"],
-        ["output_format", "png"],
-        ["size", "1024x1024"],
-        ["stream", "true"],
       ],
-      files: [["image[]", createPngFile("source.png", 32, 32)]],
+      files: Array.from({ length: 17 }, (_, index) => [
+        "image[]",
+        createPngFile(`source-${index}.png`, 32, 32),
+      ]),
     });
 
     const result = await validateOpenAIImageRequest({
@@ -296,7 +363,8 @@ describe("openai-image-compat - edits constraints", () => {
       imageRequestMetadata: metadata,
     });
 
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("16");
   });
 });
 
@@ -311,22 +379,25 @@ describe("openai-image-compat - variations constraints", () => {
     expect(result.message).toContain("multipart/form-data");
   });
 
-  it("rejects variation models other than dall-e-2", async () => {
-    const metadata = await createMultipartMetadata({
-      pathname: "/v1/images/variations",
-      fields: [["model", "gpt-image-1.5"]],
-      files: [["image", createPngFile("square.png", 32, 32)]],
-    });
+  it.each(["gpt-image-1.5", "gpt-image-2.6-flare"])(
+    "rejects %s on the dall-e-2-only variations endpoint",
+    async (model) => {
+      const metadata = await createMultipartMetadata({
+        pathname: "/v1/images/variations",
+        fields: [["model", model]],
+        files: [["image", createPngFile("square.png", 32, 32)]],
+      });
 
-    const result = await validateOpenAIImageRequest({
-      pathname: "/v1/images/variations",
-      body: {},
-      imageRequestMetadata: metadata,
-    });
+      const result = await validateOpenAIImageRequest({
+        pathname: "/v1/images/variations",
+        body: {},
+        imageRequestMetadata: metadata,
+      });
 
-    expect(result.ok).toBe(false);
-    expect(result.message).toContain("dall-e-2");
-  });
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain("dall-e-2");
+    }
+  );
 
   it("rejects non-PNG variation files", async () => {
     const metadata = await createMultipartMetadata({
