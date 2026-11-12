@@ -434,11 +434,7 @@ export async function runStreamContentGate(
               trailingResult = failure("decode_error", data);
               return false;
             }
-            if (
-              verdict === "terminal" &&
-              options.family === "openai-responses" &&
-              parser.lastFrame!.acceptTerminal
-            ) {
+            if (verdict === "terminal" && parser.lastFrame!.acceptTerminal) {
               trailingResult = commit(eventName, true);
               return false;
             }
@@ -505,7 +501,7 @@ export async function runStreamContentGate(
             return false;
           }
           if (verdict === "terminal") {
-            if (options.family === "openai-responses" && parser.lastFrame!.acceptTerminal) {
+            if (parser.lastFrame!.acceptTerminal) {
               frameResult = exceedsByteCap()
                 ? failure("prebuffer_overflow")
                 : commit(eventName, false);

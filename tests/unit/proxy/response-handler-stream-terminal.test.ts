@@ -1,5 +1,6 @@
+import { readFileSync } from "node:fs";
 import { Context } from "hono";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProxyResponseHandler } from "@/app/v1/_lib/proxy/response-handler";
 import {
   acquireDetachedStreamLease,
@@ -7,6 +8,7 @@ import {
 } from "@/app/v1/_lib/proxy/detached-stream-budget";
 import { ProxySession, type MessageContext } from "@/app/v1/_lib/proxy/session";
 import { setDeferredStreamingFinalization } from "@/app/v1/_lib/proxy/stream-finalization";
+import * as envConfig from "@/lib/config/env.schema";
 import type { Key } from "@/types/key";
 import type { Provider } from "@/types/provider";
 import type { User } from "@/types/user";
@@ -18,6 +20,11 @@ const mocks = vi.hoisted(() => ({
     vi.fn<
       (id: number, details: object, options?: { onCommitted?: () => void }) => Promise<boolean>
     >(),
+  cost: vi.fn(),
+  recordFailure: vi.fn(),
+  recordSuccess: vi.fn(),
+  billNonSuccessfulRequests: false,
+  findPrice: vi.fn(),
   tasks: Array.from<Promise<void>>([]),
   trackerEnd: vi.fn(),
   replayObserve: vi.fn(),
@@ -49,8 +56,22 @@ vi.mock("@/lib/async-task-manager", () => ({
     touch: vi.fn(() => true),
   },
 }));
+vi.mock("@/lib/circuit-breaker", () => ({
+  recordFailure: mocks.recordFailure,
+  recordSuccess: mocks.recordSuccess,
+}));
+vi.mock("@/repository/model-price", () => ({ findLatestPriceByModel: mocks.findPrice }));
+vi.mock("@/repository/system-config", () => ({
+  getSystemSettings: vi.fn(async () => ({
+    billingModelSource: "redirected",
+    codexPriorityBillingSource: "requested",
+  })),
+}));
 vi.mock("@/lib/config/system-settings-cache", () => ({
-  getCachedSystemSettings: vi.fn(async () => ({ billNonSuccessfulRequests: false })),
+  getCachedSystemSettings: vi.fn(async () => ({
+    billNonSuccessfulRequests: mocks.billNonSuccessfulRequests,
+    billingModelSource: "redirected",
+  })),
 }));
 vi.mock("@/lib/langfuse/emit-proxy-trace", () => ({ emitProxyLangfuseTrace: vi.fn() }));
 vi.mock("@/lib/logger", () => ({
@@ -89,7 +110,7 @@ vi.mock("@/app/v1/_lib/proxy/replay/replay-spool", () => ({
 }));
 vi.mock("@/repository/message", () => ({
   addMessageRequestHedgeLoserCost: vi.fn(),
-  updateMessageRequestCostWithBreakdown: vi.fn(),
+  updateMessageRequestCostWithBreakdown: mocks.cost,
   updateMessageRequestDetails: vi.fn(),
   updateMessageRequestDetailsDurably: mocks.durable,
   updateMessageRequestDetailsIfUnfinalized: vi.fn(),
@@ -272,6 +293,30 @@ function setReplayFinalization(session: ProxySession): void {
   });
 }
 
+const INTERACTIONS_COMPLETED = readFileSync(
+  "tests/unit/proxy/fixtures/interactions-completed.sse",
+  "utf8"
+);
+const INTERACTIONS_FUNCTION_CALL = readFileSync(
+  "tests/unit/proxy/fixtures/interactions-function-call.sse",
+  "utf8"
+);
+
+function setPricedModel(session: ProxySession, model: string, originalModel = model): void {
+  session.setOriginalModel(originalModel);
+  session.request.model = model;
+  session.request.message.model = model;
+  mocks.findPrice.mockImplementation(async (requestedModel: string) =>
+    requestedModel === model
+      ? {
+          modelName: model,
+          source: "manual",
+          priceData: { input_cost_per_token: 0.0000015, output_cost_per_token: 0.0000075 },
+        }
+      : null
+  );
+}
+
 describe("ProxyResponseHandler.dispatch stream terminal behavior", () => {
   beforeEach(() => {
     mocks.tasks.length = 0;
@@ -279,6 +324,9 @@ describe("ProxyResponseHandler.dispatch stream terminal behavior", () => {
     mocks.replayTerminal = null;
     mocks.replayTerminalState = false;
     vi.clearAllMocks();
+    mocks.billNonSuccessfulRequests = false;
+    mocks.findPrice.mockResolvedValue(null);
+
     mocks.replayAbort.mockImplementation(async () => {
       mocks.replayTerminalState = true;
       mocks.replayInactive?.();
@@ -293,6 +341,8 @@ describe("ProxyResponseHandler.dispatch stream terminal behavior", () => {
       return true;
     });
   });
+
+  afterEach(() => vi.restoreAllMocks());
 
   it("persists a naturally completed stream and releases its transport", async () => {
     const { releaseAgent, session } = await createSession({});
@@ -311,6 +361,427 @@ describe("ProxyResponseHandler.dispatch stream terminal behavior", () => {
     );
     expect(mocks.trackerEnd).toHaveBeenCalledWith(USER.id, MESSAGE.id);
     expect(releaseAgent).toHaveBeenCalledOnce();
+  });
+
+  it.each(
+    (["claude", "gemini", "codex", "openai-compatible"] as const).flatMap((providerType) => [
+      {
+        providerType,
+        turn: "text",
+        body: INTERACTIONS_COMPLETED,
+        input: 37,
+        output: 8,
+        cost: "0.0001155",
+      },
+      {
+        providerType,
+        turn: "function call",
+        body: INTERACTIONS_FUNCTION_CALL,
+        input: 138,
+        output: 161,
+        cost: "0.0014145",
+      },
+    ])
+  )(
+    "persists an Interactions $turn and charges the redirected model through a $providerType provider",
+    async ({ providerType, body, input, output, cost }) => {
+      const { session } = await createSession({ pathname: "/v1beta/interactions" });
+      session.setProvider({ ...createProvider(), providerType });
+      setPricedModel(session, "gemini-4-hydrogen", "gemini-hydrogen-latest");
+      if (providerType === "claude") setReplayOwner(session, "interactions-completed");
+      setReplayFinalization(session);
+
+      const returned = await ProxyResponseHandler.dispatch(session, sseResponse(body));
+      expect(returned.status).toBe(200);
+      expect(await returned.text()).toBe(body);
+      await settleTasks();
+
+      expect(mocks.durable).toHaveBeenCalledWith(
+        MESSAGE.id,
+        expect.objectContaining({
+          statusCode: 200,
+          model: "gemini-4-hydrogen",
+          inputTokens: input,
+          outputTokens: output,
+          cacheReadInputTokens: 0,
+        }),
+        expect.objectContaining({ onCommitted: expect.any(Function) })
+      );
+      expect(mocks.cost).toHaveBeenCalledWith(
+        MESSAGE.id,
+        expect.anything(),
+        expect.objectContaining({ total: cost })
+      );
+      expect(String(mocks.cost.mock.calls.at(-1)?.[1])).toBe(cost);
+      expect(mocks.findPrice).toHaveBeenCalledWith("gemini-4-hydrogen");
+      expect(mocks.findPrice).not.toHaveBeenCalledWith("gemini-hydrogen-latest");
+      expect(mocks.recordFailure).not.toHaveBeenCalled();
+      expect(mocks.recordSuccess).toHaveBeenCalledWith(session.provider?.id);
+      expect(session.getProviderChain()).toContainEqual(
+        expect.objectContaining({ reason: "request_success", statusCode: 200 })
+      );
+      if (providerType === "claude") {
+        expect(mocks.replayComplete).toHaveBeenCalledWith(MESSAGE.id);
+        expect(mocks.replayAbort).not.toHaveBeenCalled();
+      }
+    }
+  );
+
+  it.each([
+    { cachedImage: 0, toolTokens: 0, toolImage: 0, cost: "0.000238" },
+    { cachedImage: 10, toolTokens: 0, toolImage: 0, cost: "0.0001395" },
+    { cachedImage: 0, toolTokens: 7, toolImage: 3, cost: "0.000274" },
+    { cachedImage: 10, toolTokens: 7, toolImage: 3, cost: "0.0001755" },
+  ])(
+    "persists Interactions image cost from compact evidence, cached=$cachedImage, tool=$toolTokens",
+    async ({ cachedImage, toolTokens, toolImage, cost }) => {
+      const { session } = await createSession({ pathname: "/v1beta/interactions" });
+      setPricedModel(session, "gemini-image-concrete");
+      mocks.findPrice.mockResolvedValue({
+        modelName: "gemini-image-concrete",
+        source: "manual",
+        priceData: {
+          input_cost_per_token: 0.0000015,
+          output_cost_per_token: 0.0000075,
+          input_cost_per_image_token: 0.00001,
+          output_cost_per_image_token: 0.00002,
+        },
+      });
+      setReplayFinalization(session);
+      const body = INTERACTIONS_COMPLETED.replace(
+        '"modality":"text","tokens":37',
+        '"modality":"image","tokens":10'
+      )
+        .replace(
+          '"total_output_tokens":8',
+          '"total_output_tokens":8,"output_tokens_by_modality":[{"modality":"image","tokens":3}]'
+        )
+        .replace(
+          '"total_cached_tokens":0',
+          `"total_cached_tokens":${cachedImage},"cached_tokens_by_modality":[{"modality":"image","tokens":${cachedImage}}]`
+        )
+        .replace(
+          '"total_tool_use_tokens":0',
+          `"total_tool_use_tokens":${toolTokens},"tool_use_tokens_by_modality":[{"modality":"image","tokens":${toolImage}}]`
+        );
+      const returned = await ProxyResponseHandler.dispatch(session, sseResponse(body));
+      expect(await returned.text()).toBe(body);
+      await settleTasks();
+      expect(mocks.cost).toHaveBeenCalledWith(
+        MESSAGE.id,
+        expect.anything(),
+        expect.objectContaining({ total: cost })
+      );
+      expect(String(mocks.cost.mock.calls.at(-1)?.[1])).toBe(cost);
+      expect(mocks.durable).toHaveBeenCalledWith(
+        MESSAGE.id,
+        expect.objectContaining({ statusCode: 200 }),
+        expect.anything()
+      );
+      expect(mocks.recordFailure).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([
+    "event: done\ndata: [DONE]\n\n",
+    'event: interaction.completed\ndata: {"event_type":"interaction.completed","interaction":{"status":"completed"}}\n\n',
+    'event: interaction.failed\ndata: {"event_type":"interaction.failed","interaction":{"status":"failed"}}\n\n',
+    "event: interaction.completed\ndata: {broken\n\n",
+    `event: step.delta\ndata: not-json\n\n${INTERACTIONS_COMPLETED}`,
+    INTERACTIONS_COMPLETED.replace("event: interaction.completed", "event: unrelated"),
+    "",
+  ])("rejects an Interactions stream without valid completion: %s", async (terminal) => {
+    const { session } = await createSession({ pathname: "/v1beta/interactions" });
+    setReplayFinalization(session);
+    const body = INTERACTIONS_COMPLETED.split("event: interaction.completed")[0] + terminal;
+    const returned = await ProxyResponseHandler.dispatch(session, sseResponse(body));
+    expect(await returned.text()).toBe(body);
+    await settleTasks();
+
+    expect(mocks.durable).toHaveBeenCalledWith(
+      MESSAGE.id,
+      expect.objectContaining({ statusCode: 502 }),
+      expect.objectContaining({ onCommitted: expect.any(Function) })
+    );
+    expect(mocks.cost).not.toHaveBeenCalled();
+    expect(mocks.recordFailure).toHaveBeenCalledWith(session.provider?.id, expect.any(Error));
+    expect(mocks.recordSuccess).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { hasUsage: false, hasContent: false },
+    { hasUsage: true, hasContent: false },
+    { hasUsage: false, hasContent: true },
+    { hasUsage: true, hasContent: true },
+  ])(
+    "meters incomplete Interactions without provider success, usage=$hasUsage, content=$hasContent",
+    async ({ hasUsage, hasContent }) => {
+      const { session } = await createSession({ pathname: "/v1beta/interactions" });
+      if (hasUsage) setPricedModel(session, "gemini-incomplete-concrete");
+      setReplayOwner(session, "interactions-incomplete");
+      setReplayFinalization(session);
+      const body =
+        (hasContent ? INTERACTIONS_COMPLETED.split("event: interaction.completed")[0] : "") +
+        `event: interaction.incomplete\ndata: ${JSON.stringify({ event_type: "interaction.incomplete", interaction: { status: "incomplete", ...(hasUsage ? { usage: { total_input_tokens: 37, total_output_tokens: 8 } } : {}) } })}\n\n`;
+      const returned = await ProxyResponseHandler.dispatch(session, sseResponse(body));
+      expect(await returned.text()).toBe(body);
+      await settleTasks();
+
+      expect(mocks.durable).toHaveBeenCalledWith(
+        MESSAGE.id,
+        expect.objectContaining({ statusCode: 200, errorMessage: "RESPONSE_INCOMPLETE" }),
+        expect.objectContaining({ onCommitted: expect.any(Function) })
+      );
+      if (hasUsage) {
+        expect(mocks.cost).toHaveBeenCalledWith(
+          MESSAGE.id,
+          expect.anything(),
+          expect.objectContaining({ total: "0.0001155" })
+        );
+        expect(mocks.durable).toHaveBeenCalledWith(
+          MESSAGE.id,
+          expect.objectContaining({ inputTokens: 37, outputTokens: 8 }),
+          expect.anything()
+        );
+      } else {
+        expect(mocks.cost).not.toHaveBeenCalled();
+      }
+      expect(mocks.replayComplete).not.toHaveBeenCalled();
+      expect(mocks.replayAbort).toHaveBeenCalledWith("response_incomplete");
+      expect(mocks.recordSuccess).not.toHaveBeenCalled();
+      expect(mocks.recordFailure).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([false, true])(
+    "keeps cancelled Interactions EOF as 499 without provider failure, completion=%s",
+    async (completion) => {
+      let upstream!: ReadableStreamDefaultController<Uint8Array>;
+      const encoder = new TextEncoder();
+      const prefix = INTERACTIONS_COMPLETED.split("event: interaction.completed")[0];
+      const source = new ReadableStream<Uint8Array>({
+        start(controller) {
+          upstream = controller;
+          controller.enqueue(encoder.encode(prefix));
+        },
+      });
+      const { session } = await createSession({ pathname: "/v1beta/interactions" });
+      setPricedModel(session, "gemini-detached-concrete");
+      mocks.billNonSuccessfulRequests = true;
+      setReplayFinalization(session);
+      const returned = await ProxyResponseHandler.dispatch(session, sseResponse(source));
+      const reader = returned.body!.getReader();
+      await reader.read();
+      await reader.cancel();
+      if (completion) {
+        const terminal = INTERACTIONS_COMPLETED.slice(prefix.length)
+          .split("event: done")[0]
+          .trimEnd();
+        upstream.enqueue(encoder.encode(terminal));
+      }
+      upstream.close();
+      await settleTasks();
+      expect(mocks.durable).toHaveBeenCalledWith(
+        MESSAGE.id,
+        expect.objectContaining({ statusCode: 499, errorMessage: "CLIENT_ABORTED" }),
+        expect.anything()
+      );
+      expect(mocks.recordFailure).not.toHaveBeenCalled();
+      expect(mocks.recordSuccess).not.toHaveBeenCalled();
+      if (completion) {
+        expect(mocks.cost).toHaveBeenCalledWith(
+          MESSAGE.id,
+          expect.anything(),
+          expect.objectContaining({ total: "0.0001155" })
+        );
+        expect(mocks.durable).toHaveBeenCalledWith(
+          MESSAGE.id,
+          expect.objectContaining({ inputTokens: 37, outputTokens: 8 }),
+          expect.anything()
+        );
+      } else {
+        expect(mocks.cost).not.toHaveBeenCalled();
+      }
+      expect(getDetachedStreamBudgetSnapshot().activeStreams).toBe(0);
+    }
+  );
+
+  it.each([
+    { status: "failed", bill: false, valid: true },
+    { status: "failed", bill: true, valid: true },
+    { status: "cancelled", bill: false, valid: true },
+    { status: "cancelled", bill: true, valid: true },
+    { status: "failed", bill: true, valid: false },
+    { status: "cancelled", bill: true, valid: false },
+  ])(
+    "retains $status Interactions usage and honors non-success billing=$bill, valid=$valid",
+    async ({ status, bill, valid }) => {
+      const { session } = await createSession({ pathname: "/v1beta/interactions" });
+      setPricedModel(session, "gemini-failed-concrete");
+      mocks.billNonSuccessfulRequests = bill;
+      setReplayFinalization(session);
+      const body =
+        INTERACTIONS_COMPLETED.split("event: interaction.completed")[0] +
+        `event: interaction.${status}\ndata: ${JSON.stringify({ event_type: `interaction.${status}`, interaction: { status, usage: { total_input_tokens: 37, total_output_tokens: 8, ...(valid ? {} : { total_cached_tokens: "invalid" }) } } })}\n\n`;
+      const returned = await ProxyResponseHandler.dispatch(session, sseResponse(body));
+      expect(await returned.text()).toBe(body);
+      await settleTasks();
+      expect(mocks.durable).toHaveBeenCalledWith(
+        MESSAGE.id,
+        expect.objectContaining({
+          statusCode: 502,
+          ...(valid ? { inputTokens: 37, outputTokens: 8 } : {}),
+        }),
+        expect.anything()
+      );
+      expect(mocks.recordFailure).toHaveBeenCalledWith(session.provider?.id, expect.any(Error));
+      expect(mocks.recordSuccess).not.toHaveBeenCalled();
+      if (bill && valid) {
+        expect(mocks.cost).toHaveBeenCalledWith(
+          MESSAGE.id,
+          expect.anything(),
+          expect.objectContaining({ total: "0.0001155" })
+        );
+      } else {
+        expect(mocks.cost).not.toHaveBeenCalled();
+      }
+    }
+  );
+
+  it.each([
+    { replay: false, workers: 1 },
+    { replay: true, workers: 1 },
+    { replay: false, workers: 4 },
+    { replay: true, workers: 4 },
+    { replay: false, workers: 5 },
+  ])(
+    "preserves large detached Responses usage and cost, replay=$replay, workers=$workers",
+    async ({ replay, workers }) => {
+      const config = envConfig.getEnvConfig();
+      vi.spyOn(envConfig, "getEnvConfig").mockReturnValue({
+        ...config,
+        DETACHED_STREAM_BUDGET_BYTES: Math.floor((64 * 1024 * 1024) / workers),
+        DETACHED_STREAM_METERING_RESERVE_BYTES: Math.floor((16 * 1024 * 1024) / workers),
+      });
+      let sourceController!: ReadableStreamDefaultController<Uint8Array>;
+      const encoder = new TextEncoder();
+      const source = new ReadableStream<Uint8Array>({
+        start(controller) {
+          sourceController = controller;
+          controller.enqueue(
+            encoder.encode(
+              'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"started"}\n\n'
+            )
+          );
+        },
+      });
+      const { session } = await createSession({ pathname: "/v1/responses" });
+      session.setProvider({ ...createProvider(), providerType: "codex" });
+      session.originalFormat = "response";
+      setPricedModel(session, "synthetic-responses");
+      if (replay) setReplayOwner(session, "large-responses");
+      mocks.billNonSuccessfulRequests = true;
+      setReplayFinalization(session);
+      const returned = await ProxyResponseHandler.dispatch(session, sseResponse(source));
+      const reader = returned.body!.getReader();
+      await reader.read();
+      await reader.cancel(new Error("client disconnected"));
+      expect(
+        getDetachedStreamBudgetSnapshot().activeByKind[
+          replay && workers === 1 ? "replay" : "metering"
+        ]
+      ).toBe(1);
+      const completed = encoder.encode(
+        `event: response.completed\ndata: ${JSON.stringify({
+          type: "response.completed",
+          response: {
+            status: "completed",
+            output: [
+              { type: "message", content: [{ type: "output_text", text: "x".repeat(128 * 1024) }] },
+            ],
+            usage: { input_tokens: 100, output_tokens: 20, total_tokens: 120 },
+          },
+        })}\n\n`
+      );
+      for (let offset = 0; offset < completed.length; offset += 4096) {
+        sourceController.enqueue(completed.subarray(offset, offset + 4096));
+      }
+      sourceController.close();
+      await settleTasks();
+
+      expect(mocks.durable).toHaveBeenCalledWith(
+        MESSAGE.id,
+        expect.objectContaining({
+          statusCode: 499,
+          errorMessage: "CLIENT_ABORTED",
+          inputTokens: 100,
+          outputTokens: 20,
+        }),
+        expect.objectContaining({ onCommitted: expect.any(Function) })
+      );
+      expect(mocks.cost).toHaveBeenCalledWith(
+        MESSAGE.id,
+        expect.anything(),
+        expect.objectContaining({ total: "0.0003" })
+      );
+      expect(String(mocks.cost.mock.calls.at(-1)?.[1])).toBe("0.0003");
+      expect(mocks.recordFailure).not.toHaveBeenCalled();
+      if (replay && workers === 1) {
+        expect(mocks.replayComplete).toHaveBeenCalledWith(MESSAGE.id);
+        expect(mocks.replayAbort).not.toHaveBeenCalled();
+      }
+      expect(getDetachedStreamBudgetSnapshot().activeStreams).toBe(0);
+    }
+  );
+
+  it("cancels detached frame growth at the worker memory limit without penalizing its provider", async () => {
+    const config = envConfig.getEnvConfig();
+    const budgetBytes = 3 * 1024 * 1024 + 64 * 1024 + 16 * 1024;
+    vi.spyOn(envConfig, "getEnvConfig").mockReturnValue({
+      ...config,
+      DETACHED_STREAM_BUDGET_BYTES: budgetBytes,
+      DETACHED_STREAM_METERING_RESERVE_BYTES: 0,
+    });
+    const responseController = new AbortController();
+    const cancelSource = vi.fn();
+    let upstream!: ReadableStreamDefaultController<Uint8Array>;
+    const encoder = new TextEncoder();
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        upstream = controller;
+        controller.enqueue(
+          encoder.encode(
+            'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"started"}\n\n'
+          )
+        );
+      },
+      cancel: cancelSource,
+    });
+    const { session } = await createSession({ pathname: "/v1/responses", responseController });
+    session.setProvider({ ...createProvider(), providerType: "codex" });
+    session.originalFormat = "response";
+    setReplayFinalization(session);
+    const returned = await ProxyResponseHandler.dispatch(session, sseResponse(source));
+    const reader = returned.body!.getReader();
+    await reader.read();
+    await reader.cancel();
+    expect(getDetachedStreamBudgetSnapshot().activeByKind.metering).toBe(1);
+    upstream.enqueue(
+      encoder.encode(
+        `event: response.completed\ndata: {"type":"response.completed","padding":"${"x".repeat(128 * 1024)}`
+      )
+    );
+    await settleTasks();
+    expect(cancelSource).toHaveBeenCalledOnce();
+    expect(responseController.signal.aborted).toBe(true);
+    expect(mocks.durable).toHaveBeenCalledWith(
+      MESSAGE.id,
+      expect.objectContaining({ statusCode: 499, errorMessage: "CLIENT_ABORTED" }),
+      expect.anything()
+    );
+    expect(mocks.cost).not.toHaveBeenCalled();
+    expect(mocks.recordFailure).not.toHaveBeenCalled();
+    expect(getDetachedStreamBudgetSnapshot()).toMatchObject({ activeStreams: 0, reservedBytes: 0 });
   });
 
   it("透传并计量 Responses incomplete，但不发布 Replay 成功", async () => {
@@ -692,17 +1163,9 @@ describe("ProxyResponseHandler.dispatch stream terminal behavior", () => {
 
       mocks.replayTerminalState = true;
       mocks.replayInactive?.();
-      expect(getDetachedStreamBudgetSnapshot().activeByKind).toEqual({
-        loser: 0,
-        metering: 1,
-        replay: 1,
-      });
+      expect(responseController.signal.aborted).toBe(false);
       mocks.replayTerminal?.();
-      expect(getDetachedStreamBudgetSnapshot().activeByKind).toEqual({
-        loser: 0,
-        metering: 1,
-        replay: 0,
-      });
+      expect(responseController.signal.aborted).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
 
       expect(responseController.signal.aborted).toBe(true);

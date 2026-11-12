@@ -21,7 +21,12 @@
  * - valueMatches：路径值（数组则任一元素）等于任一候选串
  */
 
-export type ProtocolFamily = "anthropic" | "openai-chat" | "openai-responses" | "gemini";
+export type ProtocolFamily =
+  | "anthropic"
+  | "openai-chat"
+  | "openai-responses"
+  | "gemini"
+  | "gemini-interactions";
 
 export type FrameVerdict = "content" | "error" | "malformed" | "terminal" | "neutral";
 
@@ -35,6 +40,7 @@ interface ValueMatch {
 interface FrameRule {
   eventTypes?: string[];
   anyPaths?: string[];
+  anyStringPaths?: string[];
   valueMatches?: ValueMatch[];
 }
 
@@ -50,6 +56,19 @@ interface StreamSignal {
   terminalEvents?: string[];
   doneSentinel?: string;
 }
+
+export const INTERACTIONS_EVENT_TYPES = [
+  "interaction.created",
+  "interaction.status_update",
+  "interaction.completed",
+  "interaction.incomplete",
+  "interaction.failed",
+  "interaction.cancelled",
+  "step.start",
+  "step.delta",
+  "step.stop",
+  "error",
+];
 
 export const STREAM_SIGNALS: Record<ProtocolFamily, StreamSignal> = {
   anthropic: {
@@ -342,17 +361,110 @@ export const STREAM_SIGNALS: Record<ProtocolFamily, StreamSignal> = {
       { anyPaths: ["candidates.#.finishReason"] },
     ],
   },
+  "gemini-interactions": {
+    contentRules: [
+      {
+        eventTypes: ["step.delta"],
+        valueMatches: [{ path: "delta.type", values: ["text"] }],
+        anyStringPaths: ["delta.text"],
+      },
+      {
+        eventTypes: ["step.delta"],
+        valueMatches: [{ path: "delta.type", values: ["arguments_delta"] }],
+        anyStringPaths: ["delta.arguments"],
+      },
+      {
+        eventTypes: ["step.delta"],
+        valueMatches: [{ path: "delta.type", values: ["image", "audio", "video", "document"] }],
+        anyStringPaths: ["delta.data", "delta.uri"],
+      },
+      {
+        eventTypes: ["step.delta"],
+        valueMatches: [{ path: "delta.type", values: ["thought_signature"] }],
+        anyStringPaths: ["delta.signature"],
+      },
+      {
+        eventTypes: ["step.delta"],
+        valueMatches: [{ path: "delta.type", values: ["thought_summary"] }],
+        anyStringPaths: ["delta.content.text", "delta.content.data", "delta.content.uri"],
+      },
+      {
+        eventTypes: ["step.delta"],
+        valueMatches: [{ path: "delta.type", values: ["code_execution_call"] }],
+        anyStringPaths: ["delta.arguments.code"],
+      },
+      {
+        eventTypes: ["step.delta"],
+        valueMatches: [
+          {
+            path: "delta.type",
+            values: ["google_search_call", "google_maps_call", "url_context_call"],
+          },
+        ],
+        anyStringPaths: ["delta.arguments.queries.#", "delta.arguments.urls.#"],
+      },
+      {
+        eventTypes: ["step.delta"],
+        valueMatches: [{ path: "delta.type", values: ["mcp_server_tool_call", "function_call"] }],
+        anyStringPaths: ["delta.name"],
+        anyPaths: ["delta.arguments"],
+      },
+      {
+        eventTypes: ["step.delta"],
+        valueMatches: [
+          {
+            path: "delta.type",
+            values: [
+              "function_result",
+              "mcp_server_tool_result",
+              "code_execution_result",
+              "google_search_result",
+              "google_maps_result",
+              "url_context_result",
+              "file_search_result",
+            ],
+          },
+        ],
+        anyPaths: ["delta.result"],
+      },
+      {
+        eventTypes: ["step.delta"],
+        valueMatches: [{ path: "delta.type", values: ["text_annotation_delta"] }],
+        anyPaths: ["delta.annotations"],
+      },
+      {
+        eventTypes: ["step.start"],
+        valueMatches: [{ path: "step.type", values: ["function_call", "mcp_server_tool_call"] }],
+        anyStringPaths: ["step.name"],
+        anyPaths: ["step.arguments"],
+      },
+    ],
+    errorRules: [
+      { eventTypes: ["error", "interaction.failed", "interaction.cancelled"] },
+      { anyPaths: ["error", "interaction.error"] },
+      { valueMatches: [{ path: "interaction.status", values: ["failed", "cancelled"] }] },
+      {
+        eventTypes: ["interaction.status_update"],
+        valueMatches: [{ path: "status", values: ["failed", "cancelled"] }],
+      },
+    ],
+    // Completion is validated structurally, never by its event name alone.
+  },
 };
 
 /**
  * 供应商类型 → 协议家族映射。
  *
  * 门控分类作用于上游原生 wire 格式（在 ResponseFixer / Gemini 转换之前），
- * 因此按 provider 类型而非入口格式选择家族。未知类型返回 null（跳过门控，fail-open）。
+ * 因此通常按 provider 类型选择家族；Interactions 端点有独立 wire 协议，优先于 provider 类型。
  */
 export function mapProviderTypeToFamily(
-  providerType: string | null | undefined
+  providerType: string | null | undefined,
+  pathname?: string | null
 ): ProtocolFamily | null {
+  if (pathname === "/v1beta/interactions" || pathname?.startsWith("/v1beta/interactions/")) {
+    return "gemini-interactions";
+  }
   switch (providerType) {
     case "claude":
     case "claude-auth":
@@ -434,8 +546,16 @@ export function createStreamFrameClassifier(family: ProtocolFamily): StreamFrame
   const signal = STREAM_SIGNALS[family];
   const toolCallRules = signal.toolCallRules;
   let toolCallOpen = false;
+  let interactionsCompleted = false;
   const classifyStructured = (eventName: string | null, parsed: object): FrameVerdict => {
     const verdict = classifyStructuredFrame(family, eventName, parsed);
+    if (family === "gemini-interactions") {
+      if (verdict === "terminal") {
+        interactionsCompleted = isCleanInteractionsCompletion(eventName, parsed);
+      } else if (verdict === "error" || verdict === "malformed") {
+        interactionsCompleted = false;
+      }
+    }
     if (!toolCallRules) return verdict;
     const eventType = effectiveEventType(eventName, parsed);
     toolCallOpen ||= toolCallRules.open.some((rule) => frameRuleMatches(rule, eventType, parsed));
@@ -449,8 +569,21 @@ export function createStreamFrameClassifier(family: ProtocolFamily): StreamFrame
     family,
     classify(eventName, data) {
       try {
+        if (family === "gemini-interactions" && data.trim() === "[DONE]") {
+          const event = (eventName ?? "").trim();
+          if (interactionsCompleted && (event === "" || event === "message" || event === "done")) {
+            return "neutral";
+          }
+          interactionsCompleted = false;
+          return "malformed";
+        }
         const parsed = parseFrameData(signal, data);
-        return typeof parsed === "string" ? parsed : classifyStructured(eventName, parsed);
+        if (typeof parsed === "string") {
+          if (family === "gemini-interactions" && parsed === "malformed")
+            interactionsCompleted = false;
+          return parsed;
+        }
+        return classifyStructured(eventName, parsed);
       } catch {
         return "neutral";
       }
@@ -537,9 +670,13 @@ export function classifyTerminalKind(
   parsed?: object
 ): TerminalKind {
   if (parsed) {
+    if (family === "gemini-interactions") {
+      return classifyStructuredTerminalKind(family, eventName, parsed);
+    }
     const structured = classifyStructuredTerminalKind(family, eventName, parsed);
     if (structured !== null) return structured;
   }
+  if (family === "gemini-interactions") return null;
   if (family !== "openai-responses") return "complete";
   let effective = (eventName ?? "").trim();
   if ((effective === "" || effective === "message") && parsed && !Array.isArray(parsed)) {
@@ -557,6 +694,22 @@ export function classifyStructuredTerminalKind(
   eventName: string | null,
   parsed: object
 ): TerminalKind {
+  if (family === "gemini-interactions") {
+    if (isCleanInteractionsCompletion(eventName, parsed)) return "complete";
+    const event = interactionsEventType(eventName, parsed);
+    const record = parsed as Record<string, unknown>;
+    if (event === "interaction.status_update") {
+      return record.status === "incomplete" ? "incomplete" : null;
+    }
+    if (event !== "interaction.incomplete" && event !== "interaction.completed") return null;
+    const interaction = record.interaction;
+    return interaction !== null &&
+      typeof interaction === "object" &&
+      !Array.isArray(interaction) &&
+      (interaction as Record<string, unknown>).status === "incomplete"
+      ? "incomplete"
+      : null;
+  }
   let effective = (eventName ?? "").trim();
   if ((effective === "" || effective === "message") && !Array.isArray(parsed)) {
     const type = (parsed as Record<string, unknown>).type;
@@ -583,6 +736,51 @@ function classifyParsedFrame(
   eventName: string | null,
   parsed: object
 ): FrameVerdict {
+  if (family === "gemini-interactions") {
+    const effective = interactionsEventType(eventName, parsed);
+    if (effective === null) return "malformed";
+    for (const rule of signal.errorRules) {
+      if (frameRuleMatches(rule, effective, parsed)) return "error";
+    }
+    if (effective === "interaction.completed") {
+      return isCleanInteractionsCompletion(eventName, parsed) ||
+        classifyStructuredTerminalKind(family, eventName, parsed) === "incomplete"
+        ? "terminal"
+        : "malformed";
+    }
+    if (effective === "interaction.incomplete") {
+      const interaction = (parsed as Record<string, unknown>).interaction;
+      return interaction !== null &&
+        typeof interaction === "object" &&
+        !Array.isArray(interaction) &&
+        (interaction as Record<string, unknown>).status === "incomplete"
+        ? "terminal"
+        : "malformed";
+    }
+    if (
+      effective === "interaction.status_update" &&
+      (parsed as Record<string, unknown>).status === "incomplete"
+    )
+      return "terminal";
+    if (effective === "step.delta" || effective === "step.start") {
+      const record = parsed as Record<string, unknown>;
+      const payload = effective === "step.delta" ? record.delta : record.step;
+      if (
+        !Number.isSafeInteger(record.index) ||
+        (record.index as number) < 0 ||
+        payload === null ||
+        typeof payload !== "object" ||
+        Array.isArray(payload) ||
+        typeof (payload as Record<string, unknown>).type !== "string" ||
+        (payload as Record<string, unknown>).type === ""
+      )
+        return "malformed";
+    }
+    for (const rule of signal.contentRules) {
+      if (frameRuleMatches(rule, effective, parsed)) return "content";
+    }
+    return "neutral";
+  }
   const effective = effectiveEventType(eventName, parsed);
 
   for (const rule of signal.errorRules) {
@@ -658,6 +856,19 @@ function frameRuleMatches(rule: FrameRule, eventType: string, parsed: unknown): 
     }
     if (!hit) return false;
   }
+  if (rule.anyStringPaths?.length) {
+    if (
+      !rule.anyStringPaths.some((path) => {
+        const value = resolvePath(parsed, path);
+        return typeof value === "string"
+          ? value !== ""
+          : path.split(".").includes("#") &&
+              Array.isArray(value) &&
+              value.some((item) => typeof item === "string" && item !== "");
+      })
+    )
+      return false;
+  }
   if (rule.valueMatches) {
     for (const match of rule.valueMatches) {
       if (!valueMatchHits(match, parsed)) return false;
@@ -666,6 +877,7 @@ function frameRuleMatches(rule: FrameRule, eventType: string, parsed: unknown): 
   return (
     (rule.eventTypes?.length ?? 0) > 0 ||
     (rule.anyPaths?.length ?? 0) > 0 ||
+    (rule.anyStringPaths?.length ?? 0) > 0 ||
     (rule.valueMatches?.length ?? 0) > 0
   );
 }
@@ -781,4 +993,47 @@ export function isCleanResponsesCompletion(eventName: string | null, data: strin
   if (response === null || typeof response !== "object" || Array.isArray(response)) return false;
   const inner = response as Record<string, unknown>;
   return inner.status === "completed" && !isNonEmptyValue(inner.error);
+}
+
+/** The wire event_type is mandatory; an explicit SSE event must agree with it. */
+export function interactionsEventType(eventName: string | null, parsed: unknown): string | null {
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const type = (parsed as Record<string, unknown>).event_type;
+  if (typeof type !== "string" || !INTERACTIONS_EVENT_TYPES.includes(type)) return null;
+  const event = (eventName ?? "").trim();
+  return event === "" || event === "message" || event === type ? type : null;
+}
+
+/** Explicit zero counters are valid evidence; absent or invalid counters are not. */
+export function isInteractionsUsage(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const usage = value as Record<string, unknown>;
+  const validCounter = (counter: unknown): boolean =>
+    typeof counter === "number" && Number.isFinite(counter) && counter >= 0;
+  if (!validCounter(usage.total_input_tokens) || !validCounter(usage.total_output_tokens))
+    return false;
+  return [
+    "total_tokens",
+    "total_cached_tokens",
+    "total_tool_use_tokens",
+    "total_thought_tokens",
+  ].every((key) => usage[key] === undefined || validCounter(usage[key]));
+}
+
+export function isCleanInteractionsCompletion(eventName: string | null, parsed: unknown): boolean {
+  if (interactionsEventType(eventName, parsed) !== "interaction.completed") {
+    return false;
+  }
+  const record = parsed as Record<string, unknown>;
+  const interaction = record.interaction;
+  if (interaction === null || typeof interaction !== "object" || Array.isArray(interaction)) {
+    return false;
+  }
+  const result = interaction as Record<string, unknown>;
+  return (
+    !isNonEmptyValue(record.error) &&
+    (result.status === "completed" || result.status === "requires_action") &&
+    !isNonEmptyValue(result.error) &&
+    isInteractionsUsage(result.usage)
+  );
 }

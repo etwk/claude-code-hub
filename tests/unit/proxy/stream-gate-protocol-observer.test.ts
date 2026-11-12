@@ -344,3 +344,113 @@ describe("StreamProtocolObserver", () => {
     });
   });
 });
+
+describe("Gemini Interactions protocol observation", () => {
+  const delta =
+    'event: step.delta\ndata: {"index":0,"delta":{"text":"HYDROGEN_READY","type":"text"},"event_type":"step.delta"}\n\n';
+  const completed =
+    'event: interaction.completed\ndata: {"interaction":{"status":"completed","usage":{"total_tokens":45,"total_input_tokens":37,"total_cached_tokens":0,"total_output_tokens":8,"total_tool_use_tokens":0,"total_thought_tokens":0},"object":"interaction"},"event_type":"interaction.completed"}\n\n';
+  const done = "event: done\ndata: [DONE]\n\n";
+
+  test("accepts the exact issue fixture at every byte split without flagging compatibility DONE", () => {
+    const bytes = encoder.encode(delta + completed + done);
+    for (let split = 0; split <= bytes.length; split++) {
+      const observer = createStreamProtocolObserver("gemini-interactions");
+      observer.observe(bytes.subarray(0, split));
+      observer.observe(bytes.subarray(split));
+      expect(observer.finish()).toEqual({
+        sawContent: true,
+        sawTerminal: true,
+        sawIncomplete: false,
+        observationIncomplete: false,
+        failure: null,
+      });
+    }
+  });
+
+  test("uses data.event_type without an SSE event and flushes a final completion at EOF", () => {
+    const observer = createStreamProtocolObserver("gemini-interactions");
+    observer.observe(
+      encoder.encode((delta + completed).replace(/^event: [^\n]+\n/gm, "").trimEnd())
+    );
+    expect(observer.finish()).toMatchObject({ sawContent: true, sawTerminal: true, failure: null });
+  });
+
+  test.each([
+    [
+      "missing usage",
+      'event: interaction.completed\ndata: {"event_type":"interaction.completed","interaction":{"status":"completed"}}\n\n',
+      "malformed",
+    ],
+    ["malformed JSON", "event: interaction.completed\ndata: {broken}\n\n", "malformed"],
+    [
+      "event mismatch",
+      'event: interaction.completed\ndata: {"event_type":"step.delta","index":0,"delta":{"type":"text","text":"bad"}}\n\n',
+      "malformed",
+    ],
+    [
+      "failed status",
+      'event: interaction.completed\ndata: {"event_type":"interaction.completed","interaction":{"status":"failed"}}\n\n',
+      "error",
+    ],
+    [
+      "explicit error",
+      'event: error\ndata: {"event_type":"error","error":{"message":"failed"}}\n\n',
+      "error",
+    ],
+    [
+      "failed update",
+      'data: {"event_type":"interaction.status_update","status":"failed"}\n\n',
+      "error",
+    ],
+    ["sentinel without completion", done, "malformed"],
+  ])("keeps %s as failure after real content", (_name, frame, verdict) => {
+    const observer = createStreamProtocolObserver("gemini-interactions");
+    observer.observe(encoder.encode(delta + frame));
+    expect(observer.finish()).toMatchObject({
+      sawContent: true,
+      sawTerminal: false,
+      failure: { afterContent: true, verdict },
+    });
+  });
+
+  test.each([
+    'data: {"event_type":"interaction.incomplete","interaction":{"status":"incomplete"}}\n\n',
+    'data: {"event_type":"interaction.completed","interaction":{"status":"incomplete"}}\n\n',
+    'data: {"event_type":"interaction.status_update","status":"incomplete"}\n\n',
+  ])("records incomplete lifecycle without a successful terminal", (frame) => {
+    const observer = createStreamProtocolObserver("gemini-interactions");
+    observer.observe(encoder.encode(delta + frame));
+    expect(observer.finish()).toMatchObject({
+      sawContent: true,
+      sawTerminal: false,
+      sawIncomplete: true,
+      failure: null,
+    });
+  });
+
+  test("does not promote step.stop usage or plain EOF to completed", () => {
+    const observer = createStreamProtocolObserver("gemini-interactions");
+    observer.observe(
+      encoder.encode(
+        delta +
+          'data: {"event_type":"step.stop","index":0,"usage":{"total_input_tokens":37,"total_output_tokens":8}}\n\n'
+      )
+    );
+    expect(observer.finish()).toMatchObject({
+      sawContent: true,
+      sawTerminal: false,
+      failure: null,
+    });
+  });
+
+  test("does not erase a failure when a later valid completion arrives", () => {
+    const observer = createStreamProtocolObserver("gemini-interactions");
+    observer.observe(
+      encoder.encode(
+        `${delta}data: {"event_type":"error","error":{"message":"failed"}}\n\n${completed}${done}`
+      )
+    );
+    expect(observer.finish()).toMatchObject({ sawTerminal: true, failure: { verdict: "error" } });
+  });
+});

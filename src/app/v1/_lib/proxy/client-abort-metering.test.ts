@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CLIENT_ABORT_METER_DEFAULT_MAX_FRAME_CHARACTERS,
   CLIENT_ABORT_METER_MAX_RETAINED_BYTES,
   createClientAbortMeteringObserver,
 } from "./client-abort-metering";
@@ -39,6 +40,421 @@ describe("createClientAbortMeteringObserver", () => {
     expect(snapshot.retainedBytes).toBeLessThanOrEqual(CLIENT_ABORT_METER_MAX_RETAINED_BYTES);
   });
 
+  it("reserves frame growth before retaining input and releases frame storage on completion", () => {
+    const observer = createClientAbortMeteringObserver("response", {
+      maxFrameCharacters: 1024 * 1024,
+    });
+    let reserved = 0;
+    const reserve = (bytes: number) => {
+      reserved = Math.max(reserved, bytes);
+      if (bytes > 1024) throw new Error("memory budget exhausted");
+    };
+    observer.observe(
+      encoder.encode('event: response.completed\ndata: {"type":"response.completed",'),
+      reserve
+    );
+    const before = observer.inFlightFrameBytes;
+    expect(before).toBeGreaterThan(0);
+    expect(reserved).toBeGreaterThanOrEqual(before);
+    expect(() => observer.observe(encoder.encode("x".repeat(2048)), reserve)).toThrow(
+      "memory budget exhausted"
+    );
+    expect(observer.inFlightFrameBytes).toBe(before);
+    observer.observe(
+      encoder.encode(
+        '"response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":2}}}\n\n'
+      ),
+      reserve
+    );
+    expect(observer.inFlightFrameBytes).toBe(0);
+    expect(observer.finish().terminalSeen).toBe(true);
+  });
+
+  it.each([0, 16 * 1024, 96 * 1024])(
+    "retains compact usage from a 128 KiB+ terminal after detaching at byte %i",
+    (detachOffset) => {
+      const maxFrameCharacters = 256 * 1024;
+      const observer = createClientAbortMeteringObserver("response", { maxFrameCharacters });
+      const bytes = encoder.encode(
+        `event: response.completed\ndata: ${JSON.stringify({
+          type: "response.completed",
+          response: {
+            id: "resp_large",
+            model: "gpt-test",
+            status: "completed",
+            output: [{ content: [{ text: "x".repeat(128 * 1024) }] }],
+            usage: { input_tokens: 37, output_tokens: 8 },
+          },
+        })}\n\n`
+      );
+      expect(bytes.byteLength).toBeGreaterThan(128 * 1024);
+
+      for (let offset = 0; offset < detachOffset; offset += 4096) {
+        observer.observe(bytes.subarray(offset, Math.min(offset + 4096, detachOffset)));
+      }
+      // Detaching changes the caller, not the protocol input limit. Its snapshot
+      // must not flush a partial frame or reduce the reserved framing memory.
+      expect(observer.snapshot()).toMatchObject({
+        text: "",
+        terminalSeen: false,
+        protocolFailure: null,
+      });
+      expect(observer.maxInFlightFrameBytes).toBe(maxFrameCharacters * 2);
+
+      for (let offset = detachOffset; offset < bytes.byteLength; offset += 4096) {
+        observer.observe(bytes.subarray(offset, offset + 4096));
+        expect(observer.maxInFlightFrameBytes).toBe(maxFrameCharacters * 2);
+        expect(observer.snapshot().retainedBytes).toBeLessThanOrEqual(
+          CLIENT_ABORT_METER_MAX_RETAINED_BYTES
+        );
+      }
+      const snapshot = observer.finish();
+      expect(snapshot).toMatchObject({
+        terminalSeen: true,
+        skippedOversizedFrames: 0,
+        protocolFailure: null,
+      });
+      expect(snapshot.text).toContain('"input_tokens":37');
+      expect(snapshot.text).toContain('"output_tokens":8');
+      expect(snapshot.text).not.toContain('"output":');
+      expect(snapshot.retainedBytes).toBe(encoder.encode(snapshot.text).byteLength);
+      expect(snapshot.retainedBytes).toBeLessThan(512);
+      expect(observer.maxInFlightFrameBytes).toBe(maxFrameCharacters * 2);
+    }
+  );
+
+  it.each(["malformed", "truncated", "over-limit"] as const)(
+    "does not promote usage from a large %s terminal after detach",
+    (kind) => {
+      const maxFrameCharacters = 256 * 1024;
+      const observer = createClientAbortMeteringObserver("response", { maxFrameCharacters });
+      const payload = JSON.stringify({
+        type: "response.completed",
+        response: {
+          status: "completed",
+          usage: { input_tokens: 37, output_tokens: 8 },
+          output: [
+            { content: [{ text: "x".repeat(kind === "over-limit" ? 256 * 1024 : 128 * 1024) }] },
+          ],
+        },
+      });
+      const data =
+        kind === "malformed"
+          ? `${payload} trailing-invalid-json\n\n`
+          : kind === "truncated"
+            ? payload.slice(0, -1)
+            : `${payload}\n\n`;
+      const bytes = encoder.encode(`event: response.completed\ndata: ${data}`);
+      const detachOffset = 32 * 1024;
+      observer.observe(bytes.subarray(0, detachOffset));
+      expect(observer.snapshot().text).toBe("");
+
+      for (let offset = detachOffset; offset < bytes.byteLength; offset += 4096) {
+        expect(observer.observe(bytes.subarray(offset, offset + 4096)).terminalSeen).toBe(false);
+      }
+      const snapshot = observer.finish();
+      expect(snapshot).toMatchObject({ terminalSeen: false, text: "", retainedBytes: 0 });
+      expect(snapshot.skippedOversizedFrames).toBe(kind === "over-limit" ? 1 : 0);
+      if (kind !== "over-limit") {
+        expect(snapshot.protocolFailure?.verdict).toBe("malformed");
+      }
+      expect(observer.maxInFlightFrameBytes).toBe(maxFrameCharacters * 2);
+    }
+  );
+
+  it.each([undefined, 0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    "reports the default bounded frame reservation for invalid input limit %s",
+    (maxFrameCharacters) => {
+      const observer = createClientAbortMeteringObserver("response", { maxFrameCharacters });
+      expect(observer.maxInFlightFrameBytes).toBe(
+        CLIENT_ABORT_METER_DEFAULT_MAX_FRAME_CHARACTERS * 2
+      );
+      expect(observer.snapshot().retainedBytes).toBe(0);
+    }
+  );
+
+  it("meters Interactions completion and accepts its following compatibility done event", () => {
+    const observer = createClientAbortMeteringObserver("gemini", {
+      protocolFamily: "gemini-interactions",
+    });
+    observer.observe(
+      encoder.encode(
+        'event: step.delta\ndata: {"index":0,"delta":{"text":"HYDROGEN_READY","type":"text"},"event_type":"step.delta"}\n\n'
+      )
+    );
+    expect(observer.snapshot()).toMatchObject({ sawContent: true, terminalSeen: false });
+    const result = observer.observe(
+      encoder.encode(
+        `event: interaction.completed\ndata: ${JSON.stringify({
+          event_type: "interaction.completed",
+          interaction: {
+            object: "interaction",
+            status: "completed",
+            model: "gemini-interactions-test",
+            outputs: [{ text: "discard generated content" }],
+            usage: {
+              total_tokens: 45,
+              total_input_tokens: 37,
+              total_cached_tokens: 3,
+              total_output_tokens: 8,
+              total_thought_tokens: 2,
+              total_tool_use_tokens: 0,
+              input_tokens_by_modality: [{ modality: "text", tokens: 37 }],
+              output_tokens_by_modality: [{ modality: "text", tokens: 8 }],
+            },
+          },
+        })}\n\n`
+      )
+    );
+    expect(result).toEqual({
+      drainComplete: true,
+      errorSeen: false,
+      protocolFailure: null,
+      replayDrainComplete: true,
+      terminalSeen: true,
+    });
+    expect(observer.observe(encoder.encode("event: done\ndata: [DONE]\n\n"))).toEqual(result);
+
+    const snapshot = observer.finish();
+    expect(snapshot).toMatchObject({
+      sawContent: true,
+      terminalSeen: true,
+      protocolFailure: null,
+      skippedOversizedFrames: 0,
+    });
+    expect(snapshot.text).toContain('"event_type":"interaction.completed"');
+    expect(snapshot.text).toContain('"model":"gemini-interactions-test"');
+    expect(snapshot.text).toContain('"total_input_tokens":37');
+    expect(snapshot.text).toContain('"total_output_tokens":8');
+    expect(snapshot.text).toContain('"total_cached_tokens":3');
+    expect(snapshot.text).toContain('"total_thought_tokens":2');
+    expect(snapshot.text).toContain('"input_tokens_by_modality":[{"modality":"text","tokens":37}]');
+    expect(snapshot.text).toContain('"output_tokens_by_modality":[{"modality":"text","tokens":8}]');
+    expect(snapshot.text).toContain("event: done\ndata: [DONE]");
+    expect(snapshot.text).not.toContain("HYDROGEN_READY");
+    expect(snapshot.text).not.toContain("discard generated content");
+    expect(snapshot.retainedBytes).toBe(encoder.encode(snapshot.text).byteLength);
+    expect(snapshot.retainedBytes).toBeLessThanOrEqual(CLIENT_ABORT_METER_MAX_RETAINED_BYTES);
+  });
+
+  it.each(
+    [null, "interaction.completed"].flatMap((eventName) =>
+      ["completed", "requires_action"].map((status) => ({ eventName, status }))
+    )
+  )(
+    "retains explicit zero Interactions usage with event=$eventName and status=$status",
+    ({ eventName, status }) => {
+      const observer = createClientAbortMeteringObserver("response", {
+        protocolFamily: "gemini-interactions",
+      });
+      const prefix = eventName === null ? "" : `event: ${eventName}\n`;
+      observer.observe(
+        encoder.encode(
+          `${prefix}data: {"event_type":"interaction.completed","interaction":{"status":"${status}","usage":{"total_input_tokens":0,"total_output_tokens":0}}}\n\n`
+        )
+      );
+
+      const snapshot = observer.finish();
+      expect(snapshot).toMatchObject({ terminalSeen: true, protocolFailure: null });
+      expect(snapshot.text).toContain('"total_input_tokens":0');
+      expect(snapshot.text).toContain('"total_output_tokens":0');
+    }
+  );
+
+  it.each([
+    { status: "failed", usage: { total_input_tokens: 37, total_output_tokens: 8 } },
+    { status: "incomplete", usage: { total_input_tokens: 37, total_output_tokens: 8 } },
+    { status: "in_progress", usage: { total_input_tokens: 37, total_output_tokens: 8 } },
+    { status: "cancelled", usage: { total_input_tokens: 37, total_output_tokens: 8 } },
+    { status: "completed" },
+    { status: "completed", usage: {} },
+    { status: "completed", usage: { total_input_tokens: 37 } },
+    { status: "completed", usage: { total_input_tokens: "37", total_output_tokens: 8 } },
+    { status: "completed", usage: { total_input_tokens: -1, total_output_tokens: 8 } },
+    { status: "completed", usage: { total_input_tokens: 37, total_output_tokens: null } },
+    { status: "completed", usage: { total_input_tokens: 37, total_output_tokens: -1 } },
+    {
+      status: "completed",
+      usage: { total_input_tokens: 37, total_output_tokens: 8, total_cached_tokens: -1 },
+    },
+    {
+      status: "completed",
+      usage: { total_input_tokens: 37, total_output_tokens: 8, total_thought_tokens: "2" },
+    },
+    {
+      status: "completed",
+      error: { message: "generation failed" },
+      usage: { total_input_tokens: 37, total_output_tokens: 8 },
+    },
+  ])("does not promote an invalid Interactions lifecycle or usage: %j", (interaction) => {
+    const observer = createClientAbortMeteringObserver("gemini", {
+      protocolFamily: "gemini-interactions",
+    });
+    const result = observer.observe(
+      encoder.encode(
+        `event: interaction.completed\ndata: ${JSON.stringify({
+          event_type: "interaction.completed",
+          interaction,
+        })}\n\n`
+      )
+    );
+    expect(result.terminalSeen).toBe(false);
+    observer.observe(encoder.encode("event: done\ndata: [DONE]\n\n"));
+    expect(observer.finish().terminalSeen).toBe(false);
+    expect(observer.finish().protocolFailure).not.toBeNull();
+  });
+
+  it.each([
+    "event: done\ndata: [DONE]\n\n",
+    "data: [DONE]\n\n",
+    'event: interaction.completed\ndata: {"event_type":"interaction.completed","interaction":\n\n',
+    'event: interaction.completed\ndata: {"event_type":"interaction.completed","interaction":',
+    'event: interaction.completed\ndata: {"event_type":"interaction.completed","interaction":{"status":"completed","usage":{"total_input_tokens":1e400,"total_output_tokens":8}}}\n\n',
+    'event: interaction.completed\ndata: {"event_type":"interaction.failed","interaction":{"status":"completed","usage":{"total_input_tokens":37,"total_output_tokens":8}}}\n\n',
+    'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":37,"output_tokens":8}}}\n\n',
+  ])("does not manufacture Interactions completion from invalid data: %s", (frame) => {
+    const observer = createClientAbortMeteringObserver("response", {
+      protocolFamily: "gemini-interactions",
+    });
+    observer.observe(encoder.encode(frame));
+
+    expect(observer.finish().terminalSeen).toBe(false);
+    expect(observer.finish().text).not.toContain("[DONE]");
+  });
+
+  it.each(["", "event: message\n"])(
+    "accepts an Interactions compatibility marker only after completion: %j",
+    (prefix) => {
+      const observer = createClientAbortMeteringObserver("openai", {
+        protocolFamily: "gemini-interactions",
+      });
+      observer.observe(
+        encoder.encode(
+          'event: interaction.completed\ndata: {"event_type":"interaction.completed","interaction":{"status":"completed","usage":{"total_input_tokens":37,"total_output_tokens":8}}}\n\n'
+        )
+      );
+      observer.observe(encoder.encode(`${prefix}data: [DONE]\n\n`));
+      expect(observer.finish()).toMatchObject({ terminalSeen: true, protocolFailure: null });
+      expect(observer.finish().text).toContain('"total_input_tokens":37');
+    }
+  );
+
+  it("retains an incomplete Interactions terminal without marking it successful", () => {
+    const observer = createClientAbortMeteringObserver("gemini", {
+      protocolFamily: "gemini-interactions",
+    });
+    const result = observer.observe(
+      encoder.encode(
+        'event: interaction.incomplete\ndata: {"event_type":"interaction.incomplete","interaction":{"status":"incomplete","usage":{"total_input_tokens":37,"total_output_tokens":8}}}\n\n'
+      )
+    );
+    expect(result).toMatchObject({
+      drainComplete: true,
+      terminalSeen: false,
+      replayDrainComplete: true,
+    });
+    expect(observer.snapshot()).toMatchObject({ incompleteSeen: true, terminalSeen: false });
+    observer.observe(encoder.encode("event: done\ndata: [DONE]\n\n"));
+    expect(observer.finish().terminalSeen).toBe(false);
+    expect(observer.finish().protocolFailure?.verdict).toBe("malformed");
+  });
+
+  it("does not turn invalid optional usage into valid compact Interactions evidence", () => {
+    const observer = createClientAbortMeteringObserver("gemini", {
+      protocolFamily: "gemini-interactions",
+    });
+    observer.observe(
+      encoder.encode(
+        'event: interaction.completed\ndata: {"event_type":"interaction.completed","interaction":{"status":"completed","model":"gemini-test","usage":{"total_input_tokens":37,"total_output_tokens":8,"total_tokens":-1}}}\n\n'
+      )
+    );
+    expect(observer.finish()).toMatchObject({
+      text: "",
+      terminalSeen: false,
+      protocolFailure: { verdict: "malformed" },
+    });
+  });
+
+  it("records Interactions failures after content without reporting completion", () => {
+    const observer = createClientAbortMeteringObserver("gemini", {
+      protocolFamily: "gemini-interactions",
+    });
+    observer.observe(
+      encoder.encode(
+        'event: step.delta\ndata: {"index":0,"event_type":"step.delta","delta":{"type":"text","text":"partial"}}\n\n'
+      )
+    );
+    const result = observer.observe(
+      encoder.encode(
+        'event: interaction.failed\ndata: {"event_type":"interaction.failed","interaction":{"status":"failed","error":{"message":"upstream failed"}}}\n\n'
+      )
+    );
+    expect(result).toMatchObject({
+      terminalSeen: false,
+      errorSeen: true,
+      protocolFailure: { afterContent: true, verdict: "error", eventName: "interaction.failed" },
+    });
+    expect(observer.finish().text).toContain("upstream failed");
+    expect(observer.finish().text).not.toContain('"text":"partial"');
+  });
+
+  it("retains only bounded Interactions usage when detaching within a large completion frame", () => {
+    const maxFrameCharacters = 256 * 1024;
+    const observer = createClientAbortMeteringObserver("gemini", {
+      maxFrameCharacters,
+      protocolFamily: "gemini-interactions",
+    });
+    const bytes = encoder.encode(
+      `event: interaction.completed\ndata: ${JSON.stringify({
+        event_type: "interaction.completed",
+        interaction: {
+          status: "completed",
+          model: "gemini-interactions-test",
+          outputs: [{ text: "x".repeat(128 * 1024) }],
+          usage: {
+            total_input_tokens: 37,
+            total_output_tokens: 8,
+            total_cached_tokens: 0,
+            total_thought_tokens: 0,
+            input_tokens_by_modality: Array.from({ length: 20 }, (_, index) => ({
+              modality: "text",
+              tokens: index,
+              content: "discard modality content",
+            })),
+          },
+        },
+      })}\n\n`
+    );
+    observer.observe(bytes.subarray(0, 32 * 1024));
+    expect(observer.snapshot()).toMatchObject({ text: "", terminalSeen: false });
+    for (let offset = 32 * 1024; offset < bytes.byteLength; offset += 4096) {
+      observer.observe(bytes.subarray(offset, offset + 4096));
+      expect(observer.maxInFlightFrameBytes).toBe(maxFrameCharacters * 2);
+    }
+
+    const snapshot = observer.finish();
+    expect(snapshot).toMatchObject({ terminalSeen: true, protocolFailure: null });
+    expect(snapshot.text).toContain('"total_input_tokens":37');
+    expect(snapshot.text).toContain('"total_output_tokens":8');
+    expect(snapshot.text).toContain('"tokens":15');
+    expect(snapshot.text).not.toContain('"tokens":16');
+    expect(snapshot.text).not.toContain('"outputs"');
+    expect(snapshot.text).not.toContain("discard modality content");
+    expect(snapshot.retainedBytes).toBeLessThanOrEqual(CLIENT_ABORT_METER_MAX_RETAINED_BYTES);
+  });
+
+  it.each(["response", "claude", "gemini", "gemini-cli"] as const)(
+    "keeps the done sentinel invalid for %s",
+    (format) => {
+      const observer = createClientAbortMeteringObserver(format);
+      expect(observer.observe(encoder.encode("event: done\ndata: [DONE]\n\n"))).toMatchObject({
+        terminalSeen: false,
+        protocolFailure: { verdict: "malformed", eventName: "done" },
+      });
+      expect(observer.finish().text).toBe("");
+    }
+  );
+
   it("snapshots only complete frames without ending the usage drain", () => {
     const observer = createClientAbortMeteringObserver("response");
     observer.observe(
@@ -47,7 +463,6 @@ describe("createClientAbortMeteringObserver", () => {
     const before = observer.snapshot();
     expect(before).toMatchObject({ terminalSeen: false, text: "", protocolFailure: null });
 
-    observer.switchToDetachedMode();
     observer.observe(encoder.encode('{"usage":{"input_tokens":10,"output_tokens":5}}}\n\n'));
     expect(observer.finish()).toMatchObject({ terminalSeen: true, protocolFailure: null });
     expect(observer.finish().text).toContain('"output_tokens":5');
@@ -443,15 +858,15 @@ describe("createClientAbortMeteringObserver", () => {
     expect(snapshot.text).not.toContain("response.completed");
   });
 
-  it("recovers at the next NDJSON line after tightening an in-flight frame", () => {
+  it("recovers at the next NDJSON line after snapshotting an in-flight frame", () => {
     const observer = createClientAbortMeteringObserver("gemini", {
-      attachedMaxFrameBytes: 128 * 1024,
+      maxFrameCharacters: 128 * 1024,
     });
     observer.observe(
       encoder.encode(`{"candidates":[{"content":{"parts":[{"text":"${"x".repeat(70 * 1024)}`)
     );
 
-    observer.switchToDetachedMode();
+    expect(observer.snapshot().terminalSeen).toBe(false);
     const result = observer.observe(
       encoder.encode(
         '"}]}}]}\n{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3}}\n'

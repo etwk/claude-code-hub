@@ -23,6 +23,8 @@ export interface DetachedStreamBudgetSnapshot {
 export interface DetachedStreamLease {
   readonly kind: DetachedStreamLeaseKind;
   readonly reservedBytes: number;
+  /** Reserves a larger high-water mark without acquiring another stream slot. */
+  tryGrow(reservedBytes: number): boolean;
   release(): void;
 }
 
@@ -83,7 +85,28 @@ export class DetachedStreamBudget {
       acquired: true,
       lease: {
         kind,
-        reservedBytes,
+        get reservedBytes() {
+          return reservedBytes;
+        },
+        tryGrow: (nextBytes) => {
+          if (!Number.isSafeInteger(nextBytes) || nextBytes <= 0) {
+            throw new RangeError("Detached stream reservation must be a positive safe integer");
+          }
+          if (released) return false;
+          if (nextBytes <= reservedBytes) return true;
+          const limits = this.resolveLimits();
+          const nextTotal = this.reservedBytes + nextBytes - reservedBytes;
+          const capacity =
+            kind === "metering"
+              ? limits.maxReservedBytes
+              : limits.maxReservedBytes -
+                Math.min(limits.maxReservedBytes, Math.max(0, limits.meteringReserveBytes));
+          if (nextTotal > capacity) return false;
+          this.reservedBytes = nextTotal;
+          this.reservedByKind[kind] += nextBytes - reservedBytes;
+          reservedBytes = nextBytes;
+          return true;
+        },
         release: () => {
           if (released) return;
           released = true;

@@ -26,6 +26,7 @@ export class ProbedSseFrames {
   private inferencePreview = "";
   /** 同一流已出现工具调用打开帧；与 createStreamFrameClassifier 的流级语义一致。 */
   private toolCallOpen = false;
+  private interactionsCompleted = false;
   lastFrame: {
     verdict: FrameVerdict;
     acceptTerminal: boolean;
@@ -193,6 +194,16 @@ export class ProbedSseFrames {
     let keepGoing = true;
     if (this.dataLines > 0) {
       const frame = this.probe.finish(this.event, this.preview, this.dataLength);
+      if (this.family === "gemini-interactions") {
+        if (frame.interactionsCompleted) this.interactionsCompleted = true;
+        else if (
+          frame.verdict === "terminal" ||
+          frame.verdict === "error" ||
+          frame.verdict === "malformed"
+        ) {
+          this.interactionsCompleted = false;
+        }
+      }
       this.toolCallOpen ||= frame.toolCallOpen;
       this.lastFrame = {
         verdict:
@@ -215,7 +226,7 @@ export class ProbedSseFrames {
     this.trailingBytes = 0;
     this.preview = "";
     this.inferencePreview = "";
-    this.probe = createFrameProbe(this.family, this.reserveDepth);
+    this.probe = createFrameProbe(this.family, this.reserveDepth, this.interactionsCompleted);
     return keepGoing;
   }
 }

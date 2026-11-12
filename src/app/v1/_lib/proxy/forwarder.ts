@@ -306,7 +306,7 @@ const MAX_PROVIDER_SWITCHES = 20; // 保险栓：最多切换 20 次供应商（
 const DISCOVERY_LEASE_HANDOFF_GRACE_SECONDS = 5;
 const DISCOVERY_TERMINAL_CLEANUP_MAX_MS = 1_000;
 const LOSER_BILLING_DRAIN_FIXED_OVERHEAD_BYTES = 3 * 1024 * 1024;
-const LOSER_BILLING_MAX_FRAME_BYTES = 1024 * 1024;
+const LOSER_BILLING_MAX_FRAME_CHARACTERS = 1024 * 1024;
 
 type LoserBillingDrainResult =
   | { admitted: false; reason: string }
@@ -382,6 +382,7 @@ async function drainLoserBillingEvidence(options: {
   reader: ReadableStreamDefaultReader<Uint8Array>;
   initialChunks: Uint8Array[];
   providerType: Provider["providerType"];
+  pathname: string;
   responseController?: AbortController | null;
   stopReason: string;
   timeoutMs: number;
@@ -389,7 +390,10 @@ async function drainLoserBillingEvidence(options: {
 }): Promise<LoserBillingDrainResult> {
   const observer = createClientAbortMeteringObserver(
     mapProviderTypeToClientFormat(options.providerType),
-    { attachedMaxFrameBytes: LOSER_BILLING_MAX_FRAME_BYTES }
+    {
+      maxFrameCharacters: LOSER_BILLING_MAX_FRAME_CHARACTERS,
+      protocolFamily: mapProviderTypeToFamily(options.providerType, options.pathname) ?? undefined,
+    }
   );
   const initialBytes = options.initialChunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
   const admission = acquireDetachedStreamLease(
@@ -2064,7 +2068,10 @@ export class ProxyForwarder {
               response.body &&
               (session.getEndpointPolicy().kind !== "raw_passthrough" || forceCodexResponsesStream)
             ) {
-              const gateFamily = mapProviderTypeToFamily(currentProvider.providerType);
+              const gateFamily = mapProviderTypeToFamily(
+                currentProvider.providerType,
+                session.requestUrl.pathname
+              );
               if (gateFamily) {
                 const runtime = session as ProxySession & {
                   responseController?: AbortController;
@@ -3286,7 +3293,7 @@ export class ProxyForwarder {
     const [session, provider, , , , , externalSignal, , onLocalAdmissionWait] = args;
     if (
       !provider ||
-      !mapProviderTypeToFamily(provider.providerType) ||
+      !mapProviderTypeToFamily(provider.providerType, session.requestUrl.pathname) ||
       !isStreamGatePrecommitActive(session.isHighConcurrencyModeEnabled())
     ) {
       return await ProxyForwarder.doForwardPrepared(...args);
@@ -5076,6 +5083,7 @@ export class ProxyForwarder {
           reader: billingReader,
           initialChunks: spooledPrefix ? [] : initialChunks,
           providerType: attempt.provider.providerType,
+          pathname: attempt.session.requestUrl.pathname,
           responseController: controller,
           stopReason: "hedge_loser_drain",
           timeoutMs: drainTimeoutMs,
@@ -5551,7 +5559,10 @@ export class ProxyForwarder {
               shouldRunHedgePrecommitGate &&
               (attempt.session.getEndpointPolicy().kind !== "raw_passthrough" ||
                 forceCodexResponsesStream)
-                ? mapProviderTypeToFamily(attempt.provider.providerType)
+                ? mapProviderTypeToFamily(
+                    attempt.provider.providerType,
+                    attempt.session.requestUrl.pathname
+                  )
                 : null;
 
             let acceptedAsWinner = false;
@@ -6792,6 +6803,7 @@ export class ProxyForwarder {
             initialChunks: prefix.chunks,
             onInitialChunksConsumed: () => prefix.lease?.release(),
             providerType: attempt.provider.providerType,
+            pathname: attempt.session.requestUrl.pathname,
             responseController: controller,
             stopReason: "discovery_loser_drain",
             timeoutMs: drainTimeoutMs,
@@ -7525,7 +7537,8 @@ export class ProxyForwarder {
         finalRescue: effectiveFinalRescue,
         controller,
         parser: new DiscoveryValidityParser(
-          mapProviderTypeToFamily(provider.providerType) ?? protocol
+          mapProviderTypeToFamily(provider.providerType, attemptSession.requestUrl.pathname) ??
+            protocol
         ),
         chunks: new DiscoveryPrebuffer(),
         pending: true,

@@ -1019,6 +1019,75 @@ describe("F1 stream content gate x ProxyForwarder paths", () => {
       }
     );
 
+    test.each([0, 100])(
+      "routes Interactions wire independently of a Claude forwarding provider (hedge timeout %i)",
+      async (firstByteTimeoutStreamingMs) => {
+        const provider = createProvider({ firstByteTimeoutStreamingMs });
+        const session = createSession();
+        session.requestUrl = new URL("https://example.com/v1beta/interactions");
+        session.endpointPolicy = resolveEndpointPolicy("/v1beta/interactions");
+        session.setProvider(provider);
+        const frames = [
+          'event: step.delta\ndata: {"index":0,"delta":{"text":"HYDROGEN_READY","type":"text"},"event_type":"step.delta"}\n\n',
+          'event: interaction.completed\ndata: {"interaction":{"status":"completed","usage":{"total_tokens":45,"total_input_tokens":37,"total_cached_tokens":0,"total_output_tokens":8,"total_tool_use_tokens":0,"total_thought_tokens":0},"object":"interaction"},"event_type":"interaction.completed"}\n\n',
+          "event: done\ndata: [DONE]\n\n",
+        ];
+        const doForward = spyOnDoForward();
+        doForward.mockImplementation(async (attemptSession) => {
+          attachAttemptRuntime(attemptSession, {
+            clearResponseTimeout: vi.fn(),
+            releaseAgent: vi.fn(),
+          });
+          return createSseResponse(frames);
+        });
+        const response = await ProxyForwarder.send(session);
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe(frames.join(""));
+        expect(doForward).toHaveBeenCalledTimes(1);
+        expect(mocks.pickRandomProviderWithExclusion).not.toHaveBeenCalled();
+        expect(mocks.recordFailure).not.toHaveBeenCalled();
+        expect(mocks.tombstoneAffinityOnFailure).not.toHaveBeenCalled();
+      }
+    );
+
+    test.each([
+      { firstByteTimeoutStreamingMs: 0, status: "completed" },
+      { firstByteTimeoutStreamingMs: 100, status: "completed" },
+      { firstByteTimeoutStreamingMs: 0, status: "incomplete" },
+      { firstByteTimeoutStreamingMs: 100, status: "incomplete" },
+    ])(
+      "preserves Interactions $status without visible deltas (hedge timeout $firstByteTimeoutStreamingMs)",
+      async ({ firstByteTimeoutStreamingMs, status }) => {
+        const provider = createProvider({ firstByteTimeoutStreamingMs });
+        const session = createSession();
+        session.requestUrl = new URL("https://example.com/v1beta/interactions");
+        session.endpointPolicy = resolveEndpointPolicy("/v1beta/interactions");
+        session.setProvider(provider);
+        const frames = [
+          sseFrame(`interaction.${status}`, {
+            event_type: `interaction.${status}`,
+            interaction: {
+              status,
+              usage: { total_input_tokens: 37, total_output_tokens: 8 },
+            },
+          }),
+          ...(status === "completed" ? ["event: done\ndata: [DONE]\n\n"] : []),
+        ];
+        const doForward = spyOnDoForward();
+        doForward.mockImplementation(async (attemptSession) => {
+          attachAttemptRuntime(attemptSession, {
+            clearResponseTimeout: vi.fn(),
+            releaseAgent: vi.fn(),
+          });
+          return createSseResponse(frames);
+        });
+        const response = await ProxyForwarder.send(session);
+        expect(await response.text()).toBe(frames.join(""));
+        expect(doForward).toHaveBeenCalledTimes(1);
+        expect(mocks.recordFailure).not.toHaveBeenCalled();
+      }
+    );
+
     test.each([
       {
         name: "无参数 tool_use",

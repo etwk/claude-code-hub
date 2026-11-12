@@ -1,10 +1,20 @@
 import { addProbe, JsonProbe, type JsonSummary, probeSpec } from "@/lib/memory/json-probe";
-import { type FrameVerdict, type ProtocolFamily, STREAM_SIGNALS } from "./frame-classifier";
+import {
+  type FrameVerdict,
+  INTERACTIONS_EVENT_TYPES,
+  type ProtocolFamily,
+  STREAM_SIGNALS,
+} from "./frame-classifier";
 
 type Rule = (typeof STREAM_SIGNALS)[ProtocolFamily]["contentRules"][number];
 
 /** 未进入结构分类的帧（哨兵、空 data、损坏 JSON）不携带终态或工具调用事实。 */
-const NOT_STRUCTURED = { acceptTerminal: false, toolCallOpen: false, toolCallClose: false };
+const NOT_STRUCTURED = {
+  acceptTerminal: false,
+  interactionsCompleted: false,
+  toolCallOpen: false,
+  toolCallClose: false,
+};
 
 function compile(family: ProtocolFamily) {
   const spec = probeSpec();
@@ -37,6 +47,9 @@ function compile(family: ProtocolFamily) {
   const signal = STREAM_SIGNALS[family];
   const toolCallRules = signal.toolCallRules ?? { open: [], close: [] };
   const events = new Set<string>(signal.terminalEvents);
+  if (family === "gemini-interactions") {
+    for (const event of INTERACTIONS_EVENT_TYPES) events.add(event);
+  }
   for (const rule of [
     ...signal.contentRules,
     ...signal.errorRules,
@@ -46,7 +59,10 @@ function compile(family: ProtocolFamily) {
   ]) {
     for (const name of rule.eventTypes ?? []) events.add(name);
   }
-  const eventQueries = [...events].map((event) => [event, equal("type", event, true)] as const);
+  const eventQueries = [...events].map(
+    (event) =>
+      [event, equal(family === "gemini-interactions" ? "event_type" : "type", event, true)] as const
+  );
   const wrapEventQueries =
     family === "gemini"
       ? [...events].map((event) => [event, equal("response.type", event, true)] as const)
@@ -56,13 +72,23 @@ function compile(family: ProtocolFamily) {
       (mask, path) => mask | nonempty(prefix + path),
       BigInt(0)
     );
+    const strings = (rule.anyStringPaths ?? []).reduce(
+      (mask, path) =>
+        mask | query(prefix + path, "nonemptyString", (s) => s.kind === "string" && s.nonempty),
+      BigInt(0)
+    );
     const values = (rule.valueMatches ?? []).map((match) =>
       match.values.reduce((mask, value) => mask | equal(prefix + match.path, value), BigInt(0))
     );
     return (facts: bigint, event: string) =>
-      (rule.eventTypes?.length ?? 0) + (rule.anyPaths?.length ?? 0) + values.length > 0 &&
+      (rule.eventTypes?.length ?? 0) +
+        (rule.anyPaths?.length ?? 0) +
+        (rule.anyStringPaths?.length ?? 0) +
+        values.length >
+        0 &&
       (!rule.eventTypes?.length || rule.eventTypes.includes(event)) &&
       (any === BigInt(0) || (facts & any) !== BigInt(0)) &&
+      (strings === BigInt(0) || (facts & strings) !== BigInt(0)) &&
       values.every((mask) => (facts & mask) !== BigInt(0));
   };
   const buildRules = (prefix: string) => ({
@@ -102,6 +128,35 @@ function compile(family: ProtocolFamily) {
   const incompleteStatus = equal("response.status", "incomplete", true);
   const responseError = nonempty("response.error");
   const responseObject = query("response", "object", (s) => s.kind === "object");
+  const interactionObject = query("interaction", "object", (s) => s.kind === "object");
+  const interactionCompleted = equal("interaction.status", "completed", true);
+  const interactionRequiresAction = equal("interaction.status", "requires_action", true);
+  const interactionIncomplete = equal("interaction.status", "incomplete", true);
+  const statusIncomplete = equal("status", "incomplete", true);
+  const usageObject = query("interaction.usage", "object", (s) => s.kind === "object");
+  const validCounter = (s: JsonSummary) =>
+    s.kind === "number" && Number.isFinite(Number(s.text)) && Number(s.text) >= 0;
+  const inputTokens = query("interaction.usage.total_input_tokens", "counter", validCounter);
+  const outputTokens = query("interaction.usage.total_output_tokens", "counter", validCounter);
+  const invalidOptionalCounters = [
+    "total_tokens",
+    "total_cached_tokens",
+    "total_tool_use_tokens",
+    "total_thought_tokens",
+  ].reduce(
+    (mask, key) =>
+      mask | query(`interaction.usage.${key}`, "invalidCounter", (s) => !validCounter(s)),
+    BigInt(0)
+  );
+  const stepIndex = query(
+    "index",
+    "index",
+    (s) => s.kind === "number" && Number.isSafeInteger(Number(s.text)) && Number(s.text) >= 0
+  );
+  const deltaObject = query("delta", "object", (s) => s.kind === "object");
+  const deltaType = query("delta.type", "nonemptyString", (s) => s.kind === "string" && s.nonempty);
+  const stepObject = query("step", "object", (s) => s.kind === "object");
+  const stepType = query("step.type", "nonemptyString", (s) => s.kind === "string" && s.nonempty);
   const classifyRules = (
     facts: bigint,
     event: string,
@@ -131,7 +186,51 @@ function compile(family: ProtocolFamily) {
       const facts = parser.facts;
       const event = (eventName ?? "").trim();
       const effective =
-        event || eventQueries.find(([, bit]) => (facts & bit) !== BigInt(0))?.[0] || "";
+        (family === "gemini-interactions" ? "" : event) ||
+        eventQueries.find(([, bit]) => (facts & bit) !== BigInt(0))?.[0] ||
+        "";
+      if (family === "gemini-interactions") {
+        const aligned =
+          parser.rootKind === "object" &&
+          effective !== "" &&
+          (event === "" || event === "message" || event === effective);
+        if (!aligned) return { ...NOT_STRUCTURED, verdict: "malformed" as const };
+        if (rules.error.some((test) => test(facts, effective))) {
+          return { ...NOT_STRUCTURED, verdict: "error" as const };
+        }
+        const clean =
+          effective === "interaction.completed" &&
+          (facts & interactionObject) !== BigInt(0) &&
+          (facts & (interactionCompleted | interactionRequiresAction)) !== BigInt(0) &&
+          (facts & usageObject) !== BigInt(0) &&
+          (facts & inputTokens) !== BigInt(0) &&
+          (facts & outputTokens) !== BigInt(0) &&
+          (facts & invalidOptionalCounters) === BigInt(0);
+        const incomplete =
+          (facts & interactionObject) !== BigInt(0) &&
+          (facts & interactionIncomplete) !== BigInt(0);
+        if (effective === "interaction.completed" || effective === "interaction.incomplete") {
+          return {
+            ...NOT_STRUCTURED,
+            verdict: clean || incomplete ? ("terminal" as const) : ("malformed" as const),
+            acceptTerminal: clean || incomplete,
+            interactionsCompleted: clean,
+          };
+        }
+        if (effective === "interaction.status_update" && (facts & statusIncomplete) !== BigInt(0)) {
+          return { ...NOT_STRUCTURED, verdict: "terminal" as const, acceptTerminal: true };
+        }
+        if (
+          (effective === "step.delta" || effective === "step.start") &&
+          ((facts & stepIndex) === BigInt(0) ||
+            (effective === "step.delta"
+              ? (facts & deltaObject) === BigInt(0) || (facts & deltaType) === BigInt(0)
+              : (facts & stepObject) === BigInt(0) || (facts & stepType) === BigInt(0)))
+        ) {
+          return { ...NOT_STRUCTURED, verdict: "malformed" as const };
+        }
+        return { ...NOT_STRUCTURED, verdict: classifyRules(facts, effective, rules) };
+      }
       let verdict = classifyRules(facts, effective, rules);
       if (verdict === "neutral" && wrappedRules && (facts & responseObject) !== BigInt(0)) {
         const wrappedEvent =
@@ -152,6 +251,7 @@ function compile(family: ProtocolFamily) {
       return {
         verdict,
         acceptTerminal: family === "openai-responses" && (clean || incomplete),
+        interactionsCompleted: false,
         toolCallOpen: toolCallOpen.some((test) => test(facts, effective)),
         toolCallClose: toolCallClose.some((test) => test(facts, effective)),
       };
@@ -160,7 +260,11 @@ function compile(family: ProtocolFamily) {
 }
 
 const programs = new Map<ProtocolFamily, ReturnType<typeof compile>>();
-export function createFrameProbe(family: ProtocolFamily, reserveDepth?: (bytes: number) => void) {
+export function createFrameProbe(
+  family: ProtocolFamily,
+  reserveDepth?: (bytes: number) => void,
+  interactionsCompleted = false
+) {
   let program = programs.get(family);
   if (!program) {
     program = compile(family);
@@ -168,7 +272,8 @@ export function createFrameProbe(family: ProtocolFamily, reserveDepth?: (bytes: 
   }
   const parser = new JsonProbe(program.spec, reserveDepth);
   let empty = true;
-  const sentinel = STREAM_SIGNALS[family].doneSentinel;
+  const sentinel =
+    family === "gemini-interactions" ? "[DONE]" : STREAM_SIGNALS[family].doneSentinel;
   let sentinelIndex = 0;
   let sentinelValid = Boolean(sentinel);
   return {
@@ -188,8 +293,20 @@ export function createFrameProbe(family: ProtocolFamily, reserveDepth?: (bytes: 
     },
     finish: (event: string | null, head: string, length: number) => {
       if (empty) return { ...NOT_STRUCTURED, verdict: "neutral" as const };
-      if (sentinelValid && sentinelIndex === sentinel?.length)
+      if (sentinelValid && sentinelIndex === sentinel?.length) {
+        if (family === "gemini-interactions") {
+          const effective = (event ?? "").trim();
+          return {
+            ...NOT_STRUCTURED,
+            verdict:
+              interactionsCompleted &&
+              (effective === "" || effective === "message" || effective === "done")
+                ? ("neutral" as const)
+                : ("malformed" as const),
+          };
+        }
         return { ...NOT_STRUCTURED, verdict: "terminal" as const };
+      }
       return program.evaluate(parser, event, head, length);
     },
   };

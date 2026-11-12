@@ -526,6 +526,70 @@ describe("discovery validity", () => {
   });
 });
 
+describe("Gemini Interactions Discovery validation", () => {
+  const delta =
+    'event: step.delta\ndata: {"index":0,"delta":{"text":"HYDROGEN_READY","type":"text"},"event_type":"step.delta"}\n\n';
+  const completion =
+    'event: interaction.completed\ndata: {"interaction":{"status":"completed","usage":{"total_tokens":45,"total_input_tokens":37,"total_cached_tokens":0,"total_output_tokens":8,"total_tool_use_tokens":0,"total_thought_tokens":0},"object":"interaction"},"event_type":"interaction.completed"}\n\n';
+  const done = "event: done\ndata: [DONE]\n\n";
+
+  it("accepts the exact completed fixture, including a coalesced compatibility DONE", () => {
+    expect(classifyDiscoveryChunk(delta + completion + done, "gemini-interactions")).toEqual({
+      ready: true,
+      terminal: true,
+      error: false,
+    });
+    const parser = new DiscoveryValidityParser("gemini-interactions");
+    expect(parser.push(completion)).toEqual({ ready: true, terminal: true, error: false });
+    expect(parser.push(done)).toEqual({ ready: true, terminal: true, error: false });
+  });
+
+  it("recognizes event_type without an SSE event and fragmented wire data", () => {
+    const parser = new DiscoveryValidityParser("gemini-interactions");
+    const wire = (delta + completion + done).replace(/^event: [^\n]+\n/gm, "");
+    for (const character of wire) parser.push(character);
+    expect(parser.ready).toBe(true);
+    expect(parser.terminal).toBe(true);
+    expect(parser.error).toBe(false);
+  });
+
+  it.each([
+    done,
+    "event: interaction.completed\ndata: {broken}\n\n",
+    'data: {"event_type":"interaction.completed","interaction":{"status":"completed"}}\n\n',
+    completion.replace("event: interaction.completed", "event: step.delta"),
+    'data: {"event_type":"interaction.completed","interaction":{"status":"failed"}}\n\n',
+    'data: {"event_type":"interaction.status_update","status":"failed"}\n\n',
+  ])("does not let failed, malformed or unaccounted streams win Discovery", (frame) => {
+    const parser = new DiscoveryValidityParser("gemini-interactions");
+    expect(parser.push(frame)).toEqual({ ready: false, terminal: true, error: true });
+    expect(parser.push(completion + done)).toEqual({ ready: false, terminal: true, error: true });
+  });
+
+  it("admits explicit incomplete results but not completed status-only updates", () => {
+    expect(
+      classifyDiscoveryChunk(
+        'data: {"event_type":"interaction.incomplete","interaction":{"status":"incomplete"}}\n\n',
+        "gemini-interactions"
+      )
+    ).toEqual({
+      ready: true,
+      terminal: true,
+      error: false,
+    });
+    expect(
+      classifyDiscoveryChunk(
+        'data: {"event_type":"interaction.status_update","status":"completed","usage":{"total_input_tokens":37,"total_output_tokens":8}}\n\n',
+        "gemini-interactions"
+      )
+    ).toEqual({
+      ready: false,
+      terminal: false,
+      error: false,
+    });
+  });
+});
+
 function parserForOpenAIChatToolCall(): DiscoveryValidityParser {
   return new DiscoveryValidityParser("openai-chat");
 }
