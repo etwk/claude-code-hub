@@ -122,7 +122,6 @@ function createSession(initialModel: string): ProxySession {
     originalFormat: "claude",
     providerType: null,
     originalModelName: null,
-    originalUrlPathname: null,
     providerChain: [],
     cacheTtlResolved: null,
     context1mApplied: false,
@@ -317,5 +316,146 @@ describe("Gemini path rewrite after a regex redirect", () => {
 
     expect(ModelRedirector.apply(session, provider)).toBe(true);
     expect(session.requestUrl.pathname).toBe("/v1beta/models/gemini-2.5-pro");
+  });
+});
+
+describe("Native Gemini model redirect consistency", () => {
+  function createNativeSession(
+    model: string,
+    action: string,
+    message: Record<string, unknown>
+  ): ProxySession {
+    const session = createSession(model);
+    session.requestUrl = new URL(`https://example.com/v1beta/models/${model}:${action}`);
+    session.request.message = message;
+    session.request.buffer = new TextEncoder().encode(JSON.stringify(message)).buffer;
+    session.originalFormat = "gemini";
+    return session;
+  }
+
+  test("redirects and resets every batch embedding model without adding a top-level model", () => {
+    const session = createNativeSession("embedding-a", "batchEmbedContents", {
+      requests: [
+        { model: "models/embedding-a", content: { parts: [{ text: "hi" }] } },
+        { model: "embedding-a", content: { parts: [{ text: "bye" }] } },
+      ],
+    });
+    const providerA = createProvider({
+      providerType: "gemini",
+      modelRedirects: [{ matchType: "exact", source: "embedding-a", target: "models/embedding-b" }],
+    });
+    const providerB = createProvider({ id: 2, providerType: "gemini", modelRedirects: null });
+
+    expect(ModelRedirector.apply(session, providerA)).toBe(true);
+    expect(session.request.model).toBe("embedding-b");
+    expect(session.requestUrl.pathname).toBe("/v1beta/models/embedding-b:batchEmbedContents");
+    expect(session.request.message).not.toHaveProperty("model");
+    expect(JSON.parse(new TextDecoder().decode(session.request.buffer))).toEqual({
+      requests: [
+        { model: "models/embedding-b", content: { parts: [{ text: "hi" }] } },
+        { model: "embedding-b", content: { parts: [{ text: "bye" }] } },
+      ],
+    });
+
+    expect(ModelRedirector.apply(session, providerB)).toBe(false);
+    expect(session.request.model).toBe("embedding-a");
+    expect(session.requestUrl.pathname).toBe("/v1beta/models/embedding-a:batchEmbedContents");
+    expect(JSON.parse(new TextDecoder().decode(session.request.buffer))).toEqual({
+      requests: [
+        { model: "models/embedding-a", content: { parts: [{ text: "hi" }] } },
+        { model: "embedding-a", content: { parts: [{ text: "bye" }] } },
+      ],
+    });
+  });
+
+  test("fallback matches the routing baseline and rewrites countTokens nested models", () => {
+    const session = createNativeSession("gemini-client", "countTokens", {
+      generateContentRequest: { model: "models/gemini-client", contents: [] },
+    });
+    session.setOriginalModel("gemini-client");
+    const providerA = createProvider({
+      providerType: "gemini",
+      modelRedirects: [{ matchType: "exact", source: "gemini-routing", target: "gemini-a" }],
+    });
+    const providerB = createProvider({
+      id: 2,
+      providerType: "gemini",
+      modelRedirects: [{ matchType: "exact", source: "gemini-routing", target: "gemini-b" }],
+    });
+
+    expect(ModelRedirector.apply(session, providerA, "gemini-routing")).toBe(true);
+    expect(session.request.message.generateContentRequest).toEqual({
+      model: "models/gemini-a",
+      contents: [],
+    });
+    expect(ModelRedirector.apply(session, providerB, "gemini-routing")).toBe(true);
+    expect(session.request.model).toBe("gemini-b");
+    expect(session.requestUrl.pathname).toBe("/v1beta/models/gemini-b:countTokens");
+    expect(session.request.message.generateContentRequest).toEqual({
+      model: "models/gemini-b",
+      contents: [],
+    });
+
+    expect(
+      ModelRedirector.apply(session, createProvider({ modelRedirects: null }), "gemini-routing")
+    ).toBe(false);
+    expect(session.request.model).toBe("gemini-routing");
+    expect(session.requestUrl.pathname).toBe("/v1beta/models/gemini-routing:countTokens");
+    expect(session.request.message.generateContentRequest).toEqual({
+      model: "models/gemini-routing",
+      contents: [],
+    });
+    expect(session.request.message).not.toHaveProperty("model");
+    expect(session.getOriginalModel()).toBe("gemini-client");
+  });
+
+  test("preserves an unchanged path-only raw body buffer during a redirect", () => {
+    const session = createNativeSession("gemini-a", "generateContent", { contents: [] });
+    const buffer = new TextEncoder().encode('{ "contents" : [] }\n').buffer;
+    session.request.buffer = buffer;
+    const provider = createProvider({
+      providerType: "gemini",
+      modelRedirects: [{ matchType: "exact", source: "gemini-a", target: "gemini-b" }],
+    });
+    expect(ModelRedirector.apply(session, provider)).toBe(true);
+    expect(session.request.buffer).toBe(buffer);
+    expect(session.request.message).toEqual({ contents: [] });
+    expect(session.requestUrl.pathname).toBe("/v1beta/models/gemini-b:generateContent");
+  });
+
+  test("retains original JSON bytes when a native redirect target is already the routing model", () => {
+    const session = createNativeSession("gemini-a", "generateContent", {
+      model: "models/gemini-a",
+      contents: [],
+    });
+    const buffer = new TextEncoder().encode(
+      '{ "model": "models/gemini-a", "contents": [] }\n'
+    ).buffer;
+    session.request.buffer = buffer;
+    const provider = createProvider({
+      providerType: "gemini",
+      modelRedirects: [{ matchType: "exact", source: "gemini-a", target: "models/gemini-a" }],
+    });
+    expect(ModelRedirector.apply(session, provider)).toBe(true);
+    expect(session.request.buffer).toBe(buffer);
+    expect(session.request.message.model).toBe("models/gemini-a");
+    expect(session.request.model).toBe("gemini-a");
+  });
+
+  test("matches an explicit provider-filter input while preserving the client billing identity", () => {
+    const session = createSession("client-model");
+    session.setOriginalModel("client-model");
+    const provider = createProvider({
+      providerType: "openai-compatible",
+      modelRedirects: [
+        { matchType: "exact", source: "provider-filter-model", target: "target-model" },
+      ],
+    });
+    expect(ModelRedirector.apply(session, provider, "provider-filter-model")).toBe(true);
+    expect(session.request.message.model).toBe("target-model");
+    expect(session.getOriginalModel()).toBe("client-model");
+    expect(ModelRedirector.apply(session, createProvider(), "provider-filter-model")).toBe(false);
+    expect(session.request.message.model).toBe("provider-filter-model");
+    expect(session.getOriginalModel()).toBe("client-model");
   });
 });

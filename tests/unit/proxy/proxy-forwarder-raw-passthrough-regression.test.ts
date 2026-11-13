@@ -53,6 +53,7 @@ vi.mock("@/app/v1/_lib/responses-ws/upstream-adapter", async (importOriginal) =>
 
 vi.mock("@/lib/request-filter-engine", () => ({
   requestFilterEngine: {
+    applyForProvider: vi.fn(async () => {}),
     applyFinal: mocks.applyFinalRequestFilters,
   },
 }));
@@ -117,7 +118,6 @@ function createRawPassthroughSession(bodyText: string, extraHeaders?: HeadersIni
     originalFormat: "openai",
     providerType: null,
     originalModelName: null,
-    originalUrlPathname: null,
     providerChain: [],
     cacheTtlResolved: null,
     context1mApplied: false,
@@ -127,7 +127,6 @@ function createRawPassthroughSession(bodyText: string, extraHeaders?: HeadersIni
     endpointPolicy: resolveEndpointPolicy("/v1/responses/compact"),
     setCacheTtlResolved: vi.fn(),
     getCacheTtlResolved: vi.fn(() => null),
-    getCurrentModel: vi.fn(() => "gpt-5.5"),
     clientRequestsContext1m: vi.fn(() => false),
     setContext1mApplied: vi.fn(),
     getContext1mApplied: vi.fn(() => false),
@@ -189,6 +188,166 @@ describe("ProxyForwarder raw passthrough regression", () => {
 
     expect(readBodyText(capturedInit?.body)).toBe(originalBody);
   });
+
+  it.each([
+    {
+      path: "/v1/messages/count_tokens",
+      managedPath: "/v1/messages/count_tokens",
+      providerType: "claude" as const,
+      model: "claude-opus-latest",
+      target: "claude-opus-4-7",
+      input: [{ role: "user", content: "count these tokens" }],
+    },
+    {
+      path: "/v1/responses/compact",
+      managedPath: "/v1/responses/compact",
+      providerType: "codex" as const,
+      model: "gpt-latest",
+      target: "gpt-5.5",
+      input: [{ type: "compaction", encrypted_content: "opaque+/=state" }],
+    },
+    {
+      path: "/v1/responses",
+      managedPath: "/v1/responses/compact",
+      providerType: "codex" as const,
+      model: "gpt-latest",
+      target: "gpt-5.5",
+      input: [{ type: "compaction_trigger" }],
+    },
+  ])("routes aliases on raw $path without changing other payload fields", async (scenario) => {
+    const originalBody = {
+      model: scenario.model,
+      ...(scenario.providerType === "claude"
+        ? { messages: scenario.input }
+        : { input: scenario.input }),
+      _opaque_client_field: { model: "not-a-routing-field" },
+      stream: false,
+      temperature: 0.75,
+    };
+    const session = createRawPassthroughSession(JSON.stringify(originalBody), {
+      "content-encoding": "identity",
+    });
+    session.request.model = scenario.model;
+    session.requestUrl = new URL(`https://proxy.example.com${scenario.path}?transport=http`);
+    const endpointPolicy = resolveEndpointPolicy(scenario.managedPath);
+    Object.assign(session, {
+      endpointPolicy,
+      getEndpointPolicy: () => endpointPolicy,
+      originalFormat: scenario.providerType === "claude" ? "claude" : "openai",
+    });
+    const provider = createProvider();
+    provider.providerType = scenario.providerType;
+    provider.url = "https://upstream.example.com";
+    provider.modelRedirects = [
+      { matchType: "exact", source: scenario.model, target: scenario.target },
+    ];
+
+    // Narrow test boundary: exercise real request preparation, replacing only HTTP transport.
+    const forwarder = ProxyForwarder as unknown as {
+      fetchWithoutAutoDecode: (url: string, init: RequestInit) => Promise<Response>;
+      doForward: (session: ProxySession, provider: Provider, baseUrl: string) => Promise<Response>;
+    };
+    let forwarded: { url: string; body: BodyInit | undefined; headers: Headers } | undefined;
+    vi.spyOn(forwarder, "fetchWithoutAutoDecode").mockImplementationOnce(async (url, init) => {
+      forwarded = { url, body: init.body ?? undefined, headers: new Headers(init.headers) };
+      return new Response("{}", { headers: { "content-type": "application/json" } });
+    });
+
+    await forwarder.doForward(session, provider, provider.url);
+
+    expect(new URL(forwarded!.url).pathname).toBe(scenario.path);
+    expect(new URL(forwarded!.url).searchParams.get("transport")).toBe("http");
+    expect(JSON.parse(readBodyText(forwarded!.body)!)).toEqual({
+      ...originalBody,
+      model: scenario.target,
+    });
+    expect(session.getOriginalModel()).toBe(scenario.model);
+    expect(session.getCurrentModel()).toBe(scenario.target);
+    expect(forwarded!.headers.get("content-encoding")).toBeNull();
+    expect(forwarded!.headers.get("content-length")).toBeNull();
+  });
+
+  it.each([
+    {
+      body: String.raw`{
+  "model" : "alias",
+  "tools": [{"name":"f","input_schema":{"properties":{"id":{"const":9007199254740993},"ratio":{"const":1.234567890123456789}}}}],
+  "messages": [{"role":"user","content":"你好 { \"model\": \"alias\" } \\"}],
+  "nested": {"model":"alias"}
+}
+`,
+      target: "concrete",
+      replacements: ['"alias"'],
+    },
+    {
+      body: String.raw`{"\u006dodel":"shadow-alias", "model":"alias", "nested":{"model":"alias","id":9007199254740993}}`,
+      target: 'concrete/"quoted"\\model',
+      replacements: ['"shadow-alias"', '"alias"'],
+    },
+    {
+      body: String.raw`{"model":{"model":"untouched-until-value-replaced","values":[null,true,[1,2]]}, "\u006d\u006fdel" : "alias", "schema":{"enum":[9007199254740993]}}`,
+      target: "concrete",
+      replacements: [
+        '{"model":"untouched-until-value-replaced","values":[null,true,[1,2]]}',
+        '"alias"',
+      ],
+    },
+  ])("preserves non-model bytes when routing raw JSON: $target", async (scenario) => {
+    const session = createRawPassthroughSession(scenario.body);
+    session.request.model = "alias";
+    const provider = createProvider();
+    provider.modelRedirects = [{ matchType: "exact", source: "alias", target: scenario.target }];
+    const forwarder = ProxyForwarder as unknown as {
+      fetchWithoutAutoDecode: (url: string, init: RequestInit) => Promise<Response>;
+      doForward: (session: ProxySession, provider: Provider, baseUrl: string) => Promise<Response>;
+    };
+    let forwardedBody: BodyInit | undefined;
+    vi.spyOn(forwarder, "fetchWithoutAutoDecode").mockImplementationOnce(async (_url, init) => {
+      forwardedBody = init.body ?? undefined;
+      return new Response("{}", { headers: { "content-type": "application/json" } });
+    });
+
+    await forwarder.doForward(session, provider, provider.url);
+
+    let expected = scenario.body;
+    for (const value of scenario.replacements) {
+      expected = expected.replace(value, JSON.stringify(scenario.target));
+    }
+    expect(readBodyText(forwardedBody)).toBe(expected);
+    expect(JSON.parse(readBodyText(forwardedBody)!).model).toBe(scenario.target);
+    expect(session.getOriginalModel()).toBe("alias");
+    expect(session.getCurrentModel()).toBe(scenario.target);
+  });
+
+  it.each(["another-model", "gpt-5.5"])(
+    "preserves raw bytes and encoding for unchanged redirect %s",
+    async (source) => {
+      const originalBody = '{\n "model": "gpt-5.5", "input": [], "_opaque": 9007199254740993\n}\n';
+      const session = createRawPassthroughSession(originalBody, { "content-encoding": "snappy" });
+      const provider = createProvider();
+      provider.modelRedirects = [{ matchType: "exact", source, target: "gpt-5.5" }];
+      const forwarder = ProxyForwarder as unknown as {
+        fetchWithoutAutoDecode: (url: string, init: RequestInit) => Promise<Response>;
+        doForward: (
+          session: ProxySession,
+          provider: Provider,
+          baseUrl: string
+        ) => Promise<Response>;
+      };
+      let forwardedBody: BodyInit | undefined;
+      let forwardedHeaders: Headers | undefined;
+      vi.spyOn(forwarder, "fetchWithoutAutoDecode").mockImplementationOnce(async (_url, init) => {
+        forwardedBody = init.body ?? undefined;
+        forwardedHeaders = new Headers(init.headers);
+        return new Response("{}", { headers: { "content-type": "application/json" } });
+      });
+
+      await forwarder.doForward(session, provider, provider.url);
+
+      expect(readBodyText(forwardedBody)).toBe(originalBody);
+      expect(forwardedHeaders!.get("content-encoding")).toBe("snappy");
+    }
+  );
 
   it("非 raw 请求重新序列化后移除失真的 content-encoding 与 content-length", async () => {
     const originalBody = '{\n  "model": "gpt-5.5",\n  "input": [1, 2, 3]\n}\n';

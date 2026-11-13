@@ -6,7 +6,14 @@ import {
   resolveProviderModelRedirectTarget,
 } from "@/lib/provider-model-redirects";
 import type { Provider } from "@/types/provider";
+import {
+  isNativeGeminiModelPath,
+  normalizeGeminiModelName,
+  rewriteGeminiModelPath,
+  rewriteGeminiRequestModels,
+} from "../gemini/model";
 import { isOpenAIImageMultipartRequest, setOpenAIImageMultipartModel } from "./openai-image-compat";
+import { rewriteRawJsonModel } from "./raw-json-model";
 import type { ProxySession } from "./session";
 
 /**
@@ -24,22 +31,27 @@ export class ModelRedirector {
    * @param provider - 目标供应商
    * @returns 是否进行了重定向
    */
-  static apply(session: ProxySession, provider: Provider): boolean {
-    // 获取真正的原始模型（用户请求的模型，不是上一个供应商重定向后的模型）
-    const trueOriginalModel = session.getOriginalModel() || session.request.model;
+  static apply(
+    session: ProxySession,
+    provider: Provider,
+    routingModel: string | null = session.getRoutingModel()
+  ): boolean {
+    // Provider attempts match the global routing identity (or their explicit
+    // provider-filter input), never a previous provider's redirected target.
+    const nativeGemini = isNativeGeminiModelPath(session.requestUrl.pathname);
+    const originalModel =
+      routingModel && nativeGemini ? normalizeGeminiModelName(routingModel) : routingModel;
 
     // 检查是否配置了模型重定向
     if (!hasProviderModelRedirectRules(provider.modelRedirects)) {
       session.clearCurrentModelRedirect();
       // 如果新供应商没有重定向配置，且之前发生过重定向，需要重置
-      if (session.isModelRedirected() && trueOriginalModel) {
-        ModelRedirector.resetToOriginal(session, trueOriginalModel, provider);
+      if (originalModel && session.request.model !== originalModel) {
+        ModelRedirector.resetToOriginal(session, originalModel, provider);
       }
       return false;
     }
 
-    // 获取原始模型名称
-    const originalModel = trueOriginalModel;
     if (!originalModel) {
       logger.debug("[ModelRedirector] No model in request, skipping redirect", {
         providerId: provider.id,
@@ -56,7 +68,7 @@ export class ModelRedirector {
     if (!matchedRule) {
       session.clearCurrentModelRedirect();
       // 如果新供应商对此模型没有重定向规则，且之前发生过重定向，需要重置
-      if (session.isModelRedirected()) {
+      if (session.request.model !== originalModel) {
         ModelRedirector.resetToOriginal(session, originalModel, provider);
       } else {
         logger.debug("[ModelRedirector] No redirect configured for model", {
@@ -68,7 +80,10 @@ export class ModelRedirector {
       return false;
     }
 
-    const redirectedModel = resolveProviderModelRedirectTarget(originalModel, matchedRule);
+    const resolvedTarget = resolveProviderModelRedirectTarget(originalModel, matchedRule);
+    const redirectedModel = nativeGemini
+      ? normalizeGeminiModelName(resolvedTarget)
+      : resolvedTarget;
 
     // 执行重定向
     logger.info("[ModelRedirector] Model redirected", {
@@ -81,65 +96,19 @@ export class ModelRedirector {
       providerType: provider.providerType,
     });
 
-    // 保存原始模型（用于计费，必须在修改 request.model 之前）
-    session.setOriginalModel(originalModel);
-
-    // Gemini 特殊处理：修改 URL 路径中的模型名称
-    // Gemini API 的模型名称通过 URL 路径传递，不是通过 request body
-    // 例如：/v1internal/models/gemini-2.5-flash:generateContent
-    if (provider.providerType === "gemini" || provider.providerType === "gemini-cli") {
-      const originalPath = session.requestUrl.pathname;
-      // 替换 URL 中的模型名称
-      // 匹配模式：/models/{model}:action 或 /models/{model}
-      // 用替换函数：正则重定向的目标可能带有客户端模型名里的 $ 字符，必须按字面量写入
-      const newPath = originalPath.replace(
-        /\/models\/([^/:]+)(:[^/]+)?$/,
-        (_match, _model: string, action: string | undefined) =>
-          `/models/${redirectedModel}${action ?? ""}`
-      );
-
-      if (newPath !== originalPath) {
-        // 创建新的 URL 对象并修改路径
-        const newUrl = new URL(session.requestUrl.toString());
-        newUrl.pathname = newPath;
-        session.requestUrl = newUrl;
-
-        logger.debug(`[ModelRedirector] Updated Gemini URL path`, {
-          originalPath,
-          newPath,
-          originalModel,
-          redirectedModel,
-        });
-      }
-    }
-
-    // multipart 图片请求不能伪装成 JSON；模型改写写回 sidecar metadata。
-    const imageRequestMetadata = session.getOpenAIImageRequestMetadata();
-    if (isOpenAIImageMultipartRequest(imageRequestMetadata) && imageRequestMetadata) {
-      setOpenAIImageMultipartModel(imageRequestMetadata, redirectedModel);
-      session.request.message.model = redirectedModel;
-      session.request.model = redirectedModel;
-    } else {
-      // 修改 message 对象中的模型（对 Claude/OpenAI 有效，对 Gemini 无效但不影响）
-      session.request.message.model = redirectedModel;
-
-      // 更新缓存的 model 字段
-      session.request.model = redirectedModel;
-
-      // System One keeps the original multipart bytes; the forwarder replaces its JSON part.
-      if (!session.request.systemOneMultipart) {
-        const updatedBody = JSON.stringify(session.request.message);
-        session.request.buffer = new TextEncoder().encode(updatedBody).buffer;
-      }
-    }
+    // The immutable client identity remains the billing/audit identity even
+    // when administrator filters changed the model used to match this rule.
+    const clientModel = session.getOriginalModel() ?? originalModel;
+    session.setOriginalModel(clientModel);
+    ModelRedirector.setRequestModel(session, redirectedModel);
 
     // 更新日志（记录重定向）
     session.request.note = `[Model Redirected: ${originalModel} → ${redirectedModel}] ${session.request.note || ""}`;
 
     const redirectInfo = {
-      originalModel,
+      originalModel: clientModel,
       redirectedModel,
-      billingModel: originalModel,
+      billingModel: clientModel,
       matchedRule: {
         matchType: matchedRule.matchType,
         source: matchedRule.source,
@@ -199,45 +168,50 @@ export class ModelRedirector {
     originalModel: string,
     provider: Provider
   ): void {
-    // 重置 request.model 和 request.message.model / multipart sidecar
-    session.request.model = originalModel;
-    const imageRequestMetadata = session.getOpenAIImageRequestMetadata();
-    if (isOpenAIImageMultipartRequest(imageRequestMetadata) && imageRequestMetadata) {
-      setOpenAIImageMultipartModel(imageRequestMetadata, originalModel);
-      session.request.message.model = originalModel;
-    } else {
-      session.request.message.model = originalModel;
-    }
-
-    // 重置 Gemini URL 路径（如果适用）
-    if (provider.providerType === "gemini" || provider.providerType === "gemini-cli") {
-      const originalPathname = session.getOriginalUrlPathname();
-      if (originalPathname && originalPathname !== session.requestUrl.pathname) {
-        const newUrl = new URL(session.requestUrl.toString());
-        newUrl.pathname = originalPathname;
-        session.requestUrl = newUrl;
-
-        logger.debug("[ModelRedirector] Reset Gemini URL path to original", {
-          originalPathname,
-          providerId: provider.id,
-          providerName: provider.name,
-        });
-      }
-    }
-
-    // 重新生成请求 buffer
-    if (
-      !isOpenAIImageMultipartRequest(imageRequestMetadata) &&
-      !session.request.systemOneMultipart
-    ) {
-      const updatedBody = JSON.stringify(session.request.message);
-      session.request.buffer = new TextEncoder().encode(updatedBody).buffer;
-    }
+    ModelRedirector.setRequestModel(session, originalModel);
 
     logger.info("[ModelRedirector] Reset model to original (provider switch)", {
       originalModel,
       providerId: provider.id,
       providerName: provider.name,
     });
+  }
+
+  private static setRequestModel(session: ProxySession, model: string): void {
+    const pathname = session.requestUrl.pathname;
+    const nativeGemini = isNativeGeminiModelPath(pathname);
+    const target = nativeGemini ? normalizeGeminiModelName(model) : model;
+    const imageRequestMetadata = session.getOpenAIImageRequestMetadata();
+    let bodyChanged: boolean;
+    if (nativeGemini) {
+      bodyChanged = rewriteGeminiRequestModels(session.request.message, target, pathname);
+      const newPath = rewriteGeminiModelPath(pathname, target);
+      if (newPath !== pathname) {
+        const newUrl = new URL(session.requestUrl.toString());
+        newUrl.pathname = newPath;
+        session.requestUrl = newUrl;
+      }
+    } else {
+      bodyChanged = session.request.message.model !== target;
+      if (bodyChanged) session.request.message.model = target;
+      if (isOpenAIImageMultipartRequest(imageRequestMetadata) && imageRequestMetadata) {
+        setOpenAIImageMultipartModel(imageRequestMetadata, target);
+      }
+    }
+    session.request.model = target;
+
+    // Raw JSON only changes model tokens; preserve every unrelated byte.
+    // Multipart bodies belong to their protocol serializer.
+    if (
+      bodyChanged &&
+      !isOpenAIImageMultipartRequest(imageRequestMetadata) &&
+      !session.request.systemOneMultipart &&
+      !session.request.audioMultipart
+    ) {
+      session.request.buffer =
+        session.getEndpointPolicy().bypassForwarderPreprocessing && session.request.buffer
+          ? rewriteRawJsonModel(session.request.buffer, target)
+          : new TextEncoder().encode(JSON.stringify(session.request.message)).buffer;
+    }
   }
 }

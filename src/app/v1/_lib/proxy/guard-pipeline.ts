@@ -3,7 +3,6 @@ import { ProxyClientGuard } from "./client-guard";
 import type { EndpointPolicy } from "./endpoint-policy";
 import { ProxyMessageService } from "./message-service";
 import { ProxyModelGuard } from "./model-guard";
-import { ProxyProviderRequestFilter } from "./provider-request-filter";
 import { ProxyProviderResolver } from "./provider-selector";
 import { ProxyRateLimitGuard } from "./rate-limit-guard";
 import { ProxyReplayGuard } from "./replay/replay-guard";
@@ -40,7 +39,6 @@ export type GuardStepKey =
   | "replayAttach"
   | "rateLimit"
   | "provider"
-  | "providerRequestFilter"
   | "messageContext";
 
 export interface GuardConfig {
@@ -136,13 +134,6 @@ const Steps: Record<GuardStepKey, GuardStep> = {
       return ProxyProviderResolver.ensure(session);
     },
   },
-  providerRequestFilter: {
-    name: "providerRequestFilter",
-    async execute(session) {
-      await ProxyProviderRequestFilter.ensure(session);
-      return null;
-    },
-  },
   messageContext: {
     name: "messageContext",
     async execute(session) {
@@ -222,7 +213,6 @@ export const CHAT_PIPELINE: GuardConfig = {
     "replayAttach",
     "rateLimit",
     "provider",
-    "providerRequestFilter",
     "messageContext",
   ],
 };

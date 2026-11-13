@@ -93,7 +93,6 @@ function createSession(): ProxySession {
     originalFormat: "claude",
     providerType: null,
     originalModelName: null,
-    originalUrlPathname: null,
     providerChain: [],
     cacheTtlResolved: null,
     context1mApplied: false,

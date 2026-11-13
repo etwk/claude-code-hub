@@ -288,7 +288,6 @@ function createSession(
     },
     originalFormat,
     originalModelName: model,
-    originalUrlPathname: endpoint,
     provider,
     providerChain: [],
     providerType: overrides.providerType ?? "codex",

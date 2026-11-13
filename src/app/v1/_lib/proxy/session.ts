@@ -1,5 +1,14 @@
 import type { Context } from "hono";
 import {
+  extractGeminiModelFromPath,
+  getGeminiModelAction,
+  isNativeGeminiModelPath,
+  normalizeGeminiModelName,
+  rewriteGeminiModelPath,
+  rewriteGeminiRequestModels,
+} from "@/app/v1/_lib/gemini/model";
+import { resolveEndpointFamilyByPath } from "@/app/v1/_lib/proxy/endpoint-family-catalog";
+import {
   isCountTokensEndpointPath,
   normalizeEndpointPath,
   V1_ENDPOINT_PATHS,
@@ -48,11 +57,18 @@ import type { BillingModelSource, CodexPriorityBillingSource } from "@/types/sys
 import type { User } from "@/types/user";
 import type { AffinityLookupResult } from "./affinity/affinity-store";
 import type { FingerprintChain } from "./affinity/fingerprint";
+import {
+  type AudioMultipartMetadata,
+  isAudioTranscriptionEndpointPath,
+  parseAudioMultipartRequest,
+} from "./audio-compat";
 import { type EndpointPolicy, resolveEndpointPolicy } from "./endpoint-policy";
 import { ProxyError } from "./errors";
+import { applyNonStreamRequestMode } from "./fake-streaming/stream-intent";
 import type { ClientFormat } from "./format-mapper";
 import {
   buildOpenAIImageLogicalBody,
+  cloneOpenAIImageRequestMetadata,
   getOpenAIImageEndpoint,
   getOpenAIImageMultipartSummary,
   isOpenAIImageMultipartContentType,
@@ -130,6 +146,7 @@ export interface ProxyRequestPayload {
   model: string | null;
   imageRequestMetadata?: OpenAIImageRequestMetadata | null;
   systemOneMultipart?: SystemOneMultipartMetadata;
+  audioMultipart?: AudioMultipartMetadata;
 }
 
 interface RequestBodyResult {
@@ -142,6 +159,7 @@ interface RequestBodyResult {
   actualBodyBytes?: number;
   imageRequestMetadata?: OpenAIImageRequestMetadata | null;
   systemOneMultipart?: SystemOneMultipartMetadata;
+  audioMultipart?: AudioMultipartMetadata;
   /**
    * 入站请求体实际解压所用的 content-encoding（链）。
    * 非空表示代理已解压请求体，调用方需剥离出站 `content-encoding` 头，
@@ -184,6 +202,9 @@ export class ProxySession {
   /** 仅在请求内存被强制归还后调用：此时响应早已结束，正文不再属于任何受管额度。 */
   dropRequestBodyAfterForcedMemoryRelease(): void {
     this.request.buffer = undefined;
+    this.request.audioMultipart = undefined;
+    this.routingBaseline = undefined;
+    this.providerRetryRectifiers = undefined;
     this.request.message = {};
     this.request.log = "";
     this.forwardedRequestBody = null;
@@ -225,9 +246,21 @@ export class ProxySession {
 
   // 模型重定向追踪：保存原始模型名（重定向前）
   private originalModelName: string | null = null;
-
-  // 原始 URL 路径（用于 Gemini 模型重定向重置）
-  private originalUrlPathname: string | null = null;
+  private originalModelCaptured = false;
+  private readonly originalBodyHasModel: boolean;
+  private routingModelName?: string | null;
+  private nonStreamUpstreamRequired = false;
+  private routingBaseline?: {
+    message: Record<string, unknown>;
+    headers: Headers;
+    pathname: string;
+    buffer?: ArrayBuffer;
+    imageRequestMetadata?: OpenAIImageRequestMetadata | null;
+  };
+  private providerRetryRectifiers?: ReadonlyArray<{
+    providerId: number;
+    rectify: (message: Record<string, unknown>) => unknown;
+  }>;
 
   // 当前供应商 attempt 的模型重定向快照。
   // 用于在 hedge shadow session 中延迟把 redirect 归属到真正的 winner/failed 链路项。
@@ -338,6 +371,7 @@ export class ProxySession {
     this.originalHeaders = new Headers(init.headers); // 原始 headers 的副本，用于检测过滤器修改
     this.headerLog = init.headerLog;
     this.request = init.request;
+    this.originalBodyHasModel = Object.hasOwn(init.request.message, "model");
     this.originalAnthropicThinking = extractNativeThinkingConfigFromRequestBody(
       init.request.message,
       "anthropic"
@@ -386,6 +420,20 @@ export class ProxySession {
     // 针对官方 Gemini 路径（/v1beta/models/{model}:generateContent）
     // 请求体中通常没有 model 字段，需从 URL 路径提取用于调度器匹配
     const modelFromPath = extractModelFromPath(requestUrl.pathname);
+    if (isNativeGeminiModelPath(requestUrl.pathname)) {
+      for (const model of collectRequestModelValues(
+        bodyResult.requestMessage,
+        requestUrl.pathname
+      )) {
+        if (
+          typeof model !== "string" ||
+          model.trim() === "" ||
+          normalizeGeminiModelName(model) !== modelFromPath
+        ) {
+          throw new ProxyError("Gemini request model fields must match the URL model", 400);
+        }
+      }
+    }
 
     // 双重检测（请求体优先，其次路径），若判断为 Gemini 请求则给出默认模型
     const isLikelyGeminiRequest =
@@ -393,11 +441,15 @@ export class ProxySession {
       typeof (bodyResult.requestMessage as Record<string, unknown>).request === "object" ||
       modelFromPath !== null;
 
-    const resolvedModel =
+    const extractedModel =
       modelFromBody ??
       modelFromImageRequest ??
       modelFromPath ??
       (isLikelyGeminiRequest ? "gemini-2.5-flash" : null);
+    const resolvedModel =
+      extractedModel !== null && isNativeGeminiModelPath(requestUrl.pathname)
+        ? normalizeGeminiModelName(extractedModel)
+        : extractedModel;
 
     const isLargeRequestBody =
       (bodyResult.contentLength !== null &&
@@ -432,6 +484,7 @@ export class ProxySession {
       model: resolvedModel,
       imageRequestMetadata: bodyResult.imageRequestMetadata,
       systemOneMultipart: bodyResult.systemOneMultipart,
+      audioMultipart: bodyResult.audioMultipart,
     };
     if (bodyResult.lazyLog) setLazyRequestLog(request);
 
@@ -446,6 +499,7 @@ export class ProxySession {
       context: c,
       clientAbortSignal,
     });
+    session.setOriginalModel(resolvedModel);
     // 后台所有者卡住且宽限到期时，租约已被强制归还；同步丢弃正文引用，避免被卡住的闭包继续钉住内存。
     onRequestMemoryForcedEnd(() => session.dropRequestBodyAfterForcedMemoryRelease());
     return session;
@@ -1288,10 +1342,12 @@ export class ProxySession {
 
   /**
    * 获取原始模型（用户请求的，用于计费）
-   * 如果没有发生重定向，返回当前模型
+   * 客户端身份在全局过滤、供应商改写和最终过滤之间保持不变。
    */
   getOriginalModel(): string | null {
-    return this.originalModelName ?? this.request.model;
+    return this.originalModelCaptured || this.originalModelName != null
+      ? this.originalModelName
+      : this.request.model;
   }
 
   /**
@@ -1299,6 +1355,135 @@ export class ProxySession {
    */
   getCurrentModel(): string | null {
     return this.request.model;
+  }
+
+  /** Global guard identity, never a previous provider's outgoing identity. */
+  getRoutingModel(): string | null {
+    return this.routingModelName !== undefined ? this.routingModelName : this.getOriginalModel();
+  }
+
+  /** Capture global routing identity without freezing later internal request transformations. */
+  captureRoutingModel(): void {
+    if (this.routingModelName !== undefined) return;
+    this.setOriginalModel(this.getOriginalModel());
+    this.routingModelName = this.request.model;
+  }
+
+  /** Capture forwarding state lazily, after internal transforms and before provider mutations. */
+  captureRoutingBaseline(): void {
+    if (this.routingBaseline) return;
+    this.captureRoutingModel();
+    this.routingBaseline = {
+      message: structuredClone(this.request.message),
+      headers: new Headers(this.headers),
+      pathname: this.requestUrl.pathname,
+      buffer: this.request.buffer,
+      imageRequestMetadata: cloneOpenAIImageRequestMetadata(this.request.imageRequestMetadata),
+    };
+  }
+
+  /** Fake streaming requires buffered upstream JSON regardless of request filters. */
+  requireNonStreamUpstream(): void {
+    this.nonStreamUpstreamRequired = true;
+    this.enforceUpstreamRequestMode();
+  }
+
+  enforceUpstreamRequestMode(message = this.request.message): void {
+    if (!this.nonStreamUpstreamRequired) return;
+    const converted = applyNonStreamRequestMode({
+      format: this.originalFormat,
+      pathname: this.requestUrl.pathname,
+      search: this.requestUrl.search,
+      body: message,
+    });
+    if (
+      converted.pathname !== this.requestUrl.pathname ||
+      converted.search !== this.requestUrl.search
+    ) {
+      const next = new URL(this.requestUrl);
+      next.pathname = converted.pathname;
+      next.search = converted.search;
+      this.requestUrl = next;
+    }
+  }
+
+  /** Fresh logical state per attempt; binary buffers and multipart metadata stay paired. */
+  beginProviderAttempt(): void {
+    this.captureRoutingBaseline();
+    const baseline = this.routingBaseline!;
+    this.request.message = structuredClone(baseline.message);
+    this.request.model = this.getRoutingModel();
+    this.request.buffer = baseline.buffer;
+    this.request.imageRequestMetadata = cloneOpenAIImageRequestMetadata(
+      baseline.imageRequestMetadata
+    );
+    this.cachedPriceData = undefined;
+    this.resolvedPricingCache?.clear();
+    this.requestUrl.pathname = baseline.pathname;
+    for (const key of [...this.headers.keys()]) this.headers.delete(key);
+    baseline.headers.forEach((value, key) => this.headers.set(key, value));
+    this.clearCurrentModelRedirect();
+  }
+
+  /** Keep only the exact applied mutation, never a provider-filtered body snapshot. */
+  registerProviderRetryRectifier(
+    providerId: number,
+    rectify: (message: Record<string, unknown>) => unknown
+  ): void {
+    const entry = { providerId, rectify };
+    // Hedge sessions shallow-copy this immutable registry; append by replacement.
+    this.providerRetryRectifiers = this.providerRetryRectifiers
+      ? [...this.providerRetryRectifiers, entry]
+      : [entry];
+  }
+
+  /** Replay after provider guards so another provider never inherits these fixes. */
+  applyProviderRetryRectifiers(providerId: number): void {
+    if (!this.providerRetryRectifiers) return;
+    for (const entry of this.providerRetryRectifiers) {
+      if (entry.providerId === providerId) entry.rectify(this.request.message);
+    }
+  }
+
+  /** Reflect the actual logical wire model without changing client/routing identities. */
+  synchronizeRequestModel(message: Record<string, unknown> = this.request.message): void {
+    this.setOriginalModel(this.getOriginalModel());
+    const pathname = this.requestUrl.pathname;
+    const nativeGemini = isNativeGeminiModelPath(pathname);
+    const modelValues = collectRequestModelValues(message, pathname);
+    if (modelValues.some((model) => typeof model !== "string" || model.trim() === "")) {
+      throw new ProxyError("Request filters must preserve a non-empty string model", 400);
+    }
+    if (
+      !nativeGemini &&
+      modelValues.length === 0 &&
+      ((this.originalBodyHasModel ?? this.request.model !== null) ||
+        (this.routingBaseline !== undefined &&
+          Object.hasOwn(this.routingBaseline.message, "model")) ||
+        Object.hasOwn(this.request.message, "model"))
+    ) {
+      throw new ProxyError("Request filters must not remove the model", 400);
+    }
+    const models = (modelValues as string[]).map((model) =>
+      nativeGemini ? normalizeGeminiModelName(model) : model
+    );
+    if (nativeGemini && models.some((model) => /[\s/:]/.test(model))) {
+      throw new ProxyError("Request filters must preserve a valid Gemini model identity", 400);
+    }
+    const changedModels = [...new Set(models.filter((model) => model !== this.request.model))];
+    if (changedModels.length > 1) {
+      throw new ProxyError("Request filters produced conflicting model identities", 400);
+    }
+    const model = changedModels[0] ?? models[0] ?? this.request.model;
+    if (nativeGemini && model) {
+      rewriteGeminiRequestModels(message, model, pathname);
+      this.requestUrl.pathname = rewriteGeminiModelPath(pathname, model);
+    }
+    if (this.request.model !== model) {
+      this.request.model = model;
+      this.cachedPriceData = undefined;
+      this.resolvedPricingCache?.clear();
+    }
   }
 
   getOpenAIImageRequestMetadata(): OpenAIImageRequestMetadata | null {
@@ -1361,12 +1546,11 @@ export class ProxySession {
   /**
    * 设置原始模型（在重定向前调用）
    * 只能设置一次，避免多次重定向覆盖
-   * 同时保存原始 URL 路径（用于 Gemini 重置）
    */
   setOriginalModel(model: string | null): void {
-    if (this.originalModelName === null) {
+    if (!this.originalModelCaptured && this.originalModelName == null) {
+      this.originalModelCaptured = true;
       this.originalModelName = model;
-      this.originalUrlPathname = this.requestUrl.pathname;
     }
   }
 
@@ -1375,13 +1559,6 @@ export class ProxySession {
    */
   isModelRedirected(): boolean {
     return this.originalModelName !== null && this.originalModelName !== this.request.model;
-  }
-
-  /**
-   * 获取原始 URL 路径（用于 Gemini 模型重定向重置）
-   */
-  getOriginalUrlPathname(): string | null {
-    return this.originalUrlPathname;
   }
 
   /**
@@ -1712,26 +1889,41 @@ function resolveSessionManagedEndpoint(
   return "/";
 }
 
+/** Only protocol model-bearing fields; never inspect user content recursively. */
+function collectRequestModelValues(message: Record<string, unknown>, pathname: string): unknown[] {
+  const models: unknown[] = [];
+  if (Object.hasOwn(message, "model")) models.push(message.model);
+  if (!isNativeGeminiModelPath(pathname)) return models;
+  if (getGeminiModelAction(pathname) === "batchembedcontents" && Array.isArray(message.requests)) {
+    for (const request of message.requests) {
+      if (request && typeof request === "object" && "model" in request) {
+        models.push(request.model);
+      }
+    }
+  }
+  if (getGeminiModelAction(pathname) === "counttokens") {
+    const nested = message.generateContentRequest;
+    if (nested && typeof nested === "object" && "model" in nested) {
+      models.push(nested.model);
+    }
+  }
+  return models;
+}
+
 export function extractModelFromPath(pathname: string): string | null {
-  // 匹配 Vertex AI 路径：/v1/publishers/google/models/{model}:<action>
-  const publishersMatch = pathname.match(/\/publishers\/google\/models\/([^/:]+)(?::[^/]+)?/);
-  if (publishersMatch?.[1]) {
-    return publishersMatch[1];
+  if (resolveEndpointFamilyByPath(pathname)?.id === "openai-models") {
+    // Preserve the existing opaque, encoded OpenAI metadata identity. Native
+    // Gemini segment validation and resource normalization do not apply here.
+    return /^\/v1\/models\/([^/:]+)\/?$/i.exec(pathname)?.[1] ?? null;
   }
-
-  // 匹配官方 Gemini 路径：/v1beta/models/{model}:<action>
-  const geminiMatch = pathname.match(/\/v1beta\/models\/([^/:]+)(?::[^/]+)?/);
-  if (geminiMatch?.[1]) {
-    return geminiMatch[1];
+  try {
+    return extractGeminiModelFromPath(pathname);
+  } catch (error) {
+    if (error instanceof URIError) {
+      throw new ProxyError("Gemini URL must contain a valid encoded model identity", 400);
+    }
+    throw error;
   }
-
-  // 兼容 /v1/models/{model}:<action> 形式（未来可能的正式版本）
-  const v1Match = pathname.match(/\/v1\/models\/([^/:]+)(?::[^/]+)?/);
-  if (v1Match?.[1]) {
-    return v1Match[1];
-  }
-
-  return null;
 }
 
 /**
@@ -1762,7 +1954,8 @@ async function parseRequestBody(c: Context): Promise<RequestBodyResult> {
   const pathname = new URL(c.req.url).pathname;
   // 原始（可能被压缩的）入站字节：用于截断检测与 multipart 透传。
   const multipart = Boolean(
-    getOpenAIImageEndpoint(pathname) && isOpenAIImageMultipartContentType(contentType)
+    isOpenAIImageMultipartContentType(contentType) &&
+      (getOpenAIImageEndpoint(pathname) || isAudioTranscriptionEndpointPath(pathname))
   );
   const loaded = await loadRequestBody(c.req.raw, !multipart);
   retainRequestMemory(c.req.raw, loaded.lease);
@@ -1793,6 +1986,33 @@ async function parseRequestBody(c: Context): Promise<RequestBodyResult> {
   let requestBodyLog: string;
   let requestBodyLogNote: string | undefined;
   let imageRequestMetadata: OpenAIImageRequestMetadata | null = null;
+
+  if (
+    isAudioTranscriptionEndpointPath(pathname) &&
+    isOpenAIImageMultipartContentType(contentType)
+  ) {
+    const contentEncoding = c.req.header("content-encoding")?.trim().toLowerCase();
+    if (contentEncoding && contentEncoding !== "identity") {
+      throw new ProxyError("Compressed audio multipart requests are not supported", 400);
+    }
+    const parsed = parseAudioMultipartRequest(rawBodyBuffer, contentType!);
+    if (!parsed) {
+      throw new ProxyError(
+        "Invalid audio multipart request: exactly one text model is required",
+        400
+      );
+    }
+    loaded.lease.shrinkTo(loaded.retainedBytes);
+    return {
+      requestMessage: parsed.requestMessage,
+      requestBodyLog: "",
+      lazyLog: true,
+      requestBodyBuffer: rawBodyBuffer,
+      contentLength,
+      actualBodyBytes: receivedBodyBytes,
+      audioMultipart: parsed.metadata,
+    };
+  }
 
   if (getOpenAIImageEndpoint(pathname) && isOpenAIImageMultipartContentType(contentType)) {
     // 图片 multipart 请求保留 sidecar metadata，并为过滤/敏感词提供文本字段视图。

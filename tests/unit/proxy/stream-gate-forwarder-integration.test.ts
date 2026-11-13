@@ -531,7 +531,6 @@ function createSession(clientAbortSignal: AbortSignal | null = null): ProxySessi
     originalFormat: "claude",
     providerType: null,
     originalModelName: null,
-    originalUrlPathname: null,
     providerChain: [],
     cacheTtlResolved: null,
     context1mApplied: false,

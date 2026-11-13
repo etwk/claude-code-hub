@@ -22,5 +22,8 @@ export class ProxyRequestFilter {
       // Fail-open: 过滤失败不阻塞主流程
       logger.error("[ProxyRequestFilter] Failed to apply global request filters", { error });
     }
+    // Identity errors are request failures, not fail-open filter engine errors.
+    session.synchronizeRequestModel();
+    session.captureRoutingModel();
   }
 }
