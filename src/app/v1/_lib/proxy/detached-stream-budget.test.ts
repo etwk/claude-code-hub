@@ -36,6 +36,36 @@ describe("DetachedStreamBudget", () => {
     });
   });
 
+  it("grows a lease without consuming another slot and releases its final reservation once", () => {
+    const budget = createBudget({ maxConcurrency: 2 });
+    const meter = budget.tryAcquire("metering", 128);
+    const other = budget.tryAcquire("metering", 512);
+    if (!meter.acquired || !other.acquired) throw new Error("expected metering leases");
+    expect(meter.lease.tryGrow(513)).toBe(false);
+    expect(meter.lease.reservedBytes).toBe(128);
+    expect(meter.lease.tryGrow(512)).toBe(true);
+    expect(meter.lease.tryGrow(256)).toBe(true);
+    expect(budget.snapshot()).toMatchObject({ activeStreams: 2, reservedBytes: 1024 });
+    expect(meter.lease.reservedBytes).toBe(512);
+    meter.lease.release();
+    meter.lease.release();
+    expect(meter.lease.tryGrow(768)).toBe(false);
+    expect(budget.snapshot()).toMatchObject({ activeStreams: 1, reservedBytes: 512 });
+    other.lease.release();
+    expect(budget.snapshot()).toMatchObject({ activeStreams: 0, reservedBytes: 0 });
+  });
+
+  it("preserves metering headroom when an existing Replay reservation grows", () => {
+    const budget = createBudget();
+    const replay = budget.tryAcquire("replay", 128);
+    if (!replay.acquired) throw new Error("expected Replay lease");
+    expect(replay.lease.tryGrow(769)).toBe(false);
+    expect(replay.lease.tryGrow(768)).toBe(true);
+    expect(budget.tryAcquire("metering", 256).acquired).toBe(true);
+    expect(() => replay.lease.tryGrow(Number.NaN)).toThrow(RangeError);
+    expect(budget.snapshot().reservedBytes).toBe(1024);
+  });
+
   it("reserves headroom for metering when admitting Replay owners", () => {
     const budget = createBudget();
     const replay = budget.tryAcquire("replay", 768);

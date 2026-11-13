@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyFrame,
+  classifyStructuredTerminalKind,
   createStreamFrameClassifier,
+  isCleanInteractionsCompletion,
+  isInteractionsUsage,
   isCleanResponsesCompletion,
   isRequestEchoFrame,
   mapProviderTypeToFamily,
@@ -17,6 +20,24 @@ describe("mapProviderTypeToFamily", () => {
     expect(mapProviderTypeToFamily("gemini-cli")).toBe("gemini");
     expect(mapProviderTypeToFamily("unknown-type")).toBeNull();
     expect(mapProviderTypeToFamily(null)).toBeNull();
+  });
+  it.each(["claude", "codex", "openai-compatible", "gemini", "unknown-type", null])(
+    "selects the Interactions endpoint protocol before provider type %s",
+    (providerType) => {
+      expect(mapProviderTypeToFamily(providerType, "/v1beta/interactions")).toBe(
+        "gemini-interactions"
+      );
+      expect(mapProviderTypeToFamily(providerType, "/v1beta/interactions/interaction_1")).toBe(
+        "gemini-interactions"
+      );
+    }
+  );
+
+  it("does not reinterpret similarly named endpoints", () => {
+    expect(mapProviderTypeToFamily("claude", "/v1beta/interactions-other")).toBe("anthropic");
+    expect(mapProviderTypeToFamily("gemini", "/v1beta/models/model:streamGenerateContent")).toBe(
+      "gemini"
+    );
   });
 });
 
@@ -983,5 +1004,197 @@ describe("isCleanResponsesCompletion", () => {
         frame("response.incomplete", { status: "completed" })
       )
     ).toBe(false);
+  });
+});
+
+describe("Gemini Interactions frames", () => {
+  const completion = {
+    event_type: "interaction.completed",
+    interaction: {
+      status: "completed",
+      object: "interaction",
+      usage: {
+        total_tokens: 45,
+        total_input_tokens: 37,
+        total_cached_tokens: 0,
+        total_output_tokens: 8,
+        total_tool_use_tokens: 0,
+        total_thought_tokens: 0,
+      },
+    },
+  };
+
+  it.each([
+    { type: "text", text: "HYDROGEN_READY" },
+    { type: "arguments_delta", arguments: '{"city":' },
+    { type: "function_call", name: "lookup", arguments: { city: "Paris" } },
+    { type: "mcp_server_tool_call", name: "lookup", arguments: { city: "Paris" } },
+    { type: "image", data: "base64" },
+    { type: "audio", uri: "https://example.com/audio" },
+    { type: "video", data: "base64" },
+    { type: "document", uri: "https://example.com/document" },
+    { type: "thought_signature", signature: "opaque" },
+    { type: "thought_summary", content: { type: "text", text: "summary" } },
+    { type: "code_execution_call", arguments: { code: "print(1)" } },
+    { type: "google_search_call", arguments: { queries: ["weather"] } },
+    { type: "url_context_call", arguments: { urls: ["https://example.com"] } },
+    { type: "function_result", result: { value: "ready" } },
+    { type: "code_execution_result", result: "1" },
+    { type: "google_search_result", result: [{ title: "result" }] },
+    { type: "text_annotation_delta", annotations: [{ uri: "https://example.com" }] },
+  ])("recognizes deliverable $type payload, including data-only wire events", (delta) => {
+    const data = JSON.stringify({ event_type: "step.delta", index: 0, delta });
+    for (const event of [null, "message", "step.delta"]) {
+      expect(classifyFrame("gemini-interactions", event, data)).toBe("content");
+    }
+  });
+
+  it("requires actual payload rather than lifecycle or tool metadata", () => {
+    for (const delta of [
+      { type: "text", text: "" },
+      { type: "text", text: 42 },
+      { type: "text", text: ["bad"] },
+      { type: "arguments_delta", arguments: "" },
+      { type: "function_call", name: "lookup", arguments: {} },
+    ]) {
+      expect(
+        classifyFrame(
+          "gemini-interactions",
+          "step.delta",
+          JSON.stringify({ event_type: "step.delta", index: 0, delta })
+        )
+      ).toBe("neutral");
+    }
+    expect(
+      classifyFrame(
+        "gemini-interactions",
+        "step.start",
+        JSON.stringify({
+          event_type: "step.start",
+          index: 0,
+          step: { type: "model_output" },
+        })
+      )
+    ).toBe("neutral");
+    expect(
+      classifyFrame(
+        "gemini-interactions",
+        "step.start",
+        JSON.stringify({
+          event_type: "step.start",
+          index: 0,
+          step: { type: "function_call", name: "f", arguments: { x: 1 } },
+        })
+      )
+    ).toBe("content");
+  });
+
+  it("requires the event_type discriminant, alignment and a structured indexed delta", () => {
+    const valid = { event_type: "step.delta", index: 0, delta: { type: "text", text: "ready" } };
+    for (const payload of [
+      { ...valid, event_type: undefined },
+      { ...valid, event_type: "interaction.created" },
+      { ...valid, delta: null },
+      { ...valid, delta: [{ type: "text", text: "bad" }] },
+      { ...valid, delta: { type: ["text"], text: "bad" } },
+      { ...valid, index: -1 },
+      { ...valid, index: "0" },
+      { ...valid, index: 0.5 },
+      { ...valid, index: undefined },
+    ]) {
+      expect(classifyFrame("gemini-interactions", "step.delta", JSON.stringify(payload))).toBe(
+        "malformed"
+      );
+    }
+    expect(classifyFrame("gemini-interactions", "step.delta", "{broken}")).toBe("malformed");
+    expect(classifyFrame("gemini-interactions", "step.delta", "[]")).toBe("malformed");
+    expect(classifyFrame("gemini-interactions", "interaction.completed", "{}")).toBe("malformed");
+  });
+
+  it.each(["completed", "requires_action"])(
+    "accepts a %s turn only with explicit finite usage",
+    (status) => {
+      const terminal = { ...completion, interaction: { ...completion.interaction, status } };
+      for (const event of [null, "message", "interaction.completed"]) {
+        expect(isCleanInteractionsCompletion(event, terminal)).toBe(true);
+        expect(classifyFrame("gemini-interactions", event, JSON.stringify(terminal))).toBe(
+          "terminal"
+        );
+        expect(classifyStructuredTerminalKind("gemini-interactions", event, terminal)).toBe(
+          "complete"
+        );
+      }
+      expect(isCleanInteractionsCompletion("step.delta", terminal)).toBe(false);
+      for (const usage of [
+        undefined,
+        {},
+        [],
+        { total_input_tokens: 37 },
+        { total_output_tokens: 8 },
+        { total_input_tokens: "37", total_output_tokens: 8 },
+        { total_input_tokens: 37, total_output_tokens: -1 },
+        { total_input_tokens: Infinity, total_output_tokens: 8 },
+        { total_input_tokens: 37, total_output_tokens: NaN },
+        { total_input_tokens: 37, total_output_tokens: 8, total_cached_tokens: -1 },
+        { total_input_tokens: 37, total_output_tokens: 8, total_thought_tokens: null },
+      ]) {
+        expect(isInteractionsUsage(usage)).toBe(false);
+        const invalid = { ...terminal, interaction: { ...terminal.interaction, usage } };
+        expect(isCleanInteractionsCompletion(null, invalid)).toBe(false);
+        expect(classifyFrame("gemini-interactions", null, JSON.stringify(invalid))).toBe(
+          "malformed"
+        );
+      }
+      expect(isInteractionsUsage({ total_input_tokens: 0, total_output_tokens: 0 })).toBe(true);
+    }
+  );
+
+  it("preserves failed and incomplete lifecycle results", () => {
+    for (const status of ["failed", "cancelled"]) {
+      const payload = { ...completion, interaction: { ...completion.interaction, status } };
+      expect(classifyFrame("gemini-interactions", null, JSON.stringify(payload))).toBe("error");
+      expect(isCleanInteractionsCompletion(null, payload)).toBe(false);
+      expect(classifyStructuredTerminalKind("gemini-interactions", null, payload)).toBeNull();
+      expect(
+        classifyFrame(
+          "gemini-interactions",
+          null,
+          JSON.stringify({ event_type: "interaction.status_update", status })
+        )
+      ).toBe("error");
+    }
+    for (const payload of [
+      { ...completion, interaction: { ...completion.interaction, status: "incomplete" } },
+      { event_type: "interaction.incomplete", interaction: { status: "incomplete" } },
+      { event_type: "interaction.status_update", status: "incomplete" },
+    ]) {
+      expect(classifyFrame("gemini-interactions", null, JSON.stringify(payload))).toBe("terminal");
+      expect(classifyStructuredTerminalKind("gemini-interactions", null, payload)).toBe(
+        "incomplete"
+      );
+      expect(isCleanInteractionsCompletion(null, payload)).toBe(false);
+    }
+    const failed = {
+      ...completion,
+      interaction: { ...completion.interaction, error: { message: "failed" } },
+    };
+    expect(classifyFrame("gemini-interactions", null, JSON.stringify(failed))).toBe("error");
+    expect(isCleanInteractionsCompletion(null, failed)).toBe(false);
+  });
+
+  it("permits a compatibility DONE only after validated completion in this stream", () => {
+    expect(classifyFrame("gemini-interactions", "done", "[DONE]")).toBe("malformed");
+    const classifier = createStreamFrameClassifier("gemini-interactions");
+    expect(classifier.classify("done", "[DONE]")).toBe("malformed");
+    expect(classifier.classify("interaction.completed", JSON.stringify(completion))).toBe(
+      "terminal"
+    );
+    expect(classifier.classify("done", "[DONE]")).toBe("neutral");
+    expect(classifier.classify(null, " [DONE] ")).toBe("neutral");
+    expect(classifier.classify("step.delta", "[DONE]")).toBe("malformed");
+    expect(classifier.classify("done", "[DONE]")).toBe("malformed");
+    classifier.classifyStructured(null, completion);
+    expect(classifier.classify(null, "{broken}")).toBe("malformed");
+    expect(classifier.classify("done", "[DONE]")).toBe("malformed");
   });
 });

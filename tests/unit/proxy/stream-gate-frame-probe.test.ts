@@ -10,7 +10,13 @@ import { createFrameProbe } from "@/app/v1/_lib/proxy/stream-gate/frame-probe";
 import { ProbedSseFrames } from "@/app/v1/_lib/proxy/stream-gate/probed-sse-frames";
 import { SseFrameParser } from "@/app/v1/_lib/proxy/stream-gate/sse-frames";
 
-const families: ProtocolFamily[] = ["anthropic", "openai-chat", "openai-responses", "gemini"];
+const families: ProtocolFamily[] = [
+  "anthropic",
+  "openai-chat",
+  "openai-responses",
+  "gemini",
+  "gemini-interactions",
+];
 const samples = [
   "{}",
   "[]",
@@ -89,6 +95,29 @@ const samples = [
   '{"type":"response.done","response":{"status":"completed","error":{"message":"x"}}}',
   '{"candidates":[{"content":{"parts":[{"thought":true,"text":"","thoughtSignature":"sig"}]}}]}',
   '{"response":{"candidates":[{"content":{"parts":[{"thoughtSignature":""}]}}]}}',
+  '{"event_type":"step.delta","index":0,"delta":{"type":"text","text":"HYDROGEN_READY"}}',
+  '{"event_type":"step.delta","index":0,"delta":{"type":"text","text":["bad"]}}',
+  '{"event_type":"step.delta","index":0,"delta":{"type":["text"],"text":"bad"}}',
+  '{"event_type":"step.delta","index":0,"delta":{"type":"google_search_call","arguments":{"queries":["weather"]}}}',
+  '{"event_type":"step.delta","index":0,"delta":{"type":"image","data":"base64"}}',
+  '{"event_type":"step.start","index":0,"step":{"type":"function_call","name":"f","arguments":{"x":1}}}',
+  '{"event_type":"step.start","index":-1,"step":{"type":"model_output"}}',
+  '{"event_type":"interaction.completed","interaction":{"status":"completed","usage":{"total_input_tokens":37,"total_output_tokens":8}}}',
+  '{"event_type":"interaction.completed","interaction":{"status":"completed","usage":{"total_input_tokens":0,"total_output_tokens":0}}}',
+  '{"event_type":"interaction.completed","interaction":{"status":"requires_action","usage":{"total_input_tokens":138,"total_output_tokens":20,"total_thought_tokens":141}}}',
+  '{"event_type":"interaction.completed","interaction":{"status":"requires_action","usage":{}}}',
+  '{"event_type":"interaction.completed","interaction":{"status":"requires_action","usage":{"total_input_tokens":138,"total_output_tokens":20,"total_tool_use_tokens":null}}}',
+  '{"event_type":"interaction.completed","interaction":{"status":"requires_action","usage":{"total_input_tokens":138,"total_output_tokens":20},"error":{"message":"failed"}}}',
+  '{"event_type":"interaction.completed","interaction":{"status":"completed","usage":{"total_input_tokens":37,"total_output_tokens":1e999}}}',
+  '{"event_type":"interaction.completed","interaction":{"status":"completed","usage":{"total_input_tokens":37,"total_output_tokens":8,"total_thought_tokens":null}}}',
+  '{"event_type":"interaction.completed","interaction":{"status":"completed","usage":{}}}',
+  '{"event_type":"interaction.completed","interaction":{"status":"completed","usage":{"total_input_tokens":37,"total_output_tokens":8}},"interaction":{}}',
+  '{"event_type":"interaction.completed","interaction":{"status":"incomplete"}}',
+  '{"event_type":"interaction.completed","interaction":{"status":"failed"}}',
+  '{"event_type":"interaction.completed","interaction":{"status":"completed","usage":{"total_input_tokens":37,"total_output_tokens":8},"error":{"message":"failed"}}}',
+  '{"event_type":"interaction.status_update","status":"failed"}',
+  '{"event_type":"interaction.status_update","status":"incomplete"}',
+  '{"event_type":"interaction.created"}',
 ];
 
 describe("增量分类与既有分类器差分", () => {
@@ -139,7 +168,17 @@ describe("增量分类与既有分类器差分", () => {
 
   it.each(families)("%s 任意分块、重复键与错误优先", (family) => {
     for (const data of samples) {
-      for (const event of [null, "error", "response.completed", "unknown"]) {
+      for (const event of [
+        null,
+        "message",
+        "error",
+        "response.completed",
+        "step.delta",
+        "step.start",
+        "interaction.completed",
+        "interaction.status_update",
+        "unknown",
+      ]) {
         for (const size of [1, 7, 128]) {
           const probe = createFrameProbe(family);
           for (let i = 0; i < data.length; i += size) probe.feed(data.slice(i, i + size));
@@ -233,6 +272,48 @@ describe("增量分类与既有分类器差分", () => {
           classifyFrame(family, null, data)
         );
       }
+    }
+  });
+});
+
+describe("Interactions bounded completion facts", () => {
+  it("accepts aligned successful or incomplete lifecycle terminals", () => {
+    for (const data of samples.filter((sample) => sample.includes("interaction."))) {
+      for (const event of [null, "message", "interaction.completed", "step.delta"]) {
+        const probe = createFrameProbe("gemini-interactions");
+        for (const character of data) probe.feed(character);
+        expect(probe.finish(event, data, data.length).acceptTerminal).toBe(
+          classifyFrame("gemini-interactions", event, data) === "terminal"
+        );
+      }
+    }
+  });
+
+  it("carries validated completion state across frames before permitting DONE", () => {
+    const completed =
+      'data: {"event_type":"interaction.completed","interaction":{"status":"completed","usage":{"total_input_tokens":37,"total_output_tokens":8}}}\n\n';
+    for (const wire of [
+      `${completed}event: done\ndata: [DONE]\n\n`,
+      `${completed}data: {broken}\n\nevent: done\ndata: [DONE]\n\n`,
+      "event: done\ndata: [DONE]\n\n",
+      'data: {"event_type":"interaction.incomplete","interaction":{"status":"incomplete"}}\n\nevent: done\ndata: [DONE]\n\n',
+      'data: {"event_type":"interaction.completed","interaction":{"status":"incomplete"}}\n\nevent: done\ndata: [DONE]\n\n',
+    ]) {
+      const classifier = createStreamFrameClassifier("gemini-interactions");
+      const reference = new SseFrameParser();
+      const probed = new ProbedSseFrames("gemini-interactions", 256 * 1024);
+      const expected: string[] = [];
+      const actual: string[] = [];
+      for (const character of wire) {
+        const chunk = new TextEncoder().encode(character);
+        reference.visit(chunk, (event, data) => {
+          expected.push(classifier.classify(event, data));
+        });
+        probed.visit(chunk, () => {
+          actual.push(probed.lastFrame!.verdict);
+        });
+      }
+      expect(actual).toEqual(expected);
     }
   });
 });

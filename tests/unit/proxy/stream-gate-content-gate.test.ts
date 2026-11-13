@@ -1076,3 +1076,84 @@ describe("OpenAI Responses 空输出完成", () => {
     }
   );
 });
+
+describe("Gemini Interactions precommit validation", () => {
+  const options = { ...GATE_OPTIONS, family: "gemini-interactions" as const };
+  const completed =
+    'event: interaction.completed\ndata: {"interaction":{"status":"completed","usage":{"total_tokens":45,"total_input_tokens":37,"total_cached_tokens":0,"total_output_tokens":8,"total_tool_use_tokens":0,"total_thought_tokens":0},"object":"interaction"},"event_type":"interaction.completed"}\n\n';
+
+  it("commits the exact issue text frame and preserves the complete upstream wire", async () => {
+    const wire =
+      'event: step.delta\ndata: {"index":0,"delta":{"text":"HYDROGEN_READY","type":"text"},"event_type":"step.delta"}\n\n' +
+      completed +
+      "event: done\ndata: [DONE]\n\n";
+    const reader = readerFromChunks([wire]);
+    const result = await runStreamContentGate(reader, options);
+    expect(result.committed).toBe(true);
+    if (!result.committed) return;
+    expect(await drainPrefix(result.prefixChunks)).toBe(wire);
+    result.prebufferLease?.release();
+    reader.releaseLock();
+  });
+
+  it.each([
+    completed,
+    completed.trimEnd(),
+    completed
+      .replace('"total_input_tokens":37', '"total_input_tokens":0')
+      .replace('"total_output_tokens":8', '"total_output_tokens":0'),
+    'data: {"event_type":"interaction.incomplete","interaction":{"status":"incomplete","usage":{"total_input_tokens":37,"total_output_tokens":8}}}\n\n',
+    'data: {"event_type":"interaction.completed","interaction":{"status":"incomplete"}}\n\n',
+    'data: {"event_type":"interaction.status_update","status":"incomplete"}\n\n',
+  ])(
+    "preserves explicit successful or incomplete outcomes without visible output or trailing delimiter",
+    async (frame) => {
+      const reader = readerFromChunks([frame]);
+      const result = await runStreamContentGate(reader, options);
+      expect(result.committed).toBe(true);
+      if (result.committed) result.prebufferLease?.release();
+      reader.releaseLock();
+    }
+  );
+
+  it.each([
+    ["sentinel only", "event: done\ndata: [DONE]\n\n", "decode_error"],
+    ["malformed JSON", "event: interaction.completed\ndata: {broken}\n\n", "decode_error"],
+    [
+      "missing usage",
+      'data: {"event_type":"interaction.completed","interaction":{"status":"completed"}}\n\n',
+      "decode_error",
+    ],
+    [
+      "invalid usage",
+      'data: {"event_type":"interaction.completed","interaction":{"status":"completed","usage":{"total_input_tokens":37,"total_output_tokens":-1}}}\n\n',
+      "decode_error",
+    ],
+    [
+      "mismatched event",
+      completed.replace("event: interaction.completed", "event: step.delta"),
+      "decode_error",
+    ],
+    [
+      "failed lifecycle",
+      'data: {"event_type":"interaction.completed","interaction":{"status":"failed"}}\n\n',
+      "gate_error",
+    ],
+    [
+      "status update only",
+      'data: {"event_type":"interaction.status_update","status":"completed","usage":{"total_input_tokens":37,"total_output_tokens":8}}\n\n',
+      "empty_stream",
+    ],
+    [
+      "tool metadata only",
+      'data: {"event_type":"step.start","index":0,"step":{"type":"model_output"}}\n\n',
+      "empty_stream",
+    ],
+  ])("rejects %s before commitment", async (_name, frame, reason) => {
+    const reader = readerFromChunks([frame]);
+    const result = await runStreamContentGate(reader, options);
+    expect(result.committed).toBe(false);
+    if (!result.committed) expect((result.error as StreamPrecommitError).gateReason).toBe(reason);
+    reader.releaseLock();
+  });
+});

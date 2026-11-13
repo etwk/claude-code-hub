@@ -14,6 +14,7 @@ export type DiscoveryProtocol =
   | "openai-chat"
   | "openai-responses"
   | "gemini"
+  | "gemini-interactions"
   | "unknown";
 
 export type DiscoveryValidity = {
@@ -32,6 +33,7 @@ const DISCOVERY_PROTOCOL_FAMILIES: Partial<Record<DiscoveryProtocol, ProtocolFam
   "openai-chat": "openai-chat",
   "openai-responses": "openai-responses",
   gemini: "gemini",
+  "gemini-interactions": "gemini-interactions",
 };
 
 /**
@@ -47,9 +49,21 @@ export function isDiscoveryProtocolErrorPayload(value: unknown): boolean {
     object.failed ||
     object.type === "error" ||
     object.type === "response.error" ||
-    object.type === "response.failed"
+    object.type === "response.failed" ||
+    object.event_type === "error" ||
+    object.event_type === "interaction.failed" ||
+    object.event_type === "interaction.cancelled"
   ) {
     return true;
+  }
+
+  if (typeof object.event_type === "string" && object.event_type.startsWith("interaction.")) {
+    const interaction = object.interaction;
+    const status =
+      interaction !== null && typeof interaction === "object" && !Array.isArray(interaction)
+        ? (interaction as Record<string, unknown>).status
+        : object.status;
+    if (status === "failed" || status === "cancelled") return true;
   }
 
   const response = object.response;
@@ -61,9 +75,9 @@ export function isDiscoveryProtocolErrorPayload(value: unknown): boolean {
   );
 }
 
-function validityFromVerdict(verdict: FrameVerdict): DiscoveryValidity {
+function validityFromVerdict(verdict: FrameVerdict, acceptTerminal = false): DiscoveryValidity {
   return {
-    ready: verdict === "content",
+    ready: verdict === "content" || (acceptTerminal && verdict === "terminal"),
     terminal: verdict === "terminal" || verdict === "error" || verdict === "malformed",
     error: verdict === "error" || verdict === "malformed",
   };
@@ -90,6 +104,9 @@ function classifyProtocolFrame(
 
   if (family === "openai-responses" && isCleanResponsesCompletion(eventName, data)) {
     return { ready: true, terminal: true, error: false };
+  }
+  if (family === "gemini-interactions" && parsed !== null && typeof parsed === "object") {
+    return validityFromVerdict(classifier.classifyStructured(eventName, parsed), true);
   }
   if (family === "openai-responses" && isResponsesIncompleteCompletion(eventName, data)) {
     // incomplete 是上游明确返回的协议结果。Discovery 不应把它伪装成 502 后切商。

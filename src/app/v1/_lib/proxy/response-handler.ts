@@ -6,7 +6,7 @@ import { ResponseFixer } from "@/app/v1/_lib/proxy/response-fixer";
 import { findSafeDatabaseError } from "@/drizzle/admitted-client";
 import { AsyncTaskManager } from "@/lib/async-task-manager";
 import { computeCacheScoreFields } from "@/lib/cache-effectiveness/gate";
-import { getEnvConfig } from "@/lib/config/env.schema";
+import { type EnvConfig, getEnvConfig } from "@/lib/config/env.schema";
 import { getCachedSystemSettings } from "@/lib/config/system-settings-cache";
 import { emitProxyLangfuseTrace } from "@/lib/langfuse/emit-proxy-trace";
 import { logger } from "@/lib/logger";
@@ -87,7 +87,13 @@ import {
   type DeferredStreamingFinalization,
   peekDeferredStreamingFinalization,
 } from "./stream-finalization";
-import { mapProviderTypeToFamily } from "./stream-gate/frame-classifier";
+import {
+  classifyStructuredTerminalKind,
+  interactionsEventType,
+  isCleanInteractionsCompletion,
+  isInteractionsUsage,
+  mapProviderTypeToFamily,
+} from "./stream-gate/frame-classifier";
 import { createShadowGateObserver, resolveStreamGateMode } from "./stream-gate/stream-content-gate";
 import {
   createStreamProtocolObserver,
@@ -145,19 +151,24 @@ function protocolObservationFromMetering(
   };
 }
 
-function resolveMeteringDrainReservationBytes(observer: ClientAbortMeteringObserver): number {
+function resolveMeteringDrainReservationBytes(
+  observer: ClientAbortMeteringObserver,
+  frameBytes = observer.inFlightFrameBytes
+): number {
   return (
-    CLIENT_ABORT_DRAIN_FIXED_OVERHEAD_BYTES +
-    CLIENT_ABORT_METER_MAX_RETAINED_BYTES +
-    observer.maxInFlightFrameBytes
+    CLIENT_ABORT_DRAIN_FIXED_OVERHEAD_BYTES + CLIENT_ABORT_METER_MAX_RETAINED_BYTES + frameBytes
   );
 }
 
 function resolveReplayMeteringReservationBytes(observer: ClientAbortMeteringObserver): number {
+  const payloadBytes = resolveReplayPayloadLimitBytes();
+  // During receipt, the spool can retain one UTF-16 payload alongside the meter frame.
+  // Durable reconstruction starts only after meter.finish() has released its frame,
+  // so reserve the larger phase rather than summing mutually exclusive buffers.
   return (
-    resolveReplayDrainReservationBytes() +
-    CLIENT_ABORT_METER_MAX_RETAINED_BYTES +
-    observer.maxInFlightFrameBytes
+    REPLAY_DRAIN_FIXED_OVERHEAD_BYTES +
+    Math.max(payloadBytes * 3, payloadBytes * 2 + observer.maxInFlightFrameBytes) +
+    CLIENT_ABORT_METER_MAX_RETAINED_BYTES
   );
 }
 
@@ -165,16 +176,19 @@ function getSessionRequestOwnerKeyId(session: ProxySession): number | undefined 
   return session.authState?.key?.id ?? session.messageContext?.key?.id ?? undefined;
 }
 
+function resolveReplayPayloadLimitBytes(readEnv: () => EnvConfig = getEnvConfig): number {
+  try {
+    return readEnv().REPLAY_MAX_PAYLOAD_BYTES;
+  } catch {
+    return 8 * 1024 * 1024;
+  }
+}
+
 /** Resolves a conservative Replay reservation for detached payload reconstruction. */
 export function resolveReplayDrainReservationBytes(
   readEnv: () => ReturnType<typeof getEnvConfig> = getEnvConfig
 ): number {
-  let payloadBytes = 8 * 1024 * 1024;
-  try {
-    payloadBytes = readEnv().REPLAY_MAX_PAYLOAD_BYTES;
-  } catch {
-    // Keep a conservative reservation when environment parsing fails.
-  }
+  const payloadBytes = resolveReplayPayloadLimitBytes(readEnv);
   // ReplaySpool keeps bounded write-back state, then terminal persistence reads
   // the Redis chunks and joins one payload string. Reserve the payload three
   // times for chunk strings, the joined string, and UTF-16 expansion.
@@ -1490,9 +1504,22 @@ function hasGeminiCompletionMarker(data: unknown): boolean {
  */
 function inspectStreamCompletion(
   text: string,
-  format: ProxySession["originalFormat"]
+  format: ProxySession["originalFormat"],
+  pathname?: string
 ): { hasMarker: boolean; hasProtocolError: boolean; sawIncomplete: boolean } {
   const events = parseSSEData(text);
+  if (mapProviderTypeToFamily(undefined, pathname) === "gemini-interactions") {
+    return {
+      hasMarker: events.some((event) => isCleanInteractionsCompletion(event.event, event.data)),
+      hasProtocolError: events.some((event) => isDiscoveryProtocolErrorPayload(event.data)),
+      sawIncomplete: events.some(
+        (event) =>
+          isRecord(event.data) &&
+          classifyStructuredTerminalKind("gemini-interactions", event.event, event.data) ===
+            "incomplete"
+      ),
+    };
+  }
   const payloads: unknown[] = events.map((event) => event.data);
 
   // Native Gemini passthrough is NDJSON rather than SSE. Reuse the shared
@@ -1569,8 +1596,17 @@ export function hasStreamCompletionMarker(
   return inspectStreamCompletion(text, format).hasMarker;
 }
 
-function hasReplayCompletionMarker(text: string, format: ProxySession["originalFormat"]): boolean {
-  if (format !== "openai") return inspectStreamCompletion(text, format).hasMarker;
+function hasReplayCompletionMarker(
+  text: string,
+  format: ProxySession["originalFormat"],
+  pathname: string
+): boolean {
+  if (
+    format !== "openai" ||
+    mapProviderTypeToFamily(undefined, pathname) === "gemini-interactions"
+  ) {
+    return inspectStreamCompletion(text, format, pathname).hasMarker;
+  }
 
   // finish_reason 证明语义完成，但 OpenAI Chat 仍可能在随后发送 usage 与 [DONE]。
   // Replay 只有读到客户端可见的 wire 终止标记后才允许发布 completed。
@@ -2031,7 +2067,11 @@ function finalizeDeferredStreamingFinalizationIfNeeded(
   const textCompletionInspection =
     parseResponseDiagnostics &&
     (!completionObservation || completionObservation.observationIncomplete)
-      ? inspectStreamCompletion(completionContent, session.originalFormat)
+      ? inspectStreamCompletion(
+          completionContent,
+          session.originalFormat,
+          session.requestUrl.pathname
+        )
       : null;
   const completionInspection = (() => {
     if (completionObservation) {
@@ -2119,6 +2159,16 @@ function finalizeDeferredStreamingFinalizationIfNeeded(
       session.originalFormat,
       completionInspection.hasMarker
     );
+  const missingInteractionsCompletion =
+    parseResponseDiagnostics &&
+    upstreamStatusCode >= 200 &&
+    upstreamStatusCode < 300 &&
+    mapProviderTypeToFamily(provider?.providerType, session.requestUrl.pathname) ===
+      "gemini-interactions" &&
+    streamEndedNormally &&
+    !clientAborted &&
+    !completionInspection.hasMarker &&
+    !completionInspection.sawIncomplete;
   const fatalHttpProtocolFailure =
     upstreamStatusCode >= 200 &&
     upstreamStatusCode < 300 &&
@@ -2127,7 +2177,9 @@ function finalizeDeferredStreamingFinalizationIfNeeded(
       (streamEndedNormally && !successfulPostcommitMalformed));
   const detected =
     !bodyDetected.isError &&
-    ((shouldDetectFake200 && completionInspection.hasProtocolError) || fatalHttpProtocolFailure)
+    ((shouldDetectFake200 && completionInspection.hasProtocolError) ||
+      fatalHttpProtocolFailure ||
+      missingInteractionsCompletion)
       ? ({
           isError: true,
           code: "UPSTREAM_PROTOCOL_ERROR",
@@ -2135,7 +2187,9 @@ function finalizeDeferredStreamingFinalizationIfNeeded(
             ? `Upstream stream emitted a ${protocolFailure.verdict} frame${
                 protocolFailure.eventName ? ` (${protocolFailure.eventName})` : ""
               }`
-            : "Upstream stream emitted a protocol error event",
+            : missingInteractionsCompletion
+              ? "Upstream Interactions stream ended without a valid usage-bearing completion"
+              : "Upstream stream emitted a protocol error event",
         } as const)
       : bodyDetected;
   const hasAuthoritativeUpstreamFailure = detected.isError || upstreamStatusCode >= 400;
@@ -3889,10 +3943,13 @@ export class ProxyResponseHandler {
     let processedStream: ReadableStream<Uint8Array> = response.body;
     const interpretsStreamProtocol = session.getEndpointPolicy().kind !== "raw_passthrough";
     const nativeStreamProtocolFamily = interpretsStreamProtocol
-      ? mapProviderTypeToFamily(provider.providerType)
+      ? mapProviderTypeToFamily(provider.providerType, session.requestUrl.pathname)
       : null;
+    const isInteractionsStream = nativeStreamProtocolFamily === "gemini-interactions";
     const clientStreamProtocolFamily = interpretsStreamProtocol
-      ? mapClientFormatToProtocolFamily(session.originalFormat)
+      ? isInteractionsStream
+        ? nativeStreamProtocolFamily
+        : mapClientFormatToProtocolFamily(session.originalFormat)
       : null;
     const clientMeterObservesNativeProtocol =
       nativeStreamProtocolFamily !== null &&
@@ -3902,11 +3959,11 @@ export class ProxyResponseHandler {
       nativeStreamProtocolFamily && !clientMeterObservesNativeProtocol
         ? createStreamProtocolObserver(nativeStreamProtocolFamily)
         : null;
-    // 原始透传端点不解释响应协议。普通同协议流由计量器兼任协议观察器，
-    // 客户端断线后再把单帧额度收紧到 64 KiB。
+    // 同协议流由计量器兼任协议观察器；输入单帧上限与保留的精简计费证据分别预算。
     const clientAbortMeter: ClientAbortMeteringObserver | null = interpretsStreamProtocol
       ? createClientAbortMeteringObserver(session.originalFormat, {
-          attachedMaxFrameBytes: clientMeterObservesNativeProtocol
+          protocolFamily: clientStreamProtocolFamily ?? undefined,
+          maxFrameCharacters: clientMeterObservesNativeProtocol
             ? STREAM_PROTOCOL_OBSERVER_MAX_BUFFER_CHARACTERS
             : undefined,
         })
@@ -3915,7 +3972,10 @@ export class ProxyResponseHandler {
     let protocolObservedBeforeProcessing = false;
 
     // --- GEMINI STREAM HANDLING ---
-    if (provider.providerType === "gemini" || provider.providerType === "gemini-cli") {
+    if (
+      !isInteractionsStream &&
+      (provider.providerType === "gemini" || provider.providerType === "gemini-cli")
+    ) {
       // 判断是否需要透传（客户端和提供商格式都必须是 Gemini）
       const isGeminiPassthrough =
         (session.originalFormat === "gemini" || session.originalFormat === "gemini-cli") &&
@@ -3938,7 +3998,10 @@ export class ProxyResponseHandler {
         let passthroughShadowObserver = (() => {
           if (resolveStreamGateMode() !== "shadow") return null;
           if (session.getEndpointPolicy().kind === "raw_passthrough") return null;
-          const family = mapProviderTypeToFamily(provider.providerType);
+          const family = mapProviderTypeToFamily(
+            provider.providerType,
+            session.requestUrl.pathname
+          );
           if (!family) return null;
           return createShadowGateObserver({
             family,
@@ -3982,7 +4045,6 @@ export class ProxyResponseHandler {
             deferredMeta.healthAbortAtMonotonic = performance.now();
             deferredMeta.healthFirstByteSeen = passthroughFirstByteSeen;
           }
-          clientAbortMeter?.switchToDetachedMode();
           if (!clientAbortMeter) {
             const rejection = new Error("client_detached_without_metering");
             passthroughPump.startDrain(reason);
@@ -4031,12 +4093,26 @@ export class ProxyResponseHandler {
           }, CLIENT_ABORT_DRAIN_MAX_MS);
           passthroughDrainTimeoutId.unref?.();
         };
+        const reservePassthroughMeterFrame = (frameBytes: number) => {
+          if (!passthroughDrainLease || !clientAbortMeter) return;
+          if (
+            passthroughDrainLease.tryGrow(
+              resolveMeteringDrainReservationBytes(clientAbortMeter, frameBytes)
+            )
+          ) {
+            return;
+          }
+          const rejection = new Error("client_abort_drain_memory_budget_exhausted");
+          abortPassthroughTransport(rejection);
+          passthroughPump.cancelSource(rejection);
+          throw rejection;
+        };
         passthroughPump = createDemandDrivenResponsePump({
           source: response.body,
           onReadStart: () => observePassthroughReadStart(),
           onChunk: (value) => {
             if (value.byteLength > 0) passthroughFirstByteSeen = true;
-            const metering = clientAbortMeter?.observe(value);
+            const metering = clientAbortMeter?.observe(value, reservePassthroughMeterFrame);
             passthroughShadowObserver?.observe(value);
             streamProtocolObserver?.observe(value);
             if (!passthroughClientDetached) streamTextAccumulator.pushBytes(value);
@@ -4730,6 +4806,18 @@ export class ProxyResponseHandler {
       }
       responsePump?.cancelSource(rejection);
     };
+    const reserveDetachedMeterFrame = (frameBytes: number) => {
+      if (!clientAbortDrainLease || !clientAbortMeter) return;
+      if (
+        clientAbortDrainLease.tryGrow(
+          resolveMeteringDrainReservationBytes(clientAbortMeter, frameBytes)
+        )
+      ) {
+        return;
+      }
+      rejectDetachedDrain("memory_budget_exhausted");
+      throw new Error("client_abort_drain_memory_budget_exhausted");
+    };
     const acquireMeteringDrain = (replayAbortReason?: string): boolean => {
       if (!clientAbortMeter) return false;
       const previousLease = clientAbortDrainLease;
@@ -4738,6 +4826,9 @@ export class ProxyResponseHandler {
       if (replayAbortReason && replaySpool && !replaySpool.isTerminal) {
         void replaySpool.abort(replayAbortReason);
       }
+      // Replay already reserves this same meter frame plus outstanding spool writes.
+      // Keep that lease until spool teardown, then transfer to the smaller meter lease.
+      if (clientAbortReplayLease) return true;
 
       const admission = acquireDetachedStreamLease(
         "metering",
@@ -4786,7 +4877,6 @@ export class ProxyResponseHandler {
       const deferredMeta = peekDeferredStreamingFinalization(session);
       if (deferredMeta) deferredMeta.healthAbortAtMonotonic = performance.now();
       clientDetachHandled = true;
-      clientAbortMeter?.switchToDetachedMode();
       const activeReplaySpool = replaySpool && !replaySpool.isTerminal ? replaySpool : null;
       if (!clientAbortMeter) {
         clientAbortDrainMode = "rejected";
@@ -5288,7 +5378,11 @@ export class ProxyResponseHandler {
             (finalized.isSuccessfulCompletion || detachedUpstreamCompleted) &&
             !finalProtocolObservation?.observationIncomplete &&
             !finalized.replayIneligibleReason &&
-            hasReplayCompletionMarker(allContent, session.originalFormat);
+            hasReplayCompletionMarker(
+              allContent,
+              session.originalFormat,
+              session.requestUrl.pathname
+            );
           if (isReplayableSuccess) {
             streamReplayCompletionScheduled = true;
             postTerminalSideEffects.push(async () => {
@@ -5407,7 +5501,7 @@ export class ProxyResponseHandler {
     shadowGateObserver = (() => {
       if (resolveStreamGateMode() !== "shadow") return null;
       if (session.getEndpointPolicy().kind === "raw_passthrough") return null;
-      const family = mapProviderTypeToFamily(provider.providerType);
+      const family = mapProviderTypeToFamily(provider.providerType, session.requestUrl.pathname);
       if (!family) return null;
       return createShadowGateObserver({
         family,
@@ -5421,7 +5515,10 @@ export class ProxyResponseHandler {
     replaySpool = createReplaySpoolIfOwner(session, response, "stream", {
       onInactive: capInactiveReplayDrainWindow,
       onTerminal: () => {
+        const transferToMetering =
+          clientAbortDrainMode === "metering" && clientAbortReplayLease !== null;
         releaseDetachedReplayLease();
+        if (transferToMetering && !clientAbortFinalizing) acquireMeteringDrain();
       },
     });
     if (replaySpool) {
@@ -5436,7 +5533,7 @@ export class ProxyResponseHandler {
       const chunkSize = value.length;
       if (chunkSize > 0) upstreamFirstByteSeen = true;
       clearIdleTimer();
-      const metering = clientAbortMeter?.observe(value);
+      const metering = clientAbortMeter?.observe(value, reserveDetachedMeterFrame);
       AsyncTaskManager.touch(taskId);
       if (!clientDetachHandled) {
         streamTextAccumulator.pushBytes(value);
@@ -6223,6 +6320,89 @@ function parseOptionalTokenUsage(
   return { usageRecord, usageMetrics };
 }
 
+function sumInteractionsImageTokens(details: unknown, includeDocuments = false): number {
+  if (!Array.isArray(details)) return 0;
+  let tokens = 0;
+  for (const detail of details) {
+    if (!isRecord(detail) || typeof detail.modality !== "string") continue;
+    const modality = detail.modality.toUpperCase();
+    if (modality === "IMAGE" || (includeDocuments && modality === "DOCUMENT")) {
+      tokens += asNonNegativeFiniteNumber(detail.tokens) ?? 0;
+    }
+  }
+  return tokens;
+}
+
+function parseInteractionsUsageFromResponseText(responseText: string): {
+  usageRecord: Record<string, unknown> | null;
+  usageMetrics: UsageMetrics | null;
+} {
+  let usageRecord: Record<string, unknown> | null = null;
+  if (isSSEText(responseText)) {
+    for (const event of parseSSEData(responseText)) {
+      if (!isRecord(event.data)) continue;
+      const eventType = interactionsEventType(event.event, event.data);
+      const interaction =
+        eventType === "interaction.status_update" ? event.data : event.data.interaction;
+      if (!isRecord(interaction)) continue;
+      const terminal =
+        eventType === "interaction.completed" ||
+        eventType === "interaction.incomplete" ||
+        eventType === "interaction.failed" ||
+        eventType === "interaction.cancelled" ||
+        (eventType === "interaction.status_update" &&
+          (interaction.status === "incomplete" ||
+            interaction.status === "failed" ||
+            interaction.status === "cancelled"));
+      if (terminal && isInteractionsUsage(interaction.usage)) usageRecord = interaction.usage;
+    }
+  } else {
+    try {
+      const parsed: unknown = JSON.parse(responseText);
+      if (isRecord(parsed)) {
+        const interaction = isRecord(parsed.interaction) ? parsed.interaction : parsed;
+        if (isInteractionsUsage(interaction.usage)) usageRecord = interaction.usage;
+      }
+    } catch {
+      // Invalid or partial JSON cannot supply accounting evidence.
+    }
+  }
+  if (!usageRecord) return { usageRecord: null, usageMetrics: null };
+
+  // Interactions reports cached input and thinking separately from generated output.
+  const cached = asNonNegativeFiniteNumber(usageRecord.total_cached_tokens) ?? 0;
+  const thought = asNonNegativeFiniteNumber(usageRecord.total_thought_tokens) ?? 0;
+  const input = Math.max((usageRecord.total_input_tokens as number) - cached, 0);
+  // Tool-use prompts are additional input, not a subset of the initial prompt.
+  const toolInput = asNonNegativeFiniteNumber(usageRecord.total_tool_use_tokens) ?? 0;
+  const output = usageRecord.total_output_tokens as number;
+  // Modality counters partition totals; they must not bill cached or generated tokens twice.
+  const inputImage =
+    Math.min(
+      input,
+      Math.max(
+        sumInteractionsImageTokens(usageRecord.input_tokens_by_modality, true) -
+          Math.min(cached, sumInteractionsImageTokens(usageRecord.cached_tokens_by_modality, true)),
+        0
+      )
+    ) +
+    Math.min(toolInput, sumInteractionsImageTokens(usageRecord.tool_use_tokens_by_modality, true));
+  const outputImage = Math.min(
+    output,
+    sumInteractionsImageTokens(usageRecord.output_tokens_by_modality)
+  );
+  return {
+    usageRecord,
+    usageMetrics: {
+      input_tokens: input + toolInput - inputImage,
+      output_tokens: output - outputImage + thought,
+      ...(usageRecord.total_cached_tokens !== undefined ? { cache_read_input_tokens: cached } : {}),
+      ...(inputImage > 0 ? { input_image_tokens: inputImage } : {}),
+      ...(outputImage > 0 ? { output_image_tokens: outputImage } : {}),
+    },
+  };
+}
+
 export function parseUsageFromResponseText(
   responseText: string,
   providerType: string | null | undefined,
@@ -6232,6 +6412,10 @@ export function parseUsageFromResponseText(
   usageMetrics: UsageMetrics | null;
 } {
   const normalizedPath = pathname === undefined ? undefined : normalizeEndpointPath(pathname);
+  if (mapProviderTypeToFamily(providerType, normalizedPath) === "gemini-interactions") {
+    return parseInteractionsUsageFromResponseText(responseText);
+  }
+
   if (
     providerType === "openai-compatible" &&
     (normalizedPath === V1_ENDPOINT_PATHS.RERANK || normalizedPath === V1_ENDPOINT_PATHS.SYSTEMONE)

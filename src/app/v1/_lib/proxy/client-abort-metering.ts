@@ -3,12 +3,14 @@ import type { ClientFormat } from "./format-mapper";
 import {
   classifyTerminalKind,
   createStreamFrameClassifier,
+  isCleanInteractionsCompletion,
+  isInteractionsUsage,
   isNonEmptyValue,
   type ProtocolFamily,
 } from "./stream-gate/frame-classifier";
 
 export const CLIENT_ABORT_METER_MAX_RETAINED_BYTES = 64 * 1024;
-export const CLIENT_ABORT_METER_MAX_FRAME_BYTES = 64 * 1024;
+export const CLIENT_ABORT_METER_DEFAULT_MAX_FRAME_CHARACTERS = 64 * 1024;
 
 type EvidenceSlot =
   | "error"
@@ -35,24 +37,29 @@ export interface ClientAbortMeteringSnapshot {
 }
 
 export interface ClientAbortMeteringObserver {
-  /** 断线瞬间可能仍由当前半帧占用的真实上限，用于加权内存预算。 */
+  /** Maximum UTF-16 frame storage permitted by the protocol input limit. */
   readonly maxInFlightFrameBytes: number;
-  observe(chunk: Uint8Array): {
+  /** Current UTF-16 frame storage, excluding separately bounded compact evidence. */
+  readonly inFlightFrameBytes: number;
+  observe(
+    chunk: Uint8Array,
+    reserveFrameBytes?: (bytes: number) => void
+  ): {
     drainComplete: boolean;
     errorSeen: boolean;
     protocolFailure: ClientAbortMeteringSnapshot["protocolFailure"];
     replayDrainComplete: boolean;
     terminalSeen: boolean;
   };
-  switchToDetachedMode(): void;
   /** Captures complete frames without flushing a partial frame or stopping observation. */
   snapshot(): ClientAbortMeteringSnapshot;
   finish(): ClientAbortMeteringSnapshot;
 }
 
 export interface ClientAbortMeteringOptions {
-  /** 连接仍存续时允许协议观察器验证的最大单帧；断线后始终收紧到 64 KiB。 */
-  attachedMaxFrameBytes?: number;
+  /** Protocol input frame limit, independent of the compact retained-evidence budget. */
+  maxFrameCharacters?: number;
+  protocolFamily?: ProtocolFamily;
 }
 
 interface ParsedFrame {
@@ -75,6 +82,12 @@ const USAGE_NUMBER_FIELDS = [
   "promptTokenCount",
   "prompt_tokens",
   "thoughtsTokenCount",
+  "total_cached_tokens",
+  "total_input_tokens",
+  "total_output_tokens",
+  "total_thought_tokens",
+  "total_tokens",
+  "total_tool_use_tokens",
 ] as const;
 
 /** Narrows unknown JSON values to non-array records. */
@@ -109,6 +122,24 @@ function compactTokenDetails(value: unknown): unknown {
   return details.length > 0 ? details : undefined;
 }
 
+/** Compacts Interactions modality accounting without retaining generated content. */
+function compactInteractionsTokenDetails(value: unknown): unknown {
+  if (!Array.isArray(value)) return undefined;
+  const details = value.slice(0, 16).flatMap((entry) => {
+    if (
+      !isRecord(entry) ||
+      typeof entry.modality !== "string" ||
+      typeof entry.tokens !== "number" ||
+      !Number.isFinite(entry.tokens) ||
+      entry.tokens < 0
+    ) {
+      return [];
+    }
+    return [{ modality: entry.modality.slice(0, 32), tokens: entry.tokens }];
+  });
+  return details.length > 0 ? details : undefined;
+}
+
 /** Retains only bounded usage and cache fields needed by billing. */
 function compactUsage(value: unknown): Record<string, unknown> | null {
   if (!isRecord(value)) return null;
@@ -137,6 +168,16 @@ function compactUsage(value: unknown): Record<string, unknown> | null {
     if (details) compact[field] = details;
   }
 
+  for (const field of [
+    "input_tokens_by_modality",
+    "output_tokens_by_modality",
+    "cached_tokens_by_modality",
+    "tool_use_tokens_by_modality",
+  ] as const) {
+    const details = compactInteractionsTokenDetails(value[field]);
+    if (details) compact[field] = details;
+  }
+
   return Object.keys(compact).length > 0 ? compact : null;
 }
 
@@ -156,6 +197,7 @@ function compactError(value: unknown): unknown {
 function compactPayload(value: Record<string, unknown>, depth = 0): Record<string, unknown> {
   const compact: Record<string, unknown> = {};
   for (const field of [
+    "event_type",
     "id",
     "model",
     "prompt_cache_key",
@@ -203,6 +245,10 @@ function compactPayload(value: Record<string, unknown>, depth = 0): Record<strin
     compact.response = compactPayload(value.response, depth + 1);
   }
 
+  if (depth < 4 && isRecord(value.interaction)) {
+    compact.interaction = compactPayload(value.interaction, depth + 1);
+  }
+
   if (Array.isArray(value.choices)) {
     compact.choices = value.choices.slice(0, 16).map((choice) => {
       if (!isRecord(choice) || typeof choice.finish_reason !== "string") return {};
@@ -225,7 +271,11 @@ function hasCompactUsage(value: Record<string, unknown>, depth = 0): boolean {
   if (compactUsage(value.usage) || compactUsage(value.usageMetadata)) return true;
   if (isRecord(value.message) && compactUsage(value.message.usage)) return true;
   if (isRecord(value.delta) && compactUsage(value.delta.usage)) return true;
-  return depth < 4 && isRecord(value.response) && hasCompactUsage(value.response, depth + 1);
+  return (
+    depth < 4 &&
+    ((isRecord(value.response) && hasCompactUsage(value.response, depth + 1)) ||
+      (isRecord(value.interaction) && hasCompactUsage(value.interaction, depth + 1)))
+  );
 }
 
 export function mapClientFormatToProtocolFamily(format: ClientFormat): ProtocolFamily {
@@ -325,11 +375,10 @@ class BoundedEventFramer {
   private dataLines: string[] = [];
   private frameCharacters = 0;
   private droppingFrame = false;
-  private pendingMaxFrameCharacters: number | null = null;
   skippedOversizedFrames = 0;
 
   constructor(
-    private maxFrameCharacters: number,
+    private readonly maxFrameCharacters: number,
     private readonly onFrame: (frame: ParsedFrame) => void
   ) {}
 
@@ -337,32 +386,13 @@ class BoundedEventFramer {
     return this.maxFrameCharacters;
   }
 
-  setMaxFrameCharacters(maxFrameCharacters: number): void {
-    if (maxFrameCharacters >= this.maxFrameCharacters) return;
-    const hasInFlightFrame =
-      this.line.length > 0 ||
-      this.lineOverflow ||
-      this.frameCharacters > 0 ||
-      this.dataLines.length > 0 ||
-      this.eventName !== null ||
-      this.droppingFrame;
-    if (!hasInFlightFrame) {
-      this.maxFrameCharacters = maxFrameCharacters;
-      return;
-    }
-
-    // 断线可能发生在一个合法 Gemini NDJSON 大行中间。立即把额度降到
-    // 64 KiB 会丢掉同一行尾部的 finishReason/usage，随后只能等超时。当前
-    // 半帧继续使用已预算的 attached 上限；抵达边界后再收紧后续帧。
-    this.pendingMaxFrameCharacters =
-      this.pendingMaxFrameCharacters === null
-        ? maxFrameCharacters
-        : Math.min(this.pendingMaxFrameCharacters, maxFrameCharacters);
+  get retainedCharacters(): number {
+    return this.frameCharacters + this.line.length;
   }
 
-  push(chunk: Uint8Array): void {
+  push(chunk: Uint8Array, reserveFrameBytes?: (bytes: number) => void): void {
     if (chunk.byteLength === 0) return;
-    this.consume(this.decoder.decode(chunk, { stream: true }));
+    this.consume(this.decoder.decode(chunk, { stream: true }), reserveFrameBytes);
   }
 
   finish(): void {
@@ -372,7 +402,7 @@ class BoundedEventFramer {
     else this.flushFrame();
   }
 
-  private consume(text: string): void {
+  private consume(text: string, reserveFrameBytes?: (bytes: number) => void): void {
     let offset = 0;
     if (this.pendingCr) {
       this.pendingCr = false;
@@ -385,12 +415,12 @@ class BoundedEventFramer {
       const lineEnd = nextLf === -1 ? nextCr : nextCr === -1 ? nextLf : Math.min(nextLf, nextCr);
 
       if (lineEnd === -1) {
-        this.appendLineSegment(text.slice(offset));
+        this.appendLineSegment(text.slice(offset), reserveFrameBytes);
         return;
       }
 
-      this.appendLineSegment(text.slice(offset, lineEnd));
-      this.consumeLine();
+      this.appendLineSegment(text.slice(offset, lineEnd), reserveFrameBytes);
+      this.consumeLine(reserveFrameBytes);
       const endedWithCr = text[lineEnd] === "\r";
       offset = lineEnd + 1;
       if (endedWithCr) {
@@ -403,9 +433,12 @@ class BoundedEventFramer {
     }
   }
 
-  private appendLineSegment(segment: string): void {
+  private appendLineSegment(segment: string, reserveFrameBytes?: (bytes: number) => void): void {
     if (this.lineOverflow || segment.length === 0) return;
     const available = this.maxFrameCharacters - this.frameCharacters - this.line.length;
+    reserveFrameBytes?.(
+      2 * Math.min(this.maxFrameCharacters, this.retainedCharacters + segment.length)
+    );
     if (segment.length <= available) {
       this.line += segment;
       return;
@@ -419,7 +452,7 @@ class BoundedEventFramer {
     this.dropCurrentFrame();
   }
 
-  private consumeLine(): void {
+  private consumeLine(reserveFrameBytes?: (bytes: number) => void): void {
     const line = this.line;
     const overflowed = this.lineOverflow;
     const overflowedRawJsonLine = this.overflowedRawJsonLine;
@@ -450,6 +483,13 @@ class BoundedEventFramer {
     }
     if (line.startsWith("data:")) {
       const data = line.slice(5).replace(/^\s/, "");
+      reserveFrameBytes?.(
+        2 *
+          Math.min(
+            this.maxFrameCharacters,
+            this.frameCharacters + data.length + FRAME_DATA_LINE_OVERHEAD_CHARACTERS
+          )
+      );
       this.dataLines.push(data);
       // Empty or tiny data lines otherwise bypass a pure character budget via
       // array-slot/object overhead. Charge a conservative per-line allowance.
@@ -465,7 +505,6 @@ class BoundedEventFramer {
       } else {
         this.skippedOversizedFrames += 1;
       }
-      this.applyPendingFrameLimit();
     }
   }
 
@@ -484,30 +523,21 @@ class BoundedEventFramer {
     if (!this.droppingFrame) return;
     this.droppingFrame = false;
     this.resetFrame();
-    this.applyPendingFrameLimit();
   }
 
   private flushFrame(): void {
     if (this.droppingFrame || this.dataLines.length === 0) {
       this.resetFrame();
-      this.applyPendingFrameLimit();
       return;
     }
     this.onFrame({ eventName: this.eventName, data: this.dataLines.join("\n") });
     this.resetFrame();
-    this.applyPendingFrameLimit();
   }
 
   private resetFrame(): void {
     this.eventName = null;
     this.dataLines = [];
     this.frameCharacters = 0;
-  }
-
-  private applyPendingFrameLimit(): void {
-    if (this.pendingMaxFrameCharacters === null) return;
-    this.maxFrameCharacters = Math.min(this.maxFrameCharacters, this.pendingMaxFrameCharacters);
-    this.pendingMaxFrameCharacters = null;
   }
 }
 
@@ -529,7 +559,10 @@ export function createClientAbortMeteringObserver(
   let incompleteSeen = false;
   let protocolFailure: ClientAbortMeteringSnapshot["protocolFailure"] = null;
   let finished = false;
-  const classifier = createStreamFrameClassifier(mapClientFormatToProtocolFamily(format));
+  const classifier = createStreamFrameClassifier(
+    options.protocolFamily ?? mapClientFormatToProtocolFamily(format)
+  );
+  const isInteractions = classifier.family === "gemini-interactions";
 
   const setEvidence = (slot: EvidenceSlot, value: string): void => {
     const previous = evidence.get(slot);
@@ -585,11 +618,19 @@ export function createClientAbortMeteringObserver(
   const recordFrame = (frame: ParsedFrame): void => {
     const trimmed = frame.data.trim();
     if (trimmed === "[DONE]") {
-      if (format === "openai") {
+      if (classifier.family === "openai-chat") {
         drainComplete = true;
         replayDrainComplete = true;
         terminalSeen = true;
         setEvidence("terminal", "data: [DONE]\n\n");
+      } else if (
+        isInteractions &&
+        (frame.eventName === null || frame.eventName === "message" || frame.eventName === "done") &&
+        terminalSeen &&
+        !incompleteSeen &&
+        protocolFailure === null
+      ) {
+        setEvidence("terminal", "event: done\ndata: [DONE]\n\n");
       } else {
         recordProtocolFailure("malformed", frame.eventName);
       }
@@ -617,6 +658,9 @@ export function createClientAbortMeteringObserver(
     if (verdict === "error" || verdict === "malformed") {
       recordProtocolFailure(verdict, frame.eventName);
     }
+    // Never compact malformed Interactions into a seemingly valid completion:
+    // dropping an invalid optional field would otherwise change its meaning.
+    if (isInteractions && verdict === "malformed") return;
     if (
       verdict !== "error" &&
       isRecord(parsed) &&
@@ -628,12 +672,19 @@ export function createClientAbortMeteringObserver(
         `data: ${JSON.stringify({ message: parsed.message.slice(0, 1024) })}\n\n`
       );
     }
-    if (!isRecord(parsed) || !shouldInspectFrame(format, frame)) return;
+    if (!isRecord(parsed) || (!isInteractions && !shouldInspectFrame(format, frame))) return;
 
     const protocolError =
       verdict === "error" || isProtocolError(parsed) || frame.eventName === "error";
     const type = typeof parsed.type === "string" ? parsed.type : null;
     const terminal = (() => {
+      if (isInteractions) {
+        return (
+          verdict !== "malformed" &&
+          !protocolError &&
+          isCleanInteractionsCompletion(frame.eventName, parsed)
+        );
+      }
       switch (format) {
         case "response":
           return (
@@ -666,12 +717,15 @@ export function createClientAbortMeteringObserver(
       (isRecord(parsed.message) && typeof parsed.message.model === "string") ||
       (isRecord(parsed.response) &&
         (typeof parsed.response.model === "string" ||
-          typeof parsed.response.service_tier === "string"));
-    const hasUsage = hasCompactUsage(parsed);
+          typeof parsed.response.service_tier === "string")) ||
+      (isInteractions &&
+        isRecord(parsed.interaction) &&
+        typeof parsed.interaction.model === "string");
+    const hasUsage = isInteractions ? terminal : hasCompactUsage(parsed);
 
     if (terminal) {
       terminalSeen = true;
-      if (format === "openai") {
+      if (classifier.family === "openai-chat") {
         openAiCompletionSeen = true;
         // OpenAI Chat 可能在 finish_reason 之后再发送独立 usage chunk。
         // 只有同帧已有 usage、之后已收到 usage，或看到 [DONE] 时才能安全停止读取。
@@ -680,7 +734,7 @@ export function createClientAbortMeteringObserver(
         drainComplete = true;
         replayDrainComplete = true;
       }
-    } else if (format === "openai" && openAiCompletionSeen && hasUsage) {
+    } else if (classifier.family === "openai-chat" && openAiCompletionSeen && hasUsage) {
       drainComplete = true;
     }
     if (incompleteTerminal) {
@@ -693,6 +747,14 @@ export function createClientAbortMeteringObserver(
       !(protocolError || terminal || incompleteTerminal || hasUsage || hasSignature || hasMetadata)
     ) {
       return;
+    }
+    if (isInteractions) {
+      // This JSON.parse-owned record can discard invalid usage without changing
+      // lifecycle/error evidence or turning dropped optional counters into valid usage.
+      const interaction = isRecord(parsed.interaction) ? parsed.interaction : parsed;
+      if (interaction.usage !== undefined && !isInteractionsUsage(interaction.usage)) {
+        delete interaction.usage;
+      }
     }
     const compact = compactPayload(parsed);
     const compactData = JSON.stringify(compact);
@@ -715,12 +777,12 @@ export function createClientAbortMeteringObserver(
       setEvidence("metadata", normalized);
     }
   };
-  const attachedMaxFrameBytes =
-    Number.isSafeInteger(options.attachedMaxFrameBytes) &&
-    (options.attachedMaxFrameBytes ?? 0) > CLIENT_ABORT_METER_MAX_FRAME_BYTES
-      ? (options.attachedMaxFrameBytes as number)
-      : CLIENT_ABORT_METER_MAX_FRAME_BYTES;
-  const framer = new BoundedEventFramer(attachedMaxFrameBytes, recordFrame);
+  const maxFrameCharacters =
+    Number.isSafeInteger(options.maxFrameCharacters) &&
+    (options.maxFrameCharacters ?? 0) > CLIENT_ABORT_METER_DEFAULT_MAX_FRAME_CHARACTERS
+      ? (options.maxFrameCharacters as number)
+      : CLIENT_ABORT_METER_DEFAULT_MAX_FRAME_CHARACTERS;
+  const framer = new BoundedEventFramer(maxFrameCharacters, recordFrame);
 
   const snapshot = (): ClientAbortMeteringSnapshot => ({
     text: [...new Set(evidence.values())].join(""),
@@ -737,14 +799,20 @@ export function createClientAbortMeteringObserver(
     get maxInFlightFrameBytes(): number {
       return framer.maxRetainedCharacters * 2;
     },
-    observe(chunk): {
+    get inFlightFrameBytes(): number {
+      return framer.retainedCharacters * 2;
+    },
+    observe(
+      chunk,
+      reserveFrameBytes
+    ): {
       drainComplete: boolean;
       errorSeen: boolean;
       protocolFailure: ClientAbortMeteringSnapshot["protocolFailure"];
       replayDrainComplete: boolean;
       terminalSeen: boolean;
     } {
-      if (!finished) framer.push(chunk);
+      if (!finished) framer.push(chunk, reserveFrameBytes);
       return {
         drainComplete,
         errorSeen: protocolFailure?.verdict === "error",
@@ -752,9 +820,6 @@ export function createClientAbortMeteringObserver(
         replayDrainComplete,
         terminalSeen,
       };
-    },
-    switchToDetachedMode(): void {
-      if (!finished) framer.setMaxFrameCharacters(CLIENT_ABORT_METER_MAX_FRAME_BYTES);
     },
     snapshot,
     finish(): ClientAbortMeteringSnapshot {
