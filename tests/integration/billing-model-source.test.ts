@@ -1267,6 +1267,92 @@ describe("Billing model source - Redis session cost vs DB cost", () => {
   });
 });
 
+describe.each([
+  {
+    name: "token input",
+    priceData: { input_cost_per_token: 0.000003, output_cost_per_token: 0.000015 },
+    usage: { input_tokens: 1000, output_tokens: 100 },
+    input: "0.003",
+    baseTotal: "0.0045",
+    total: "0.027",
+  },
+  {
+    name: "token input with a request fee",
+    priceData: {
+      input_cost_per_token: 0.000003,
+      output_cost_per_token: 0.000015,
+      input_cost_per_request: 0.01,
+    },
+    usage: { input_tokens: 1000, output_tokens: 100 },
+    input: "0.013",
+    baseTotal: "0.0145",
+    total: "0.087",
+  },
+  {
+    name: "token input with separately priced images",
+    priceData: {
+      input_cost_per_token: 0.000003,
+      output_cost_per_token: 0.000015,
+      input_cost_per_image_token: 0.00001,
+    },
+    usage: {
+      input_tokens: 1000,
+      output_tokens: 100,
+      promptTokensDetails: [
+        { modality: "TEXT", tokenCount: 1000 },
+        { modality: "IMAGE", tokenCount: 500 },
+      ],
+    },
+    input: "0.008",
+    baseTotal: "0.0095",
+    total: "0.057",
+  },
+])("Cost snapshot provenance: $name", ({ priceData, usage, input, baseTotal, total }) => {
+  it.each([false, true])("persists the token-only subtotal (streaming=%s)", async (isStream) => {
+    vi.mocked(getSystemSettings).mockResolvedValue(makeSystemSettings("original"));
+    vi.mocked(findLatestPriceByModel).mockImplementation(async (modelName: string) =>
+      makePriceRecord(modelName, priceData)
+    );
+    vi.mocked(updateMessageRequestCostWithBreakdown).mockResolvedValue(undefined);
+    vi.mocked(updateMessageRequestDetailsDurably).mockResolvedValue(undefined);
+    vi.mocked(updateMessageRequestDuration).mockResolvedValue(undefined);
+    vi.mocked(SessionManager.storeSessionResponse).mockResolvedValue(undefined);
+    vi.mocked(SessionManager.updateSessionUsage).mockResolvedValue(undefined);
+    vi.mocked(RateLimitService.trackCost).mockResolvedValue(undefined);
+    vi.mocked(RateLimitService.trackUserDailyCost).mockResolvedValue(undefined);
+    vi.mocked(SessionTracker.refreshSession).mockResolvedValue(undefined);
+
+    const session = createSession({
+      originalModel: "snapshot-input-model",
+      redirectedModel: "snapshot-input-model",
+      sessionId: "sess-input-token-cost",
+      messageId: 4500,
+      providerOverrides: { costMultiplier: 2 },
+      groupCostMultiplier: 3,
+    });
+    const response = isStream ? createStreamResponse(usage) : createNonStreamResponse(usage);
+    const clientResponse = await ProxyResponseHandler.dispatch(session, response);
+    await clientResponse.text();
+    await drainAsyncTasks();
+
+    expect(updateMessageRequestCostWithBreakdown).toHaveBeenCalledTimes(1);
+    expect(updateMessageRequestCostWithBreakdown).toHaveBeenCalledWith(4500, expect.anything(), {
+      input,
+      input_token_cost: "0.003",
+      output: "0.0015",
+      cache_creation: "0",
+      cache_creation_5m: "0",
+      cache_creation_1h: "0",
+      cache_read: "0",
+      base_total: baseTotal,
+      provider_multiplier: 2,
+      group_multiplier: 3,
+      total,
+    });
+    expect(String(vi.mocked(updateMessageRequestCostWithBreakdown).mock.calls[0]?.[1])).toBe(total);
+  });
+});
+
 describe("模型重定向后的图片按次计费", () => {
   async function runImageEditPerRequestScenario(
     billingModelSource: SystemSettings["billingModelSource"]
@@ -1371,6 +1457,7 @@ describe("模型重定向后的图片按次计费", () => {
     expect(result.rateLimitCalls).toBe(1);
     expect(result.storedBreakdown).toMatchObject({
       input: "0.01",
+      input_token_cost: "0",
       base_total: "0.01",
       provider_multiplier: 2,
       group_multiplier: 3,
@@ -1389,6 +1476,7 @@ describe("模型重定向后的图片按次计费", () => {
     expect(result.rateLimitCalls).toBe(1);
     expect(result.storedBreakdown).toMatchObject({
       input: "0.02",
+      input_token_cost: "0",
       base_total: "0.02",
       provider_multiplier: 2,
       group_multiplier: 3,

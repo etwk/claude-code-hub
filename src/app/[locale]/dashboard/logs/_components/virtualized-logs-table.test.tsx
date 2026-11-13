@@ -763,6 +763,7 @@ describe("virtualized-logs-table multiplier badge", () => {
       context1mApplied: true,
       costBreakdown: {
         input: "0.005",
+        input_token_cost: "0.005",
         output: "0",
         cache_creation: "0",
         cache_creation_5m: "0",
@@ -804,6 +805,7 @@ describe("virtualized-logs-table multiplier badge", () => {
       cacheReadInputTokens: 500,
       costBreakdown: {
         input: "0.005",
+        input_token_cost: "0.005",
         output: "0",
         cache_creation: "0",
         cache_creation_5m: "0",
@@ -835,6 +837,7 @@ describe("virtualized-logs-table multiplier badge", () => {
       cacheReadInputTokens: 500,
       costBreakdown: {
         input: "0.005",
+        input_token_cost: "0.005",
         output: "0",
         cache_creation: "0",
         cache_creation_5m: "0",
@@ -869,6 +872,7 @@ describe("virtualized-logs-table multiplier badge", () => {
       cacheTtlApplied: null,
       costBreakdown: {
         input: "0",
+        input_token_cost: "0",
         output: "0",
         cache_creation: "0.003",
         cache_read: "0",
@@ -898,6 +902,7 @@ describe("virtualized-logs-table multiplier badge", () => {
       cacheTtlApplied: "1h",
       costBreakdown: {
         input: "0",
+        input_token_cost: "0",
         output: "0",
         cache_creation: "0.003",
         cache_read: "0",
@@ -970,6 +975,209 @@ describe("virtualized-logs-table multiplier badge", () => {
     expect(tooltip.textContent).toContain("logs.billingDetails.hedgeTokenTotal");
     expect(tooltip.textContent).toContain("logs.billingDetails.hedgeColCacheRead");
     expect(tooltip.textContent).not.toContain("logs.billingDetails.hedgeColCacheWrite");
+  });
+});
+
+describe("virtualized stored cache pricing", () => {
+  const baseBreakdown = {
+    input: "0.001",
+    input_token_cost: "0.001",
+    output: "0",
+    cache_creation: "0",
+    cache_read: "0",
+    base_total: "0.001",
+    provider_multiplier: 1,
+    group_multiplier: 1,
+    total: "0.001",
+  };
+
+  test("shows actual xAI cache-read ratio alongside the fork's unit prices", () => {
+    const tooltip = renderCostTooltipWithLog({
+      inputTokens: 1244,
+      outputTokens: 282,
+      cacheReadInputTokens: 82560,
+      costUsd: "0.04546",
+      costBreakdown: {
+        ...baseBreakdown,
+        input: "0.002488",
+        input_token_cost: "0.002488",
+        output: "0.001692",
+        cache_read: "0.04128",
+        base_total: "0.04546",
+        total: "0.04546",
+      },
+    });
+    expect(tooltip.textContent).toContain("(0.25x)");
+    expect(tooltip.textContent).toContain("@ $2.00 / 1M");
+    expect(tooltip.textContent).toContain("@ $0.50 / 1M");
+    expect(tooltip.textContent).not.toContain("(0.1x)");
+  });
+
+  test.each([
+    ["0.013", "0.0133"],
+    ["0.023", "0.0233"],
+  ])(
+    "keeps the charged input bucket %s while excluding fees and image extras from unit prices",
+    (input, total) => {
+      const tooltip = renderCostTooltipWithLog({
+        inputTokens: 1000,
+        cacheReadInputTokens: 1000,
+        costUsd: total,
+        costBreakdown: {
+          ...baseBreakdown,
+          input,
+          input_token_cost: "0.003",
+          cache_read: "0.0003",
+          base_total: total,
+          total,
+        },
+      });
+      expect(tooltip.textContent).toContain("(0.1x)");
+      expect(tooltip.textContent).not.toContain("(0.02x)");
+      expect(tooltip.textContent).toContain("@ $3.00 / 1M");
+      expect(tooltip.textContent).not.toContain("@ $13.00 / 1M");
+      expect(tooltip.textContent).not.toContain("@ $23.00 / 1M");
+      expect(tooltip.textContent).toContain(`$${Number(input).toFixed(6)}`);
+      expect(tooltip.textContent).toContain(`$${Number(total).toFixed(6)}`);
+    }
+  );
+
+  test("preserves historical charged costs without guessing the input unit price or ratios", () => {
+    const tooltip = renderCostTooltipWithLog({
+      inputTokens: 1000,
+      cacheCreationInputTokens: 2000,
+      cacheCreation5mInputTokens: 1000,
+      cacheCreation1hInputTokens: 1000,
+      cacheReadInputTokens: 1000,
+      costUsd: "0.02305",
+      costBreakdown: {
+        ...baseBreakdown,
+        input: "0.013",
+        input_token_cost: undefined,
+        cache_creation: "0.00975",
+        cache_creation_5m: "0.00375",
+        cache_creation_1h: "0.006",
+        cache_read: "0.0003",
+        base_total: "0.02305",
+        total: "0.02305",
+      },
+    });
+    const inputLabel = [...tooltip.querySelectorAll("span")].find(
+      (node) => node.textContent === "logs.billingDetails.input"
+    );
+    const inputRow = inputLabel?.parentElement?.parentElement;
+    expect(inputRow?.textContent).toContain("$0.013000");
+    expect(inputRow?.textContent).not.toContain(" / 1M");
+    expect(tooltip.textContent).not.toMatch(/\([\d.]+x\)/);
+    for (const cost of ["$0.003750", "$0.006000", "$0.000300", "$0.023050"]) {
+      expect(tooltip.textContent).toContain(cost);
+    }
+    expect(tooltip.textContent).toContain("@ $3.75 / 1M");
+    expect(tooltip.textContent).toContain("@ $6.00 / 1M");
+    expect(tooltip.textContent).toContain("@ $0.30 / 1M");
+    expect(tooltip.innerHTML).toContain(">5m<");
+    expect(tooltip.innerHTML).toContain(">1h<");
+  });
+
+  test("shows the true zero input token price when the charged input bucket contains fees", () => {
+    const tooltip = renderCostTooltipWithLog({
+      inputTokens: 1000,
+      cacheReadInputTokens: 1000,
+      costUsd: "0.0103",
+      costBreakdown: {
+        ...baseBreakdown,
+        input: "0.01",
+        input_token_cost: "0",
+        cache_read: "0.0003",
+        base_total: "0.0103",
+        total: "0.0103",
+      },
+    });
+    expect(tooltip.textContent).toContain("@ $0.00 / 1M");
+    expect(tooltip.textContent).toContain("$0.010000");
+    expect(tooltip.textContent).not.toContain("@ $10.00 / 1M");
+    expect(tooltip.textContent).not.toMatch(/\([\d.]+x\)/);
+  });
+
+  test("preserves legacy mixed-TTL aggregate cost without inventing per-TTL prices", () => {
+    const tooltip = renderCostTooltipWithLog({
+      inputTokens: 1000,
+      cacheCreationInputTokens: 2000,
+      cacheCreation5mInputTokens: 1000,
+      cacheCreation1hInputTokens: 1000,
+      cacheTtlApplied: "mixed",
+      costBreakdown: {
+        ...baseBreakdown,
+        cache_creation: "0.00325",
+        base_total: "0.00425",
+        total: "0.00425",
+      },
+    });
+    expect(tooltip.textContent).toContain("$0.003250");
+    expect(tooltip.textContent).not.toContain("$0.001625");
+    expect(tooltip.innerHTML).not.toContain(">5m<");
+    expect(tooltip.innerHTML).not.toContain(">1h<");
+    expect(tooltip.textContent).not.toMatch(/\([\d.]+x\)/);
+  });
+
+  test("derives legacy single-TTL pricing using aggregate-only token counts", () => {
+    const tooltip = renderCostTooltipWithLog({
+      inputTokens: 1000,
+      cacheCreationInputTokens: 500,
+      cacheTtlApplied: "1h",
+      costBreakdown: {
+        ...baseBreakdown,
+        cache_creation: "0.001",
+        base_total: "0.002",
+        total: "0.002",
+      },
+    });
+    expect(tooltip.textContent).toContain("(2x)");
+    expect(tooltip.textContent).toContain("@ $2.00 / 1M");
+    expect(tooltip.innerHTML).toContain(">1h<");
+    expect(tooltip.innerHTML).not.toContain(">5m<");
+  });
+
+  test("uses the billed cache remainder for both the unit price and ratio", () => {
+    const tooltip = renderCostTooltipWithLog({
+      inputTokens: 1000,
+      cacheCreationInputTokens: 500,
+      cacheCreation5mInputTokens: 200,
+      cacheTtlApplied: "5m",
+      costBreakdown: {
+        ...baseBreakdown,
+        cache_creation: "0.000625",
+        cache_creation_5m: "0.000625",
+        cache_creation_1h: "0",
+        base_total: "0.001625",
+        total: "0.001625",
+      },
+    });
+    expect(tooltip.textContent).toContain("(1.25x)");
+    expect(tooltip.textContent).toContain("@ $1.25 / 1M");
+    expect(tooltip.textContent).not.toContain("@ $3.13 / 1M");
+  });
+
+  test("does not turn missing or invalid cost buckets into free cache rates", () => {
+    const tooltip = renderCostTooltipWithLog({
+      inputTokens: 1000,
+      cacheCreationInputTokens: 2000,
+      cacheCreation5mInputTokens: 1000,
+      cacheCreation1hInputTokens: 1000,
+      cacheReadInputTokens: 1000,
+      cacheTtlApplied: "mixed",
+      costBreakdown: {
+        ...baseBreakdown,
+        cache_creation: "0.00325",
+        cache_creation_5m: "0.00125",
+        cache_read: "",
+      },
+    });
+    expect(tooltip.textContent).toContain("(1.25x)");
+    expect(tooltip.textContent).not.toContain("(0x)");
+    expect(tooltip.textContent).not.toContain("(2x)");
+    expect(tooltip.innerHTML).not.toContain(">1h<");
+    expect(tooltip.textContent).not.toContain("logs.billingDetails.cacheRead");
   });
 });
 

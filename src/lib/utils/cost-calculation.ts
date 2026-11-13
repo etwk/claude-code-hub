@@ -354,6 +354,8 @@ export function matchLongContextPricing(
 
 export interface CostBreakdown {
   input: number;
+  /** Input-token subtotal only; excludes request fees and input-image charges. */
+  input_token_cost: number;
   output: number;
   /** Aggregate of 5m + 1h cache creation cost (kept for Langfuse back-compat). */
   cache_creation: number;
@@ -493,23 +495,23 @@ export function calculateRequestCostBreakdown(
   // Input tokens -> input bucket
   // 注意：一旦请求的“输入上下文总量”超过阈值，供应商官方定价按整次请求的全量 token
   // 应用 long-context 价格，而不是仅对超过阈值的部分加价。
+  let inputTokenCost: Decimal;
   if (
     longContextPricing &&
     longContextPricing.inputCostPerToken != null &&
     usage.input_tokens != null
   ) {
-    inputBucket = inputBucket.add(
-      multiplyCost(usage.input_tokens, longContextPricing.inputCostPerToken)
-    );
+    inputTokenCost = multiplyCost(usage.input_tokens, longContextPricing.inputCostPerToken);
   } else if (
     longContextThresholdExceeded &&
     inputAboveThreshold != null &&
     usage.input_tokens != null
   ) {
-    inputBucket = inputBucket.add(multiplyCost(usage.input_tokens, inputAboveThreshold));
+    inputTokenCost = multiplyCost(usage.input_tokens, inputAboveThreshold);
   } else {
-    inputBucket = inputBucket.add(multiplyCost(usage.input_tokens, inputCostPerToken));
+    inputTokenCost = multiplyCost(usage.input_tokens, inputCostPerToken);
   }
+  inputBucket = inputBucket.add(inputTokenCost);
 
   // Output tokens -> output bucket
   // 与 input 相同：阈值判断基于整次请求的输入上下文，而不是 output bucket 自己的 token 数。
@@ -623,6 +625,7 @@ export function calculateRequestCostBreakdown(
 
   return {
     input: inputBucket.toDecimalPlaces(COST_SCALE).toNumber(),
+    input_token_cost: inputTokenCost.toDecimalPlaces(COST_SCALE).toNumber(),
     output: outputBucket.toDecimalPlaces(COST_SCALE).toNumber(),
     cache_creation: cacheCreationBucket.toDecimalPlaces(COST_SCALE).toNumber(),
     cache_creation_5m: cacheCreation5mBucket.toDecimalPlaces(COST_SCALE).toNumber(),

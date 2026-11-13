@@ -205,7 +205,7 @@ Changing the application image alone does not undo database migrations or trigge
 ### Requirements
 
 - Docker and Docker Compose (latest version recommended)
-- Optional (for local development): Node.js ≥ 22.15 (inbound zstd request-body decompression uses native `node:zlib` zstd), Bun ≥ 1.3
+- Optional (for local development): Node.js 22.23.4+ / 24.22.1+ / 26.12.1+ (inbound request-body decompression uses native `node:zlib`; these releases fix the Brotli decoder out-of-bounds write CVE-2026-111497), Bun ≥ 1.4.3
 
 ### 🚀 One-Click Deployment Script (✨ Recommended - Fully Automated)
 

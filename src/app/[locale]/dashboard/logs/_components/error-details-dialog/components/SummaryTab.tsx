@@ -25,6 +25,7 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Link } from "@/i18n/routing";
 import { cn, formatTokenAmount } from "@/lib/utils";
+import { formatCacheCostRatio, resolveCacheCostRatios } from "@/lib/utils/cache-cost-ratio";
 import { formatCurrency } from "@/lib/utils/currency";
 import { buildHedgeBillingTable } from "@/lib/utils/hedge-billing";
 import { resolveModelAuditDisplay } from "@/lib/utils/model-audit-display";
@@ -151,52 +152,57 @@ export function SummaryTab({
       ? t(getFake200ReasonKey(fake200Code, "fake200Reasons"))
       : null;
 
-  // Resolve per-TTL cache creation costs for display. Strategy:
-  //  1. Prefer the split fields (cache_creation_5m / _1h) written since the
-  //     breakdown split landed.
-  //  2. Legacy rows predate the split and only carry the aggregated
-  //     cache_creation. For mixed-TTL legacy rows we split the aggregate
-  //     proportionally by token count so neither row gets double-counted
-  //     and neither attribute zero. Pure-5m / pure-1h legacy rows route the
-  //     aggregate to the matching row.
-  const resolveCacheCreationSplit = () => {
-    if (!costBreakdown) return { fiveM: null as string | null, oneH: null as string | null };
+  // Match billing: only unassigned aggregate tokens fall back to the applied TTL.
+  const remainingCacheWriteTokens = Math.max(
+    0,
+    (cacheCreationInputTokens ?? 0) -
+      (cacheCreation5mInputTokens ?? 0) -
+      (cacheCreation1hInputTokens ?? 0)
+  );
+  const cacheWrite5mTokens =
+    (cacheCreation5mInputTokens ?? 0) + (cacheTtlApplied !== "1h" ? remainingCacheWriteTokens : 0);
+  const cacheWrite1hTokens =
+    (cacheCreation1hInputTokens ?? 0) + (cacheTtlApplied === "1h" ? remainingCacheWriteTokens : 0);
+  const showCacheWrite5m = cacheWrite5mTokens > 0;
+  const showCacheWrite1h = cacheWrite1hTokens > 0;
 
-    const has5m = costBreakdown.cache_creation_5m !== undefined;
-    const has1h = costBreakdown.cache_creation_1h !== undefined;
-    if (has5m || has1h) {
-      return {
-        fiveM: costBreakdown.cache_creation_5m ?? "0",
-        oneH: costBreakdown.cache_creation_1h ?? "0",
-      };
-    }
-
-    // Legacy: only aggregate cache_creation is available.
-    const aggregate = costBreakdown.cache_creation;
-    const aggregateNum = Number(aggregate);
-    if (!Number.isFinite(aggregateNum) || aggregateNum === 0) {
-      return { fiveM: "0", oneH: "0" };
-    }
-
-    const tokens5m = cacheCreation5mInputTokens ?? 0;
-    const tokens1h = cacheCreation1hInputTokens ?? 0;
-    if (cacheTtlApplied === "mixed" && tokens5m + tokens1h > 0) {
-      // Proportional split by token count (prices differ 1.25x vs 2x but for
-      // a post-hoc legacy display this approximation is close enough).
-      const total = tokens5m + tokens1h;
-      const share5m = (aggregateNum * tokens5m) / total;
-      const share1h = aggregateNum - share5m;
-      return { fiveM: share5m.toString(), oneH: share1h.toString() };
-    }
-
-    if (cacheTtlApplied === "1h") {
-      return { fiveM: "0", oneH: aggregate };
-    }
-    // Default / 5m case
-    return { fiveM: aggregate, oneH: "0" };
+  // A legacy aggregate cannot identify the individual prices of mixed TTLs.
+  const hasPerTtlCost =
+    costBreakdown?.cache_creation_5m !== undefined ||
+    costBreakdown?.cache_creation_1h !== undefined;
+  const storedCacheCost = (cost: string | undefined): string | null =>
+    typeof cost === "string" &&
+    cost.trim() !== "" &&
+    Number.isFinite(Number(cost)) &&
+    Number(cost) >= 0
+      ? cost
+      : null;
+  const cacheSplit = {
+    fiveM: storedCacheCost(
+      hasPerTtlCost
+        ? costBreakdown?.cache_creation_5m
+        : !showCacheWrite1h
+          ? costBreakdown?.cache_creation
+          : undefined
+    ),
+    oneH: storedCacheCost(
+      hasPerTtlCost
+        ? costBreakdown?.cache_creation_1h
+        : !showCacheWrite5m
+          ? costBreakdown?.cache_creation
+          : undefined
+    ),
   };
-
-  const cacheSplit = resolveCacheCreationSplit();
+  const cacheRatios = resolveCacheCostRatios({
+    costBreakdown,
+    inputTokens,
+    cacheWrite5mTokens,
+    cacheWrite1hTokens,
+    cacheReadTokens: cacheReadInputTokens,
+  });
+  const cacheWrite5mRatio = formatCacheCostRatio(cacheRatios.cacheWrite5m);
+  const cacheWrite1hRatio = formatCacheCostRatio(cacheRatios.cacheWrite1h);
+  const cacheReadRatio = formatCacheCostRatio(cacheRatios.cacheRead);
 
   return (
     <div className="space-y-6">
@@ -444,18 +450,14 @@ export function SummaryTab({
               </div>
 
               {/* Cache Write 5m */}
-              {((cacheCreation5mInputTokens ?? 0) > 0 ||
-                ((cacheCreationInputTokens ?? 0) > 0 && cacheTtlApplied !== "1h")) && (
+              {showCacheWrite5m && (
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">{t("billingDetails.cacheWrite5m")}:</span>
                   <span className="font-mono">
-                    {formatTokenAmount(
-                      (cacheCreation5mInputTokens ?? 0) > 0
-                        ? cacheCreation5mInputTokens
-                        : cacheCreationInputTokens
-                    )}{" "}
-                    {t("billingDetails.unit.tokens")}{" "}
-                    <span className="text-orange-600">(1.25x)</span>
+                    {formatTokenAmount(cacheWrite5mTokens)} {t("billingDetails.unit.tokens")}
+                    {cacheWrite5mRatio && (
+                      <span className="ml-1 text-orange-600">({cacheWrite5mRatio})</span>
+                    )}
                     {costBreakdown && cacheSplit.fiveM !== null ? (
                       <span className="ml-3 text-muted-foreground">
                         {formatCurrency(cacheSplit.fiveM, "USD", 6)}
@@ -466,17 +468,14 @@ export function SummaryTab({
               )}
 
               {/* Cache Write 1h */}
-              {((cacheCreation1hInputTokens ?? 0) > 0 ||
-                ((cacheCreationInputTokens ?? 0) > 0 && cacheTtlApplied === "1h")) && (
+              {showCacheWrite1h && (
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">{t("billingDetails.cacheWrite1h")}:</span>
                   <span className="font-mono">
-                    {formatTokenAmount(
-                      (cacheCreation1hInputTokens ?? 0) > 0
-                        ? cacheCreation1hInputTokens
-                        : cacheCreationInputTokens
-                    )}{" "}
-                    {t("billingDetails.unit.tokens")} <span className="text-orange-600">(2x)</span>
+                    {formatTokenAmount(cacheWrite1hTokens)} {t("billingDetails.unit.tokens")}
+                    {cacheWrite1hRatio && (
+                      <span className="ml-1 text-orange-600">({cacheWrite1hRatio})</span>
+                    )}
                     {costBreakdown && cacheSplit.oneH !== null ? (
                       <span className="ml-3 text-muted-foreground">
                         {formatCurrency(cacheSplit.oneH, "USD", 6)}
@@ -491,8 +490,10 @@ export function SummaryTab({
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">{t("billingDetails.cacheRead")}:</span>
                   <span className="font-mono">
-                    {formatTokenAmount(cacheReadInputTokens)} {t("billingDetails.unit.tokens")}{" "}
-                    <span className="text-emerald-600">(0.1x)</span>
+                    {formatTokenAmount(cacheReadInputTokens)} {t("billingDetails.unit.tokens")}
+                    {cacheReadRatio && (
+                      <span className="ml-1 text-emerald-600">({cacheReadRatio})</span>
+                    )}
                     {costBreakdown ? (
                       <span className="ml-3 text-muted-foreground">
                         {formatCurrency(costBreakdown.cache_read, "USD", 6)}

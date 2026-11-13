@@ -19,6 +19,7 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import type { LogsTableColumn } from "@/lib/column-visibility";
 import { cn, formatTokenAmount } from "@/lib/utils";
+import { formatCacheCostRatio, resolveCacheCostRatios } from "@/lib/utils/cache-cost-ratio";
 import { copyTextToClipboard } from "@/lib/utils/clipboard";
 import type { CurrencyCode } from "@/lib/utils/currency";
 import { formatCurrency } from "@/lib/utils/currency";
@@ -161,6 +162,28 @@ export function UsageLogsTable({
                     : Number(actualCostMultiplier);
                 const hasCostBadge =
                   multiplier != null && Number.isFinite(multiplier) && multiplier !== 1;
+                const remainingCacheWriteTokens = Math.max(
+                  0,
+                  (log.cacheCreationInputTokens ?? 0) -
+                    (log.cacheCreation5mInputTokens ?? 0) -
+                    (log.cacheCreation1hInputTokens ?? 0)
+                );
+                const cacheWrite5mTokens =
+                  (log.cacheCreation5mInputTokens ?? 0) +
+                  (log.cacheTtlApplied !== "1h" ? remainingCacheWriteTokens : 0);
+                const cacheWrite1hTokens =
+                  (log.cacheCreation1hInputTokens ?? 0) +
+                  (log.cacheTtlApplied === "1h" ? remainingCacheWriteTokens : 0);
+                const cacheRatios = resolveCacheCostRatios({
+                  costBreakdown: log.costBreakdown,
+                  inputTokens: log.inputTokens,
+                  cacheWrite5mTokens,
+                  cacheWrite1hTokens,
+                  cacheReadTokens: log.cacheReadInputTokens,
+                });
+                const cacheWrite5mRatio = formatCacheCostRatio(cacheRatios.cacheWrite5m);
+                const cacheWrite1hRatio = formatCacheCostRatio(cacheRatios.cacheWrite1h);
+                const cacheReadRatio = formatCacheCostRatio(cacheRatios.cacheRead);
                 const displayedSourceSessionIds = (
                   log.sourceSessionIds?.length ? log.sourceSessionIds : [log.sourceSessionId]
                 ).filter((id): id is string => Boolean(id));
@@ -387,26 +410,8 @@ export function UsageLogsTable({
                           </TooltipTrigger>
                           <TooltipContent align="end" className="text-xs space-y-1">
                             <div className="font-medium">{t("logs.columns.cacheWrite")}</div>
-                            <div className="pl-2">
-                              5m:{" "}
-                              {formatTokenAmount(
-                                (log.cacheCreation5mInputTokens ?? 0) > 0
-                                  ? log.cacheCreation5mInputTokens
-                                  : log.cacheTtlApplied !== "1h"
-                                    ? log.cacheCreationInputTokens
-                                    : 0
-                              )}
-                            </div>
-                            <div className="pl-2">
-                              1h:{" "}
-                              {formatTokenAmount(
-                                (log.cacheCreation1hInputTokens ?? 0) > 0
-                                  ? log.cacheCreation1hInputTokens
-                                  : log.cacheTtlApplied === "1h"
-                                    ? log.cacheCreationInputTokens
-                                    : 0
-                              )}
-                            </div>
+                            <div className="pl-2">5m: {formatTokenAmount(cacheWrite5mTokens)}</div>
+                            <div className="pl-2">1h: {formatTokenAmount(cacheWrite1hTokens)}</div>
                             <div className="font-medium mt-1">{t("logs.columns.cacheRead")}</div>
                             <div className="pl-2">
                               {formatTokenAmount(log.cacheReadInputTokens)}
@@ -492,22 +497,25 @@ export function UsageLogsTable({
                                 {t("logs.billingDetails.output")}:{" "}
                                 {formatTokenAmount(log.outputTokens)} tokens
                               </div>
-                              {(log.cacheCreation5mInputTokens ?? 0) > 0 && (
+                              {cacheWrite5mTokens > 0 && (
                                 <div>
                                   {t("logs.billingDetails.cacheWrite5m")}:{" "}
-                                  {formatTokenAmount(log.cacheCreation5mInputTokens)} tokens (1.25x)
+                                  {formatTokenAmount(cacheWrite5mTokens)} tokens
+                                  {cacheWrite5mRatio && ` (${cacheWrite5mRatio})`}
                                 </div>
                               )}
-                              {(log.cacheCreation1hInputTokens ?? 0) > 0 && (
+                              {cacheWrite1hTokens > 0 && (
                                 <div>
                                   {t("logs.billingDetails.cacheWrite1h")}:{" "}
-                                  {formatTokenAmount(log.cacheCreation1hInputTokens)} tokens (2x)
+                                  {formatTokenAmount(cacheWrite1hTokens)} tokens
+                                  {cacheWrite1hRatio && ` (${cacheWrite1hRatio})`}
                                 </div>
                               )}
                               {(log.cacheReadInputTokens ?? 0) > 0 && (
                                 <div>
                                   {t("logs.billingDetails.cacheRead")}:{" "}
-                                  {formatTokenAmount(log.cacheReadInputTokens)} tokens (0.1x)
+                                  {formatTokenAmount(log.cacheReadInputTokens)} tokens
+                                  {cacheReadRatio && ` (${cacheReadRatio})`}
                                 </div>
                               )}
                               {hasCostBadge && multiplier != null && (

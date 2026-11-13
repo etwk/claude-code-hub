@@ -4,8 +4,13 @@
  * All cost values are Decimal strings for precision.
  */
 export interface StoredCostBreakdown {
-  /** Base input cost (no multiplier) */
+  /** Base input bucket, including request fees and input-image charges (no multiplier). */
   input: string;
+  /**
+   * Base cost of usage.input_tokens only, excluding request fees and input images.
+   * Optional for historical rows, where token-only input pricing is unknown.
+   */
+  input_token_cost?: string;
   /** Base output cost (no multiplier) */
   output: string;
   /**
