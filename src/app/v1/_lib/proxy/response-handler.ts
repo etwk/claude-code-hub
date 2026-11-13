@@ -6899,6 +6899,7 @@ async function updateRequestCostFromUsage(
       // holds even when the caller passes NaN / Infinity / negative values.
       storedBreakdown = {
         input: String(breakdown.input),
+        input_token_cost: String(breakdown.input_token_cost),
         output: String(breakdown.output),
         cache_creation: String(breakdown.cache_creation),
         cache_creation_5m: String(breakdown.cache_creation_5m),

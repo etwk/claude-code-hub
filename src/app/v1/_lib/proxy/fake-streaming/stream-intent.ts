@@ -1,3 +1,4 @@
+import { getGeminiModelAction } from "@/app/v1/_lib/gemini/model";
 import { isSystemOneEndpointPath } from "../endpoint-paths";
 import type { ClientFormat } from "../format-mapper";
 
@@ -33,7 +34,7 @@ function bodyStreamFlag(body: Record<string, unknown> | null): boolean {
 export function detectClientStreamIntent(input: StreamIntentInputs): boolean {
   if (isSystemOneEndpointPath(input.pathname)) return false;
   if (isGeminiFamily(input.format)) {
-    if (input.pathname.includes(":streamGenerateContent")) return true;
+    if (getGeminiModelAction(input.pathname) === "streamgeneratecontent") return true;
     if (hasAltSse(input.search)) return true;
     return bodyStreamFlag(input.body);
   }
@@ -56,26 +57,17 @@ function hasAltSse(search: string): boolean {
   }
 }
 
-/**
- * Produce a non-stream variant of the request inputs without mutating the
- * originals. Used when the client wants a stream but fake streaming wants to
- * call upstream with a buffered, non-stream attempt.
- */
-export function cloneRequestForInternalNonStreamAttempt(
-  input: StreamIntentInputs
-): StreamIntentInputs {
-  if (isGeminiFamily(input.format)) {
-    const newPath = input.pathname.replace(":streamGenerateContent", ":generateContent");
-    const newSearch = stripAltSse(input.search);
-    const newBody = cloneBodyWithoutStreamFlag(input.body);
-    return { format: input.format, pathname: newPath, search: newSearch, body: newBody };
-  }
-
+/** Mutate only the streaming field; return the corresponding URL transport mode. */
+export function applyNonStreamRequestMode(input: StreamIntentInputs): StreamIntentInputs {
+  const gemini = isGeminiFamily(input.format);
+  if (input.body !== null && (!gemini || "stream" in input.body)) input.body.stream = false;
   return {
-    format: input.format,
-    pathname: input.pathname,
-    search: input.search,
-    body: cloneBodyWithStreamFalse(input.body),
+    ...input,
+    pathname:
+      gemini && getGeminiModelAction(input.pathname) === "streamgeneratecontent"
+        ? input.pathname.replace(/:streamGenerateContent(\/?)$/i, ":generateContent$1")
+        : input.pathname,
+    search: gemini ? stripAltSse(input.search) : input.search,
   };
 }
 
@@ -100,21 +92,4 @@ function stripAltSse(search: string): string {
   } catch {
     return search;
   }
-}
-
-function cloneBodyWithStreamFalse(
-  body: Record<string, unknown> | null
-): Record<string, unknown> | null {
-  if (body === null) return null;
-  return { ...body, stream: false };
-}
-
-function cloneBodyWithoutStreamFlag(
-  body: Record<string, unknown> | null
-): Record<string, unknown> | null {
-  if (body === null) return null;
-  if (!("stream" in body)) {
-    return { ...body };
-  }
-  return { ...body, stream: false };
 }

@@ -180,7 +180,6 @@ function createSession(): ProxySession {
     originalFormat: "claude",
     providerType: null,
     originalModelName: null,
-    originalUrlPathname: null,
     providerChain: [],
     cacheTtlResolved: null,
     context1mApplied: false,
@@ -553,7 +552,6 @@ describe("ProxyForwarder - fake 200 HTML body", () => {
 
     const session = createSession();
     session.requestUrl = new URL("https://example.com/v1/responses");
-    session.originalUrlPathname = "/v1/responses";
     session.endpointPolicy = resolveEndpointPolicy("/v1/responses");
     session.setProvider(provider1);
 

@@ -44,11 +44,13 @@ jobs:
             VERSIONED_TAG="$SAFE_BRANCH_NAME-$SHORT_SHA"
           fi
 
-          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
-          echo "safe_branch_name=$SAFE_BRANCH_NAME" >> $GITHUB_OUTPUT
-          echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
-          echo "base_tag=$BASE_TAG" >> $GITHUB_OUTPUT
-          echo "versioned_tag=$VERSIONED_TAG" >> $GITHUB_OUTPUT
+          {
+            echo "branch_name=$BRANCH_NAME"
+            echo "safe_branch_name=$SAFE_BRANCH_NAME"
+            echo "short_sha=$SHORT_SHA"
+            echo "base_tag=$BASE_TAG"
+            echo "versioned_tag=$VERSIONED_TAG"
+          } >> "$GITHUB_OUTPUT"
 
           echo "Building from branch: $BRANCH_NAME"
           echo "Safe branch name: $SAFE_BRANCH_NAME"
@@ -58,7 +60,7 @@ jobs:
       - name: Setup Node.js for formatting
         uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version-file: .node-version
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2

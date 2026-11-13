@@ -303,6 +303,7 @@ describe("endpoint family -> provider routing matrix", () => {
       authState: null,
       getProvidersSnapshot: async () => [],
       getOriginalModel: () => originalModel,
+      getRoutingModel: () => originalModel,
       getCurrentModel: () => originalModel,
       clientRequestsContext1m: () => false,
     } as any;

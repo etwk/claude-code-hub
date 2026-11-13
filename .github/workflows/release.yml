@@ -58,14 +58,14 @@ jobs:
             MERGE_BASE=$(git merge-base HEAD^1 HEAD^2 2>/dev/null || echo "")
             if [ -n "$MERGE_BASE" ]; then
               # 获取从合并基准到 HEAD 的所有变更
-              CHANGED_FILES=$(git diff --name-only $MERGE_BASE..HEAD)
+              CHANGED_FILES=$(git diff --name-only "$MERGE_BASE..HEAD")
             else
               # 如果无法获取合并基准,使用第二个父提交
               CHANGED_FILES=$(git diff --name-only HEAD^2..HEAD)
             fi
           else
             # 普通提交:获取相对于上一个提交的变更
-            CHANGED_FILES=$(git diff --name-only HEAD~1..HEAD 2>/dev/null || git diff --name-only $(git rev-list --max-parents=0 HEAD)..HEAD)
+            CHANGED_FILES=$(git diff --name-only HEAD~1..HEAD 2>/dev/null || git diff --name-only "$(git rev-list --max-parents=0 HEAD)..HEAD")
           fi
 
           echo "Changed files:"
@@ -92,10 +92,10 @@ jobs:
 
           if [ "$SIGNIFICANT_CHANGES" = true ]; then
             echo "Significant changes detected, version bump needed"
-            echo "needs_bump=true" >> $GITHUB_OUTPUT
+            echo "needs_bump=true" >> "$GITHUB_OUTPUT"
           else
             echo "No significant changes, skipping version bump"
-            echo "needs_bump=false" >> $GITHUB_OUTPUT
+            echo "needs_bump=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Get current version
@@ -123,7 +123,7 @@ jobs:
           fi
 
           echo "Current version: $VERSION"
-          echo "current_version=$VERSION" >> $GITHUB_OUTPUT
+          echo "current_version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Calculate next version
         if: steps.check.outputs.needs_bump == 'true' || github.event_name == 'workflow_dispatch'
@@ -135,7 +135,7 @@ jobs:
           VERSION="${{ steps.get_version.outputs.current_version }}"
 
           # 移除可能存在的 prerelease 后缀以获取基础版本
-          BASE_VERSION=$(echo "$VERSION" | sed 's/-.*$//')
+          BASE_VERSION="${VERSION%%-*}"
 
           # 分割版本号
           IFS='.' read -r -a version_parts <<< "$BASE_VERSION"
@@ -181,9 +181,11 @@ jobs:
 
           echo "New version: $NEW_VERSION"
           echo "Is prerelease: $IS_PRERELEASE"
-          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
-          echo "new_tag=v$NEW_VERSION" >> $GITHUB_OUTPUT
-          echo "is_prerelease=$IS_PRERELEASE" >> $GITHUB_OUTPUT
+          {
+            echo "new_version=$NEW_VERSION"
+            echo "new_tag=v$NEW_VERSION"
+            echo "is_prerelease=$IS_PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Update VERSION file
         if: (steps.check.outputs.needs_bump == 'true' || github.event_name == 'workflow_dispatch') && steps.next_version.outputs.is_prerelease != 'true'
@@ -194,7 +196,7 @@ jobs:
         if: steps.check.outputs.needs_bump == 'true' || github.event_name == 'workflow_dispatch'
         uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version-file: .node-version
 
       - name: Setup Bun
         if: steps.check.outputs.needs_bump == 'true' || github.event_name == 'workflow_dispatch'
@@ -444,8 +446,8 @@ jobs:
           echo "Fetching dev branch..."
           if ! git fetch origin dev:dev 2>/dev/null; then
             echo "::warning::dev branch not found, skipping sync"
-            echo "sync_status=skipped" >> $GITHUB_OUTPUT
-            echo "sync_reason=dev branch not found" >> $GITHUB_OUTPUT
+            echo "sync_status=skipped" >> "$GITHUB_OUTPUT"
+            echo "sync_reason=dev branch not found" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -462,8 +464,8 @@ jobs:
           # 如果 dev 没有落后于 main，跳过同步
           if [ "$BEHIND_COUNT" -eq 0 ]; then
             echo "::notice::dev branch is already up to date with main"
-            echo "sync_status=skipped" >> $GITHUB_OUTPUT
-            echo "sync_reason=already up to date" >> $GITHUB_OUTPUT
+            echo "sync_status=skipped" >> "$GITHUB_OUTPUT"
+            echo "sync_reason=already up to date" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -479,19 +481,19 @@ jobs:
             echo "Pushing rebased dev branch..."
             if git push origin dev --force-with-lease; then
               echo "::notice::Successfully synced main to dev branch (rebased $AHEAD_COUNT commits)"
-              echo "sync_status=success" >> $GITHUB_OUTPUT
-              echo "ahead_count=$AHEAD_COUNT" >> $GITHUB_OUTPUT
+              echo "sync_status=success" >> "$GITHUB_OUTPUT"
+              echo "ahead_count=$AHEAD_COUNT" >> "$GITHUB_OUTPUT"
             else
               echo "::error::Failed to push rebased dev branch"
-              echo "sync_status=push_failed" >> $GITHUB_OUTPUT
-              echo "sync_reason=push failed, possibly due to concurrent changes" >> $GITHUB_OUTPUT
+              echo "sync_status=push_failed" >> "$GITHUB_OUTPUT"
+              echo "sync_reason=push failed, possibly due to concurrent changes" >> "$GITHUB_OUTPUT"
               exit 1
             fi
           else
             echo "::warning::Rebase failed due to conflicts, will trigger autofix"
             git rebase --abort
-            echo "sync_status=conflict" >> $GITHUB_OUTPUT
-            echo "sync_reason=merge conflicts detected" >> $GITHUB_OUTPUT
+            echo "sync_status=conflict" >> "$GITHUB_OUTPUT"
+            echo "sync_reason=merge conflicts detected" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 

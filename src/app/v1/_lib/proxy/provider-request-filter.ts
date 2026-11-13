@@ -29,5 +29,7 @@ export class ProxyProviderRequestFilter {
         providerId: session.provider.id,
       });
     }
+    // Do not swallow invalid model edits under the engine's fail-open policy.
+    session.synchronizeRequestModel();
   }
 }

@@ -5,11 +5,16 @@ import { act } from "react";
 import { describe, expect, test, vi } from "vitest";
 
 import type { UsageLogRow } from "@/repository/usage-logs";
+import type { StoredCostBreakdown } from "@/types/cost-breakdown";
 import type { RoutingTraceV1 } from "@/types/routing-trace";
 
 vi.mock("next-intl", () => ({
   useTranslations: () => (key: string, values?: Record<string, string | number>) =>
-    key === "budgetTokens" ? `${values?.count} tokens` : key,
+    key === "budgetTokens"
+      ? `${values?.count} tokens`
+      : key === "billingDetails.unit.tokens"
+        ? "tokens"
+        : key,
 }));
 
 const toastMocks = vi.hoisted(() => ({
@@ -65,6 +70,8 @@ vi.mock("./error-details-dialog", () => ({
   },
 }));
 
+import { MetadataTab } from "./error-details-dialog/components/MetadataTab";
+import { SummaryTab } from "./error-details-dialog/components/SummaryTab";
 import { UsageLogsTable } from "./usage-logs-table";
 
 function makeLog(overrides: Partial<UsageLogRow>): UsageLogRow {
@@ -702,4 +709,283 @@ describe("usage-logs-table pricing resolution", () => {
     expect(html).toContain("openai");
     expect(html).toContain("logs.billingDetails.pricingSource.priority_fallback");
   });
+
+  test("derives cache ratios from the stored cost breakdown instead of fixed values", () => {
+    const html = renderToStaticMarkup(
+      <UsageLogsTable
+        logs={[
+          makeLog({
+            id: 1,
+            costUsd: "0.045460",
+            inputTokens: 1244,
+            outputTokens: 282,
+            cacheReadInputTokens: 82560,
+            costBreakdown: {
+              input: "0.002488",
+              input_token_cost: "0.002488",
+              output: "0.001692",
+              cache_creation: "0",
+              cache_read: "0.04128",
+              base_total: "0.04546",
+              provider_multiplier: 1,
+              group_multiplier: 1,
+              total: "0.04546",
+            },
+          }),
+          makeLog({ id: 2, inputTokens: 100, cacheReadInputTokens: 500 }),
+        ]}
+        total={2}
+        page={1}
+        pageSize={50}
+        onPageChange={() => {}}
+        isPending={false}
+      />
+    );
+
+    expect(html).toContain("(0.25x)");
+    expect(html).not.toContain("(0.1x)");
+  });
+});
+
+describe("stored cache pricing across log surfaces", () => {
+  const surfaces = ["table", "summary", "metadata"] as const;
+
+  function costBreakdown(overrides: Partial<StoredCostBreakdown>): StoredCostBreakdown {
+    return {
+      input: "0.001",
+      input_token_cost: "0.001",
+      output: "0",
+      cache_creation: "0",
+      cache_read: "0",
+      base_total: "0.001",
+      provider_multiplier: 1,
+      group_multiplier: 1,
+      total: "0.001",
+      ...overrides,
+    };
+  }
+
+  function renderSurface(surface: (typeof surfaces)[number], overrides: Partial<UsageLogRow>) {
+    const log = makeLog({ inputTokens: 1000, ...overrides });
+    const container = document.createElement("div");
+    container.innerHTML = renderToStaticMarkup(
+      surface === "table" ? (
+        <UsageLogsTable
+          logs={[log]}
+          total={1}
+          page={1}
+          pageSize={50}
+          onPageChange={() => {}}
+          isPending={false}
+        />
+      ) : surface === "summary" ? (
+        <SummaryTab {...log} hasMessages={false} checkingMessages={false} />
+      ) : (
+        <MetadataTab {...log} hasMessages={false} checkingMessages={false} />
+      )
+    );
+    return container;
+  }
+
+  test.each(surfaces)("%s shows actual xAI cache-read pricing", (surface) => {
+    const container = renderSurface(surface, {
+      inputTokens: 1244,
+      outputTokens: 282,
+      cacheReadInputTokens: 82560,
+      costUsd: "0.04546",
+      costBreakdown: costBreakdown({
+        input: "0.002488",
+        input_token_cost: "0.002488",
+        output: "0.001692",
+        cache_read: "0.04128",
+        base_total: "0.04546",
+        total: "0.04546",
+      }),
+    });
+    expect(container.textContent).toContain("(0.25x)");
+    expect(container.textContent).not.toContain("(0.1x)");
+  });
+
+  test.each(surfaces)("%s excludes request fees and image extras from cache ratios", (surface) => {
+    for (const [input, total] of [
+      ["0.013", "0.02305"],
+      ["0.023", "0.03305"],
+    ]) {
+      const container = renderSurface(surface, {
+        cacheCreationInputTokens: 2000,
+        cacheCreation5mInputTokens: 1000,
+        cacheCreation1hInputTokens: 1000,
+        cacheReadInputTokens: 1000,
+        costUsd: total,
+        costBreakdown: costBreakdown({
+          input,
+          input_token_cost: "0.003",
+          cache_creation: "0.00975",
+          cache_creation_5m: "0.00375",
+          cache_creation_1h: "0.006",
+          cache_read: "0.0003",
+          base_total: total,
+          total,
+        }),
+      });
+      expect(container.textContent).toContain("(1.25x)");
+      expect(container.textContent).toContain("(2x)");
+      expect(container.textContent).toContain("(0.1x)");
+      expect(container.textContent).not.toContain("(0.02x)");
+      if (surface === "summary") {
+        expect(container.textContent).toContain(`$${Number(input).toFixed(6)}`);
+      }
+      expect(container.textContent).toContain(`$${Number(total).toFixed(6)}`);
+    }
+  });
+
+  test.each(surfaces)(
+    "%s preserves historical costs and tokens without guessed ratios",
+    (surface) => {
+      const container = renderSurface(surface, {
+        cacheCreationInputTokens: 2000,
+        cacheCreation5mInputTokens: 1000,
+        cacheCreation1hInputTokens: 1000,
+        cacheReadInputTokens: 1000,
+        costUsd: "0.02305",
+        costBreakdown: costBreakdown({
+          input: "0.013",
+          input_token_cost: undefined,
+          cache_creation: "0.00975",
+          cache_creation_5m: "0.00375",
+          cache_creation_1h: "0.006",
+          cache_read: "0.0003",
+          base_total: "0.02305",
+          total: "0.02305",
+        }),
+      });
+      const text = container.textContent?.replace(/\s+/g, "");
+      expect(text).toContain("billingDetails.cacheWrite5m:1Ktokens");
+      expect(text).toContain("billingDetails.cacheWrite1h:1Ktokens");
+      expect(text).toContain("billingDetails.cacheRead:1Ktokens");
+      expect(text).toContain("$0.023050");
+      expect(text).not.toMatch(/\([\d.]+x\)/);
+      if (surface === "summary") {
+        for (const cost of ["$0.013000", "$0.003750", "$0.006000", "$0.000300"]) {
+          expect(text).toContain(cost);
+        }
+      }
+    }
+  );
+
+  test.each(surfaces)(
+    "%s preserves explicitly free cache ratios with input provenance",
+    (surface) => {
+      const container = renderSurface(surface, {
+        cacheCreationInputTokens: 1000,
+        cacheCreation5mInputTokens: 1000,
+        cacheReadInputTokens: 1000,
+        costBreakdown: costBreakdown({
+          cache_creation_5m: "0",
+          cache_read: "0",
+        }),
+      });
+      const text = container.textContent?.replace(/\s+/g, "");
+      expect(text).toContain("billingDetails.cacheWrite5m:1Ktokens(0x)");
+      expect(text).toContain("billingDetails.cacheRead:1Ktokens(0x)");
+    }
+  );
+
+  test.each(surfaces)("%s attributes legacy aggregate writes to their single TTL", (surface) => {
+    const container = renderSurface(surface, {
+      cacheCreationInputTokens: 500,
+      cacheTtlApplied: "1h",
+      costBreakdown: costBreakdown({ cache_creation: "0.001" }),
+    });
+    const text = container.textContent?.replace(/\s+/g, "");
+    expect(text).toContain("billingDetails.cacheWrite1h:500tokens(2x)");
+    expect(text).not.toContain("billingDetails.cacheWrite5m:");
+  });
+
+  test.each(surfaces)("%s uses billed remainder tokens rather than a partial bucket", (surface) => {
+    const container = renderSurface(surface, {
+      cacheCreationInputTokens: 500,
+      cacheCreation5mInputTokens: 200,
+      cacheTtlApplied: "5m",
+      costBreakdown: costBreakdown({
+        cache_creation: "0.000625",
+        cache_creation_5m: "0.000625",
+        cache_creation_1h: "0",
+      }),
+    });
+    expect(container.textContent?.replace(/\s+/g, "")).toContain(
+      "billingDetails.cacheWrite5m:500tokens(1.25x)"
+    );
+  });
+
+  test.each(surfaces)("%s does not count an attributed bucket twice", (surface) => {
+    const container = renderSurface(surface, {
+      cacheCreationInputTokens: 500,
+      cacheCreation1hInputTokens: 500,
+      cacheTtlApplied: "5m",
+      costBreakdown: costBreakdown({
+        cache_creation: "0.001",
+        cache_creation_5m: "0",
+        cache_creation_1h: "0.001",
+      }),
+    });
+    expect(container.textContent?.replace(/\s+/g, "")).toContain(
+      "billingDetails.cacheWrite1h:500tokens(2x)"
+    );
+    expect(container.textContent).not.toContain("billingDetails.cacheWrite5m:");
+  });
+
+  test.each(surfaces)("%s leaves missing or invalid cache pricing unknown", (surface) => {
+    const container = renderSurface(surface, {
+      cacheCreationInputTokens: 2000,
+      cacheCreation5mInputTokens: 1000,
+      cacheCreation1hInputTokens: 1000,
+      cacheReadInputTokens: 1000,
+      cacheTtlApplied: "mixed",
+      costBreakdown: costBreakdown({
+        cache_creation: "0.00325",
+        cache_creation_5m: "0.00125",
+        cache_read: "",
+      }),
+    });
+    expect(container.textContent).toContain("(1.25x)");
+    expect(container.textContent).not.toContain("(0x)");
+    expect(container.textContent).not.toContain("(2x)");
+    expect(container.textContent).not.toContain("(0.1x)");
+  });
+
+  test.each(surfaces)(
+    "%s does not infer per-TTL rates from a mixed legacy aggregate",
+    (surface) => {
+      const container = renderSurface(surface, {
+        cacheCreationInputTokens: 2000,
+        cacheCreation5mInputTokens: 1000,
+        cacheCreation1hInputTokens: 1000,
+        cacheTtlApplied: "mixed",
+        costBreakdown: costBreakdown({ cache_creation: "0.00325" }),
+      });
+      expect(container.textContent).not.toMatch(/\([\d.]+x\)/);
+      if (surface === "summary") {
+        for (const ttl of ["5m", "1h"]) {
+          const label = [...container.querySelectorAll("span")].find(
+            (node) => node.textContent === `billingDetails.cacheWrite${ttl}:`
+          );
+          expect(label).toBeDefined();
+          expect(label?.parentElement?.querySelector(".ml-3")).toBeNull();
+        }
+      }
+    }
+  );
+
+  test.each(surfaces)(
+    "%s does not substitute hard-coded ratios without stored costs",
+    (surface) => {
+      const container = renderSurface(surface, {
+        cacheCreationInputTokens: 1000,
+        cacheReadInputTokens: 1000,
+        costBreakdown: null,
+      });
+      expect(container.textContent).not.toMatch(/\([\d.]+x\)/);
+    }
+  );
 });

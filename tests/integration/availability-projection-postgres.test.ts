@@ -23,7 +23,7 @@ type HistoricalRequest = {
 
 type EventRow = { requestId: number; eventId: string; published: boolean };
 
-run.sequential("availability projection bootstrap (PostgreSQL)", () => {
+run("availability projection bootstrap (PostgreSQL)", { concurrent: false }, () => {
   let admin: Sql;
   let client: Sql;
   let database: PostgresJsDatabase;

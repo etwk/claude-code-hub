@@ -240,6 +240,7 @@ describe("findReusable - cross-type model routing (#832)", () => {
       sessionId: "cross-type-1",
       shouldReuseProvider: () => true,
       getOriginalModel: () => "claude-opus-4-6",
+      getRoutingModel: () => "claude-opus-4-6",
       authState: null,
       getCurrentModel: () => null,
     } as any;
@@ -269,6 +270,7 @@ describe("findReusable - cross-type model routing (#832)", () => {
       sessionId: "cross-type-2",
       shouldReuseProvider: () => true,
       getOriginalModel: () => "claude-sonnet-4-5-20250929",
+      getRoutingModel: () => "claude-sonnet-4-5-20250929",
       authState: null,
       getCurrentModel: () => null,
     } as any;
@@ -294,6 +296,7 @@ describe("findReusable - cross-type model routing (#832)", () => {
       sessionId: "cross-type-3",
       shouldReuseProvider: () => true,
       getOriginalModel: () => "claude-opus-4-6",
+      getRoutingModel: () => "claude-opus-4-6",
       authState: null,
       getCurrentModel: () => null,
     } as any;
@@ -328,6 +331,7 @@ describe("findReusable - cross-type model routing (#832)", () => {
       sessionId: "cross-type-6",
       shouldReuseProvider: () => true,
       getOriginalModel: () => "claude-opus-4-5-20251001",
+      getRoutingModel: () => "claude-opus-4-5-20251001",
       authState: null,
       getCurrentModel: () => null,
     } as any;
@@ -354,6 +358,7 @@ describe("pickRandomProvider - cross-type model routing (#832)", () => {
       authState: null,
       getProvidersSnapshot: async () => providers,
       getOriginalModel: () => originalModel,
+      getRoutingModel: () => originalModel,
       getCurrentModel: () => originalModel,
       clientRequestsContext1m: () => false,
     } as any;

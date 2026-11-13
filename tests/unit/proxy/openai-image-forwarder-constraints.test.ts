@@ -25,6 +25,7 @@ vi.mock("@/lib/logger", () => ({
 
 vi.mock("@/lib/request-filter-engine", () => ({
   requestFilterEngine: {
+    applyForProvider: vi.fn(async () => {}),
     applyFinal: vi.fn(async () => {}),
   },
 }));
@@ -125,7 +126,6 @@ function createSession({
     originalFormat: "openai",
     providerType: null,
     originalModelName: null,
-    originalUrlPathname: null,
     providerChain: [],
     specialSettings: [],
     cacheTtlResolved: null,

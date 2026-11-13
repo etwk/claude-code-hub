@@ -190,7 +190,6 @@ function makeSession(signal: AbortSignal): ProxySession {
     messageContext: { id: 777, createdAt: new Date(), user, key, apiKey: "sk-test" },
     originalFormat: "response",
     originalModelName: "gpt-5.4-mini",
-    originalUrlPathname: "/v1/responses",
     affinity: {
       scopeTag: "test",
       chain: { head: { fp: "fp1" }, tail: [{ fp: "fp1" }] },

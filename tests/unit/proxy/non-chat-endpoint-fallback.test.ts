@@ -190,7 +190,6 @@ function createRawSession(pathname: string): ProxySession {
     originalFormat: "claude",
     providerType: null,
     originalModelName: null,
-    originalUrlPathname: null,
     providerChain: [],
     endpointPolicy: resolveEndpointPolicy(pathname),
     cacheTtlResolved: null,

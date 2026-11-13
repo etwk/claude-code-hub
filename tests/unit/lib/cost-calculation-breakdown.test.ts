@@ -3,7 +3,6 @@ import {
   calculateRequestCost,
   calculateRequestCostBreakdown,
   matchLongContextPricing,
-  type CostBreakdown,
 } from "@/lib/utils/cost-calculation";
 import type { ModelPriceData } from "@/types/model-price";
 
@@ -24,11 +23,16 @@ describe("calculateRequestCostBreakdown", () => {
       makePriceData()
     );
 
-    expect(result.input).toBeCloseTo(0.003, 6); // 1000 * 0.000003
-    expect(result.output).toBeCloseTo(0.0075, 6); // 500 * 0.000015
-    expect(result.cache_creation).toBe(0);
-    expect(result.cache_read).toBe(0);
-    expect(result.total).toBeCloseTo(0.0105, 6);
+    expect(result).toEqual({
+      input: 0.003,
+      input_token_cost: 0.003,
+      output: 0.0075,
+      cache_creation: 0,
+      cache_creation_5m: 0,
+      cache_creation_1h: 0,
+      cache_read: 0,
+      total: 0.0105,
+    });
   });
 
   test("cache creation (5m + 1h) + cache read", () => {
@@ -69,10 +73,12 @@ describe("calculateRequestCostBreakdown", () => {
       })
     );
 
+    expect(result.input_token_cost).toBe(0.0003);
     // input = 100 * 0.000003 + 500 * 0.00001
     expect(result.input).toBeCloseTo(0.0053, 6);
     // output = 50 * 0.000015 + 200 * 0.00005
     expect(result.output).toBeCloseTo(0.01075, 6);
+    expect(result.total).toBe(0.01605);
   });
 
   test("context1mApplied alone does not change breakdown without explicit long-context price fields", () => {
@@ -86,6 +92,7 @@ describe("calculateRequestCostBreakdown", () => {
     );
 
     expect(result.input).toBeCloseTo(0.9, 6);
+    expect(result.input_token_cost).toBe(0.9);
     expect(result.output).toBeCloseTo(0.0015, 6);
   });
 
@@ -102,6 +109,7 @@ describe("calculateRequestCostBreakdown", () => {
 
     // input: 300000 * 0.000006 = 1.8 (all tokens at above-200k rate when context > 200K)
     expect(result.input).toBeCloseTo(1.8, 4);
+    expect(result.input_token_cost).toBe(1.8);
   });
 
   test("uses priority long-context pricing fields in breakdown when available", () => {
@@ -129,6 +137,7 @@ describe("calculateRequestCostBreakdown", () => {
     );
 
     expect(result.input).toBe(1904007);
+    expect(result.input_token_cost).toBe(1904007);
     expect(result.output).toBe(140);
     expect(result.cache_read).toBe(7);
     expect(result.total).toBe(1904154);
@@ -159,6 +168,7 @@ describe("calculateRequestCostBreakdown", () => {
     );
 
     expect(result.input).toBe(1360005);
+    expect(result.input_token_cost).toBe(1360005);
     expect(result.output).toBe(100);
     expect(result.cache_read).toBe(5);
     expect(result.total).toBe(1360110);
@@ -184,6 +194,7 @@ describe("calculateRequestCostBreakdown", () => {
 
     expect(result).toEqual({
       input: 0,
+      input_token_cost: 0,
       output: 0,
       cache_creation: 0,
       cache_creation_5m: 0,
@@ -200,7 +211,41 @@ describe("calculateRequestCostBreakdown", () => {
     );
 
     expect(result.input).toBeCloseTo(0.01, 6);
+    expect(result.input_token_cost).toBe(0);
     expect(result.total).toBeCloseTo(0.01, 6);
+  });
+
+  test("request fees do not inflate the input-token subtotal", () => {
+    const result = calculateRequestCostBreakdown(
+      { input_tokens: 1000, cache_read_input_tokens: 1000 },
+      makePriceData({ input_cost_per_request: 0.01 })
+    );
+
+    expect(result).toEqual({
+      input: 0.013,
+      input_token_cost: 0.003,
+      output: 0,
+      cache_creation: 0,
+      cache_creation_5m: 0,
+      cache_creation_1h: 0,
+      cache_read: 0.0003,
+      total: 0.0133,
+    });
+  });
+
+  test("input-token subtotal uses priority pricing without request fees", () => {
+    const result = calculateRequestCostBreakdown(
+      { input_tokens: 1000 },
+      makePriceData({
+        input_cost_per_token_priority: 0.000006,
+        input_cost_per_request: 0.01,
+      }),
+      { priorityServiceTierApplied: true }
+    );
+
+    expect(result.input_token_cost).toBe(0.006);
+    expect(result.input).toBe(0.016);
+    expect(result.total).toBe(0.016);
   });
 
   test("cache_creation_input_tokens distributed by cache_ttl", () => {
@@ -249,6 +294,19 @@ describe("calculateRequestCostBreakdown", () => {
     });
 
     expect(cost.toNumber()).toBeCloseTo(1.634286, 6);
+    const breakdown = calculateRequestCostBreakdown(usage, priceData, {
+      longContextPricing: match?.pricing ?? null,
+    });
+    expect(breakdown).toEqual({
+      input: 1.632006,
+      input_token_cost: 1.632006,
+      output: 0.00225,
+      cache_creation: 0,
+      cache_creation_5m: 0,
+      cache_creation_1h: 0,
+      cache_read: 0.00003,
+      total: 1.634286,
+    });
   });
 
   test("long_context_pricing threshold is exclusive at exactly 272000 tokens", () => {

@@ -9,7 +9,7 @@ const circuitBreakerMocks = vi.hoisted(() => ({
 vi.mock("@/lib/circuit-breaker", () => circuitBreakerMocks);
 
 describe("ProxyProviderResolver.pickRandomProvider - model redirect", () => {
-  test("filters providers using original model (not redirected current model)", async () => {
+  test("filters providers using global routing model, not client original or previous outgoing model", async () => {
     const { ProxyProviderResolver } = await import("@/app/v1/_lib/proxy/provider-selector");
 
     vi.spyOn(ProxyProviderResolver as any, "filterByLimits").mockImplementation(
@@ -34,7 +34,8 @@ describe("ProxyProviderResolver.pickRandomProvider - model redirect", () => {
       originalFormat: "claude",
       authState: null,
       getProvidersSnapshot: async () => providers,
-      getOriginalModel: () => "claude-test",
+      getOriginalModel: () => "client-test",
+      getRoutingModel: () => "claude-test",
       getCurrentModel: () => "glm-test",
       clientRequestsContext1m: () => false,
     } as any;

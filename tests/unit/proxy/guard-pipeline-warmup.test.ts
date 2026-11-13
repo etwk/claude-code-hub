@@ -91,14 +91,6 @@ vi.mock("@/app/v1/_lib/proxy/provider-selector", () => ({
   },
 }));
 
-vi.mock("@/app/v1/_lib/proxy/provider-request-filter", () => ({
-  ProxyProviderRequestFilter: {
-    ensure: async () => {
-      callOrder.push("providerRequestFilter");
-    },
-  },
-}));
-
 vi.mock("@/app/v1/_lib/proxy/message-service", () => ({
   ProxyMessageService: {
     ensureContext: async () => {
@@ -220,7 +212,6 @@ describe("GuardPipeline：warmup 拦截点", () => {
     expect(callOrder).not.toContain("sensitive");
     expect(callOrder).not.toContain("rateLimit");
     expect(callOrder).not.toContain("requestFilter");
-    expect(callOrder).not.toContain("providerRequestFilter");
   });
 
   test("count_tokens 和 responses/compact 应通过 endpoint policy 选择同一 raw preset", async () => {

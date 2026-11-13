@@ -26,9 +26,14 @@ import type { ActionResult } from "@/lib/api-client/v1/actions/types";
 import { getUsageLogsBatch } from "@/lib/api-client/v1/actions/usage-logs";
 import type { LogsTableColumn } from "@/lib/column-visibility";
 import { cn, formatTokenAmount } from "@/lib/utils";
+import {
+  formatCacheCostRatio,
+  resolveCacheCostRatios,
+  resolveInputTokenUnitPrice,
+} from "@/lib/utils/cache-cost-ratio";
 import { copyTextToClipboard } from "@/lib/utils/clipboard";
 import type { CurrencyCode } from "@/lib/utils/currency";
-import { Decimal, formatCurrency, toDecimal } from "@/lib/utils/currency";
+import { formatCurrency, toDecimal } from "@/lib/utils/currency";
 import { buildHedgeBillingTable } from "@/lib/utils/hedge-billing";
 import {
   calculateOutputRate,
@@ -49,6 +54,21 @@ import { ThinkingEffortDisplay } from "./thinking-effort-display";
 
 const BATCH_SIZE = 50;
 const ROW_HEIGHT = 52; // Estimated row height in pixels
+
+function resolveCacheWriteTokens(log: UsageLogRow) {
+  const remaining = Math.max(
+    0,
+    (log.cacheCreationInputTokens ?? 0) -
+      (log.cacheCreation5mInputTokens ?? 0) -
+      (log.cacheCreation1hInputTokens ?? 0)
+  );
+  return {
+    cacheWrite5mTokens:
+      (log.cacheCreation5mInputTokens ?? 0) + (log.cacheTtlApplied !== "1h" ? remaining : 0),
+    cacheWrite1hTokens:
+      (log.cacheCreation1hInputTokens ?? 0) + (log.cacheTtlApplied === "1h" ? remaining : 0),
+  };
+}
 
 export type LogsFetchFn = (
   params: VirtualizedLogsTableFilters & {
@@ -316,6 +336,14 @@ export function VirtualizedLogsTable({
     const title = t("logs.details.billingDetails.title");
     const totalCostLabel = t("logs.billingDetails.totalCost");
     const amountClassName = "font-mono tabular-nums text-right";
+    const { cacheWrite5mTokens, cacheWrite1hTokens } = resolveCacheWriteTokens(log);
+    const cacheRatios = resolveCacheCostRatios({
+      costBreakdown: log.costBreakdown,
+      inputTokens: log.inputTokens,
+      cacheWrite5mTokens,
+      cacheWrite1hTokens,
+      cacheReadTokens: log.cacheReadInputTokens,
+    });
     const headerChip = log.context1mApplied ? (
       <Badge
         variant="outline"
@@ -325,82 +353,37 @@ export function VirtualizedLogsTable({
       </Badge>
     ) : null;
 
-    const resolveCacheCreationRows = () => {
+    const resolveCacheCreationRows = (): Array<{
+      amount: string | undefined;
+      tokens: number;
+      ttl?: "5m" | "1h";
+    }> => {
       const breakdown = log.costBreakdown;
-      if (!breakdown) {
-        return [] as Array<{
-          amount: string;
-          tokens: number | null | undefined;
-          ttl?: "5m" | "1h";
-        }>;
-      }
+      if (!breakdown) return [];
 
-      const tokens5m = log.cacheCreation5mInputTokens ?? 0;
-      const tokens1h = log.cacheCreation1hInputTokens ?? 0;
-      const totalCacheTokens = log.cacheCreationInputTokens;
       const has5m = breakdown.cache_creation_5m !== undefined;
       const has1h = breakdown.cache_creation_1h !== undefined;
       if (has5m || has1h) {
         return [
-          {
-            amount: breakdown.cache_creation_5m ?? "0",
-            tokens: tokens5m > 0 ? tokens5m : log.cacheTtlApplied !== "1h" ? totalCacheTokens : 0,
-            ttl: "5m" as const,
-          },
-          {
-            amount: breakdown.cache_creation_1h ?? "0",
-            tokens: tokens1h > 0 ? tokens1h : log.cacheTtlApplied === "1h" ? totalCacheTokens : 0,
-            ttl: "1h" as const,
-          },
+          { amount: breakdown.cache_creation_5m, tokens: cacheWrite5mTokens, ttl: "5m" },
+          { amount: breakdown.cache_creation_1h, tokens: cacheWrite1hTokens, ttl: "1h" },
         ];
       }
 
       const aggregate = toDecimal(breakdown.cache_creation);
-      if (!aggregate || aggregate.lte(0)) {
-        return [];
-      }
+      if (!aggregate || aggregate.lte(0)) return [];
 
-      if (log.cacheTtlApplied === "mixed" && tokens5m + tokens1h > 0) {
-        const totalTokens = new Decimal(tokens5m + tokens1h);
-        const fiveMShare = aggregate.mul(tokens5m).div(totalTokens);
-        return [
-          {
-            amount: fiveMShare.toString(),
-            tokens: tokens5m,
-            ttl: "5m" as const,
-          },
-          {
-            amount: aggregate.minus(fiveMShare).toString(),
-            tokens: tokens1h,
-            ttl: "1h" as const,
-          },
-        ];
+      // Preserve a legacy aggregate without inventing prices for its individual TTLs.
+      if (cacheWrite5mTokens > 0 && cacheWrite1hTokens === 0 && log.cacheTtlApplied === "5m") {
+        return [{ amount: aggregate.toString(), tokens: cacheWrite5mTokens, ttl: "5m" }];
       }
-
-      if (log.cacheTtlApplied === "1h") {
-        return [
-          {
-            amount: aggregate.toString(),
-            tokens: tokens1h > 0 ? tokens1h : totalCacheTokens,
-            ttl: "1h" as const,
-          },
-        ];
+      if (cacheWrite1hTokens > 0 && cacheWrite5mTokens === 0) {
+        return [{ amount: aggregate.toString(), tokens: cacheWrite1hTokens, ttl: "1h" }];
       }
-
-      if (log.cacheTtlApplied === "5m") {
-        return [
-          {
-            amount: aggregate.toString(),
-            tokens: tokens5m > 0 ? tokens5m : totalCacheTokens,
-            ttl: "5m" as const,
-          },
-        ];
-      }
-
       return [
         {
           amount: aggregate.toString(),
-          tokens: totalCacheTokens,
+          tokens: cacheWrite5mTokens + cacheWrite1hTokens,
         },
       ];
     };
@@ -409,18 +392,28 @@ export function VirtualizedLogsTable({
       label: string,
       amount: string | null | undefined,
       tokens: number | null | undefined,
-      ttl?: "5m" | "1h"
+      options: {
+        ttl?: "5m" | "1h";
+        ratio?: number | null;
+        unitPrice?: number | null;
+      } = {}
     ) => {
       const parsedAmount = toDecimal(amount);
       if (!parsedAmount || parsedAmount.lte(0)) return null;
 
       const tokenCount = tokens ?? 0;
-      const unitPrice = tokenCount > 0 ? parsedAmount.mul(1_000_000).div(tokenCount) : null;
+      const unitPrice =
+        options.unitPrice !== undefined
+          ? toDecimal(options.unitPrice)?.mul(1_000_000)
+          : tokenCount > 0
+            ? parsedAmount.mul(1_000_000).div(tokenCount)
+            : null;
 
       return {
-        key: `${label}-${ttl ?? "default"}`,
+        key: `${label}-${options.ttl ?? "default"}`,
         label,
-        ttl,
+        ttl: options.ttl,
+        ratio: formatCacheCostRatio(options.ratio ?? null),
         unitPrice: unitPrice
           ? t("logs.billingDetails.unitPricePer1M", {
               price: formatCurrency(unitPrice, currencyCode, 2),
@@ -568,15 +561,26 @@ export function VirtualizedLogsTable({
 
     const cacheCreationRows = resolveCacheCreationRows();
     const costRows = [
-      createCostRow(t("logs.billingDetails.input"), log.costBreakdown.input, log.inputTokens),
+      createCostRow(t("logs.billingDetails.input"), log.costBreakdown.input, log.inputTokens, {
+        unitPrice: resolveInputTokenUnitPrice(log.costBreakdown, log.inputTokens),
+      }),
       createCostRow(t("logs.billingDetails.output"), log.costBreakdown.output, log.outputTokens),
       ...cacheCreationRows.map((row) =>
-        createCostRow(t("logs.columns.cacheWrite"), row.amount, row.tokens, row.ttl)
+        createCostRow(t("logs.columns.cacheWrite"), row.amount, row.tokens, {
+          ttl: row.ttl,
+          ratio:
+            row.ttl === "5m"
+              ? cacheRatios.cacheWrite5m
+              : row.ttl === "1h"
+                ? cacheRatios.cacheWrite1h
+                : (cacheRatios.cacheWrite5m ?? cacheRatios.cacheWrite1h),
+        })
       ),
       createCostRow(
         t("logs.billingDetails.cacheRead"),
         log.costBreakdown.cache_read,
-        log.cacheReadInputTokens
+        log.cacheReadInputTokens,
+        { ratio: cacheRatios.cacheRead }
       ),
     ].filter((row): row is NonNullable<typeof row> => row !== null);
 
@@ -624,6 +628,7 @@ export function VirtualizedLogsTable({
                   <div className="flex items-center gap-1.5 min-w-0 text-[11px] text-background/70">
                     <span>{row.label}</span>
                     {row.ttl ? renderTtlChip(row.ttl) : null}
+                    {row.ratio ? <span>({row.ratio})</span> : null}
                   </div>
                   {renderValueBlock({ primary: row.amount, secondary: row.unitPrice })}
                 </div>
@@ -840,6 +845,7 @@ export function VirtualizedLogsTable({
                       : [log.sourceSessionId]
                 ).filter((id): id is string => Boolean(id));
                 const _isWarmupSkipped = log.blockedBy === "warmup";
+                const { cacheWrite5mTokens, cacheWrite1hTokens } = resolveCacheWriteTokens(log);
                 return (
                   <div
                     key={log.id}
@@ -1166,24 +1172,10 @@ export function VirtualizedLogsTable({
                             <TooltipContent align="end" className="text-xs space-y-1">
                               <div className="font-medium">{t("logs.columns.cacheWrite")}</div>
                               <div className="pl-2">
-                                5m:{" "}
-                                {formatTokenAmount(
-                                  (log.cacheCreation5mInputTokens ?? 0) > 0
-                                    ? log.cacheCreation5mInputTokens
-                                    : log.cacheTtlApplied !== "1h"
-                                      ? log.cacheCreationInputTokens
-                                      : 0
-                                )}
+                                5m: {formatTokenAmount(cacheWrite5mTokens)}
                               </div>
                               <div className="pl-2">
-                                1h:{" "}
-                                {formatTokenAmount(
-                                  (log.cacheCreation1hInputTokens ?? 0) > 0
-                                    ? log.cacheCreation1hInputTokens
-                                    : log.cacheTtlApplied === "1h"
-                                      ? log.cacheCreationInputTokens
-                                      : 0
-                                )}
+                                1h: {formatTokenAmount(cacheWrite1hTokens)}
                               </div>
                               <div className="font-medium mt-1">{t("logs.columns.cacheRead")}</div>
                               <div className="pl-2">

@@ -6,6 +6,11 @@
 
 ## Unreleased
 
+### 安全
+
+- 同步上游 v0.9.8 的运行时与依赖安全更新：Docker 和本地版本文件固定 Node.js 26.12.1、Bun 1.4.3；
+  Node.js 最低安全版本为 22.23.4 / 24.22.1 / 26.12.1，修复鉴权前 Brotli 解压路径涉及的 CVE-2026-111497
+
 ### 新增
 
 - 原生支持 `POST /v1/systemone`：通过 OpenAI Compatible 供应商转发 TypeSafe JSON
@@ -25,9 +30,15 @@
 
 ### 优化
 
+- 使用记录根据已存储的输入与缓存成本推导实际缓存倍率，兼容 xAI 等不同价格规则；
+  单独记录输入 Token 成本，避免按次费用及图片费用污染输入单价与缓存倍率；
+  历史记录缺少输入 Token 成本或 TTL 分项成本时保留未知，不补成 0x 或按 Token 比例虚构分项价格
+- 配额总消费按独立重置边界批量聚合，每批最多 1000 个重置对象，用户配额查询并发上限为 6；
+  同值 API Key 的不同 ID 保留各自的重置时间与消费结果
 - 精简使用记录思考列与详情提示文案：统一五语言字段标签、Token 单位与悬浮说明，去除与请求/转发值重复的冗余提示
 - Langfuse trace 名称改为 `user:shortModel`，去掉供应商前缀
-- 按 Langfuse JS SDK v5 在 `propagateAttributes` 内创建 observation
+- 按 Langfuse JS SDK v6 在 `propagateAttributes` 内创建 observation；传播元数据按 JSON 编码后的 200 字符上限截断，
+  固定 OpenTelemetry API 1.9.0 以满足当前 SDK 的兼容范围
 - 大请求/响应体 1 MiB 截断，并在异步发送前快照，避免观测路径拖住完整 body
 
 ### 修复
@@ -42,6 +53,18 @@
 - 修复 GPT Image 新版本及 Flare / Sunburst 变体被误判为未知模型：统一按 `gpt-image-`
   家族前缀识别，生成与编辑请求可使用标准 GPT 图片参数，保留现有参数校验与模型访问控制
   （`gpt-image-2` 继续沿用既有能力透传例外，JSON / multipart 编辑请求不套用旧版 16 张图片上限）
+- 修复原生辅助端点跳过模型重定向：`/v1/messages/count_tokens`、`/v1/responses/compact`
+  及 remote compaction v2 的 `/v1/responses` 同样解析供应商别名；仍跳过请求过滤器与生成参数覆写，
+  未改写模型的请求保留原始字节与编码，改写时仅替换模型 token，避免工具 schema 大整数或小数精度丢失
+- 修复过滤器修改模型后路由、转发与计费状态不一致：区分客户端原始模型、全局过滤后的路由模型、
+  最终上游模型；供应商过滤器逐次应用，切商恢复全局基线，保留同供应商重试的签名与预算整流，
+  并在供应商及最终过滤后重申 fake streaming 的非流式上游约束
+- 修复原生 Gemini `models/{id}` 等资源名称无法命中裸模型白名单与重定向；拒绝请求体与 URL
+  的冲突模型身份，批量 embedding 及 countTokens 的已存在模型字段随 URL 一致改写或恢复，
+  不再向原生请求添加无关顶层 `model`；URL 模型身份正确解码，尾斜杠路径沿用相同校验与调度规则
+- 修复音频转写、翻译 multipart 被错误转为 JSON：从文本 part 提取模型并支持重定向与过滤，
+  保留文件二进制、文件名、part headers、重复字段及 boundary；未改写时复用原始请求字节，
+  强制释放请求内存时同步清除文本 metadata，避免后台持有已释放请求的 prompt
 - 网关返回给 API 客户端的消息统一为英文：不再按请求语言（默认 zh-CN）本地化认证、限额、
   本地容量与请求校验错误，翻译硬编码的中文错误、超时与敏感词拦截消息，并将默认错误规则的
   覆写消息改为英文（启动同步时更新未自定义的默认规则）；移除仅供网关使用的错误文案键
@@ -114,6 +137,14 @@
 - 修复 Anthropic 请求级拒绝（`stop_reason=refusal` 且无内容块）被流式内容门控判为 `empty_stream` 并伪造 502、
   重试切商并计入供应商熔断的问题：门控、Discovery 竞速、非流式空响应检测与 fake-streaming 校验统一把 refusal
   视为可交付结果原样透传；门控本地错误体与日志新增上游真实状态 `upstream_status_code` 与熔断计入标记 (#1491)
+
+### 安全
+
+- 修复 Node.js Brotli 解码越界写入漏洞 CVE-2026-111497（高危，可远程执行代码）：入站 `content-encoding: br`
+  请求体在鉴权前解压，生产镜像运行时固定为包含修复的 `node:26.12.1-trixie-slim`，`package.json` engines 收紧为
+  `^22.23.4 || ^24.22.1 || >=26.12.1`，CI 统一从 `.node-version` 读取 Node 版本；Bun 升级到 1.4.3
+- 前后端依赖全部升级到最新版本，包括 Next.js 16.4.2、React 19.3.1、undici 8.12.3、Hono 4.13.13、
+  Langfuse SDK 6、OpenTelemetry SDK 0.223、Vitest 5、Biome 2.6、happy-dom 21、@lobehub/ui 6 与 @lobehub/icons 6
 
 ---
 

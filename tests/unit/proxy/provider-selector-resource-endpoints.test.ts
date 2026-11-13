@@ -19,6 +19,7 @@ describe("ProxyProviderResolver.pickRandomProvider - resource endpoints without 
       authState: null,
       getProvidersSnapshot: async () => providers,
       getOriginalModel: () => "",
+      getRoutingModel: () => "",
       getCurrentModel: () => null,
       clientRequestsContext1m: () => false,
     } as any;

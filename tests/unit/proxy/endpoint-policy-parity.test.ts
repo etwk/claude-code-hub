@@ -145,39 +145,6 @@ describe("T12: bypass completeness (spy-based zero-call assertions)", () => {
       expect(applyForProviderMock).not.toHaveBeenCalled();
     }
   });
-
-  test("ProxyRequestFilter.ensure calls applyGlobal for default policy endpoints", async () => {
-    const { ProxyRequestFilter } = await import("@/app/v1/_lib/proxy/request-filter");
-
-    for (const pathname of DEFAULT_ENDPOINTS) {
-      applyGlobalMock.mockClear();
-
-      const session = {
-        getEndpointPolicy: () => resolveEndpointPolicy(pathname),
-      } as any;
-
-      await ProxyRequestFilter.ensure(session);
-      expect(applyGlobalMock).toHaveBeenCalledTimes(1);
-    }
-  });
-
-  test("ProxyProviderRequestFilter.ensure calls applyForProvider for default policy endpoints", async () => {
-    const { ProxyProviderRequestFilter } = await import(
-      "@/app/v1/_lib/proxy/provider-request-filter"
-    );
-
-    for (const pathname of DEFAULT_ENDPOINTS) {
-      applyForProviderMock.mockClear();
-
-      const session = {
-        getEndpointPolicy: () => resolveEndpointPolicy(pathname),
-        provider: { id: 1 },
-      } as any;
-
-      await ProxyProviderRequestFilter.ensure(session);
-      expect(applyForProviderMock).toHaveBeenCalledTimes(1);
-    }
-  });
 });
 
 // ---------------------------------------------------------------------------

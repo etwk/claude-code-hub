@@ -416,9 +416,54 @@ const CHAT_PIPELINE = [
   "messageContext", // Request logging
 ];
 
-// Minimal pipeline for count_tokens
-const COUNT_TOKENS_PIPELINE = ["auth", "version", "probe", "provider"];
+// Raw endpoints retain authorization and model checks, without generation filters.
+const RAW_PASSTHROUGH_PIPELINE = ["auth", "client", "model", "version", "probe", "provider"];
+const COUNT_TOKENS_PIPELINE = [
+  "auth", "client", "model", "version", "probe", "session", "provider", "messageContext",
+];
 ```
+
+#### Model identity and wire payloads
+
+The proxy keeps three distinct model identities:
+
+- **Original:** the client's model, canonicalized only for native Gemini resource names. User model
+  authorization and the primary `original` billing lookup use this immutable identity.
+- **Routing:** the model after global guard filters. Provider selection, provider model allowlists,
+  and fallback eligibility use this identity before provider-specific redirects.
+- **Current:** the model actually forwarded after provider guard filters, redirects and final filters.
+  The primary `redirected` billing lookup uses this identity. Existing missing-price fallback rules
+  remain unchanged.
+
+Each provider attempt restores the post-global body, headers and path before applying that provider's
+guard filters. The payload baseline is captured at the first forwarding attempt, after internal
+transport transformations such as fake streaming's non-stream request conversion. The routing model
+is captured immediately after global filters. Final filters synchronize the outgoing model and any
+native Gemini model path. Provider-local retry rectifications are replayed without carrying the
+failed provider's payload edits into another provider. Fake streaming's non-stream upstream
+requirement is reasserted after provider and final filters. Hedge winners retain their own current
+model and retry state.
+
+Model redirects are routing, not generation preprocessing. They also apply to
+`/v1/messages/count_tokens`, `/v1/responses/compact`, and remote compaction v2 requests sent to
+`/v1/responses`. These raw endpoints still bypass request filters and generation overrides. If no
+routing field changes, the original body bytes and encoding are retained. Changed JSON model tokens
+are replaced without reserializing unrelated fields, preserving numeric precision and formatting;
+stale encoding headers are removed.
+
+Native Gemini model resources such as `models/gemini-embedding-001` share the bare model ID used by
+allowlists and redirect rules. Supplied native model fields must agree with the URL identity on input.
+Redirects and model-changing filters keep the URL, existing top-level `model`, batch embedding
+`requests[].model`, and countTokens `generateContentRequest.model` aligned while preserving resource
+prefixes. They do not recursively rewrite user content or introduce absent top-level fields. OpenAI
+`/v1/models/{id}` metadata resources are not native Gemini: their existing opaque encoded IDs are
+preserved, including slash-qualified and fine-tuned model IDs.
+
+Audio `/v1/audio/transcriptions` and `/v1/audio/translations` multipart bodies have a text-only logical
+view for routing and filters; files remain opaque byte spans. Text rewrites preserve the original
+file bytes, filenames, per-part headers, repeated fields and boundary. Unchanged forms reuse their
+original buffer. Missing or ambiguous model parts and malformed framing fail explicitly rather than
+falling back to JSON. Compressed audio multipart is not accepted.
 
 ---
 

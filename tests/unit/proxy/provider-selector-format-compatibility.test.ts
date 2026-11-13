@@ -19,6 +19,7 @@ describe("ProxyProviderResolver.pickRandomProvider - format/providerType compati
       authState: null,
       getProvidersSnapshot: async () => providers,
       getOriginalModel: () => originalModel,
+      getRoutingModel: () => originalModel,
       getCurrentModel: () => originalModel,
       clientRequestsContext1m: () => false,
     } as any;
